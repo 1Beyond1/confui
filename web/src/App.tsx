@@ -107,6 +107,18 @@ export function App() {
   const [msg, setMsg] = useState("");
   const [view, setView] = useState<"main" | "settings">("main");
   const [dirty, setDirty] = useState(false);
+  const [fileChanged, setFileChanged] = useState(false);
+
+  useEffect(() => {
+    window.confui.onFileChanged(() => {
+      setFileChanged(true);
+    });
+  }, []);
+
+  async function reloadFile() {
+    setFileChanged(false);
+    if (activeFile) await openFile(activeFile);
+  }
 
   async function browse() {
     const f = await window.confui.selectFolder();
@@ -213,7 +225,7 @@ export function App() {
           <div style={S.topbarTitle}>
             {view === "settings" ? "AI Provider Settings" : active?.file || "Confui"}
           </div>
-          <div style={S.topbarActions}>
+          <div style={S.topbarActions}>{fileChanged && <button style={{ ...S.btnGhost, borderColor: C.warn, color: C.warn }} onClick={reloadFile}>⚠ File changed externally - Reload</button>}
             {msg && <span style={{ fontSize: 13, color: msg === "Saved" ? C.success : C.textSec }}>{msg}</span>}
             {busy && <div style={S.loading}><div style={S.spinner} /> Working...</div>}
             {view === "main" && active && (

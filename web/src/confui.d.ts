@@ -6,6 +6,7 @@ export interface ConfuiAPI {
   saveConfig: (root: string, file: string, value: unknown) => Promise<{ ok: boolean } | { error: string }>;
   getSettings: () => Promise<any>;
   setSettings: (settings: unknown) => Promise<{ ok: boolean }>;
+  onFileChanged: (callback: (data: { path: string }) => void) => void;
 }
 
 declare global {

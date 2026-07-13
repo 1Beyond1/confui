@@ -12,6 +12,8 @@ const api = {
   getSettings: () => ipcRenderer.invoke("confui:getSettings"),
   setSettings: (settings: unknown) =>
     ipcRenderer.invoke("confui:setSettings", settings),
+  onFileChanged: (callback: (data: { path: string }) => void) =>
+    ipcRenderer.on("confui:fileChanged", (_, data) => callback(data)),
 };
 
 contextBridge.exposeInMainWorld("confui", api);
