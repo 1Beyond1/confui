@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+.env
+.env.local
+settings.json
+
+.playwright-cli/
+
+.playwright-cli/
+kimi-design-language.md
+
+web/src/stitch/

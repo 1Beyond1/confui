@@ -1,0 +1,17 @@
+{
+  "name": "confui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Auto-detect config files in any project and edit them through a generated UI form.",
+  "workspaces": ["server", "web"],
+  "scripts": {
+    "dev:server": "npm -w server run dev",
+    "dev:web": "npm -w web run dev",
+    "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.6.3"
+  }
+}
