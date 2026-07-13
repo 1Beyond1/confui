@@ -4,14 +4,18 @@
   "private": true,
   "type": "module",
   "description": "Auto-detect config files in any project and edit them through a generated UI form.",
-  "workspaces": ["server", "web"],
+  "main": "out/main/main.js",
   "scripts": {
-    "dev:server": "npm -w server run dev",
-    "dev:web": "npm -w web run dev",
-    "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\""
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
     "typescript": "^5.6.3"
   }
 }

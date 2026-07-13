@@ -25,7 +25,7 @@ export function App() {
   async function scan() {
     setBusy(true); setMsg(""); setActive(null);
     try {
-      const r = await API("scan", { root });
+      const r = await window.confui.scanProject(root);
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "scan failed");
       setFiles(d.files || []);
@@ -36,7 +36,7 @@ export function App() {
   async function openFile(f: ConfigFile) {
     setBusy(true); setMsg("");
     try {
-      const r = await API("infer", { root, file: f.path });
+      const r = await window.confui.inferSchema(root, f.path);
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "infer failed");
       setActive(d);
@@ -51,7 +51,7 @@ export function App() {
     if (!active) return;
     setBusy(true); setMsg("");
     try {
-      const r = await API("save", { root, file: active.file, value: unflatten(values) });
+      const r = await window.confui.saveConfig(root, active.file, unflatten(values));
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "save failed");
       setMsg("Saved ✓");
@@ -82,7 +82,7 @@ export function App() {
           value={root}
           onInput={(e) => setRoot((e.target as HTMLInputElement).value)}
         />
-        <button style={S.btn} onClick={scan} disabled={busy || !root}>Scan</button>
+        <button style={S.btnGhost} onClick={async () => { const f = await window.confui.selectFolder(); if (f) setRoot(f); }}>Browse</button><button style={S.btn} onClick={scan} disabled={busy || !root}>Scan</button>
       </section>
 
       {msg && <div style={S.msg}>{msg}</div>}
@@ -188,9 +188,8 @@ function Widget({ field, value, onChange }: { field: FieldSpec; value: unknown; 
 function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [s, setS] = useState<AppSettings | null>(null);
   const [saved, setSaved] = useState("");
-  useEffect(() => { fetch("/api/settings").then((r) => r.json()).then(setS); }, []);
-  async function save() {
-    await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s) });
+  useEffect(() => { window.confui.getSettings().then(setS); }, []);
+  async function save() { await window.confui.setSettings(s);
     setSaved("Saved ✓");
   }
   if (!s) return <div style={S.panel}>Loading…</div>;
