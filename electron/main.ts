@@ -79,7 +79,7 @@ function registerIpcHandlers() {
         : undefined;
       const absPath = safeJoin(root, file);
       const cfg = { path: file, absPath, kind: file, size: 0 };
-      return await inferSchema(cfg, { ai, aiModel: settings.ai.model, readme: options?.readme });
+      return await inferSchema(cfg, { ai, aiModel: settings.ai.model, projectRoot: root, readme: options?.readme });
     } catch (e: any) {
       return { error: e.message };
     }

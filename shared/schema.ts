@@ -3,6 +3,8 @@
  * One source of truth, imported by both. This is the heart of easy_json.
  */
 
+export type ConfigFormat = "json" | "yaml" | "toml" | "env" | "ini" | "properties";
+
 export type FieldType =
   | "string"
   | "number"
@@ -18,6 +20,8 @@ export type FieldType =
 export type FieldSource =
   | "json-schema"
   | "known-template"
+  | "example"
+  | "readme"
   | "heuristic"
   | "ai";
 
@@ -69,6 +73,7 @@ export interface ConfigFile {
   absPath: string;
   kind: string;
   size: number;
+  format: ConfigFormat;
 }
 
 /** Persisted app settings. */

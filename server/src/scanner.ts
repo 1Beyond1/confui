@@ -1,6 +1,6 @@
 import { readdir, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
-import type { ConfigFile } from "../../shared/schema.ts";
+import type { ConfigFile, ConfigFormat } from "../../shared/schema.ts";
 
 /** Well-known config filenames that get rich field templates. */
 const KNOWN_FILES = new Set([
@@ -27,11 +27,24 @@ const IGNORE_DIRS = new Set([
   "target", "vendor", ".venv", "__pycache__",
 ]);
 
-function kindOf(name: string): string | null {
-  if (KNOWN_FILES.has(name)) return name;
-  if (name.endsWith(".json")) return "json";
-  if (name.endsWith(".jsonc")) return "jsonc";
-  if (name.endsWith(".json5")) return "json5";
+function kindOf(name: string): { kind: string; format: ConfigFormat } | null {
+  const lower = name.toLowerCase();
+  // Known configs (check first for rich templates)
+  if (KNOWN_FILES.has(name)) return { kind: name, format: "json" };
+  // JSON family
+  if (lower.endsWith(".json")) return { kind: "json", format: "json" };
+  if (lower.endsWith(".jsonc")) return { kind: "jsonc", format: "json" };
+  if (lower.endsWith(".json5")) return { kind: "json5", format: "json" };
+  // YAML
+  if (lower.endsWith(".yaml") || lower.endsWith(".yml")) return { kind: "yaml", format: "yaml" };
+  // TOML
+  if (lower.endsWith(".toml")) return { kind: "toml", format: "toml" };
+  // ENV
+  if (lower === ".env" || lower.endsWith(".env") || lower.startsWith(".env.")) return { kind: "env", format: "env" };
+  // INI / Conf
+  if (lower.endsWith(".ini") || lower.endsWith(".conf") || lower.endsWith(".cfg")) return { kind: "ini", format: "ini" };
+  // Properties
+  if (lower.endsWith(".properties")) return { kind: "properties", format: "properties" };
   return null;
 }
 
@@ -55,15 +68,13 @@ export async function scanProject(root: string, maxDepth = 5): Promise<ConfigFil
         await walk(join(dir, e.name), depth + 1);
       } else if (e.isFile()) {
         if (IGNORE_FILES.has(e.name)) continue;
-        const kind = kindOf(e.name);
-        if (!kind) continue;
+        const detected = kindOf(e.name); if (!detected) continue;
         try {
           const s = await stat(join(dir, e.name));
           results.push({
             path: relative(root, join(dir, e.name)),
             absPath: join(dir, e.name),
-            kind,
-            size: s.size,
+            kind: detected.kind, format: detected.format, size: s.size,
           });
         } catch {}
       }
