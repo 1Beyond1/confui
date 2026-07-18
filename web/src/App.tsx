@@ -75,6 +75,7 @@ export function App() {
   const [afterSaveAction, setAfterSaveAction] = useState<PendingAction>();
   const toastTimer = useRef<number>();
   const openSequence = useRef(0);
+  const mainContentRef = useRef<HTMLDivElement>(null);
 
   const changes = useMemo(() => schema ? collectChanges(schema.fields, values) : [], [schema, values]);
   const errors = useMemo(() => schema ? validationErrors(schema.fields, values) : new Map<string, string>(), [schema, values]);
@@ -137,6 +138,10 @@ export function App() {
     window.confui.setDirtyState(dirty || settingsDirty);
     return () => window.confui.setDirtyState(false);
   }, [dirty, settingsDirty]);
+
+  useEffect(() => {
+    mainContentRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [view, schema?.file, editorTab]);
 
   function notify(message: string, type: ToastType = "info"): void {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
@@ -359,6 +364,18 @@ export function App() {
     setValues((current) => ({ ...current, [fieldKey(field)]: value }));
   }
 
+  function forwardMainWheel(event: WheelEvent): void {
+    const scroller = mainContentRef.current;
+    const target = event.target;
+    const overFloatingBar = target instanceof Element
+      && Boolean(target.closest(".editor-savebar, .settings-savebar"));
+    if (!scroller || scroller.scrollHeight <= scroller.clientHeight) return;
+    if (scroller.contains(target as Node) && !overFloatingBar) return;
+    if (event.deltaX === 0 && event.deltaY === 0) return;
+    event.preventDefault();
+    scroller.scrollBy({ left: event.deltaX, top: event.deltaY });
+  }
+
   if (!settings) {
     return (
       <div class="app-loading">
@@ -431,7 +448,7 @@ export function App() {
         </nav>
       </aside>
 
-      <main class="main-shell">
+      <main class="main-shell" onWheel={forwardMainWheel}>
         <header class="topbar">
           <div class="topbar__title">
             {view === "home" ? <><span>开始</span><small>选择项目并识别配置</small></> : view === "settings" ? <><span>设置</span><small>供应商、安全与外观</small></> : schema ? <><span>{schema.kind}{dirty && <i class="title-dirty"/>}</span><small title={schema.file}>{schema.file}</small></> : <><span>{project?.name ?? "配置编辑器"}</span><small>选择一个配置文件</small></>}
@@ -461,7 +478,7 @@ export function App() {
           </div>
         )}
 
-        <div class="main-content">
+        <div ref={mainContentRef} class="main-content" role="region" aria-label="页面内容" tabIndex={0}>
           {view === "home" && (
             <HomePage
               root={rootInput}
