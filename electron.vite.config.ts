@@ -11,7 +11,9 @@ export default defineConfig({
   },
   preload: {
     build: {
-      lib: { entry: "electron/preload.ts" },
+      // Sandboxed Electron preload scripts execute as CommonJS even when the
+      // application package itself is ESM.
+      lib: { entry: "electron/preload.ts", formats: ["cjs"] },
       rollupOptions: { external: ["electron"] },
     },
   },

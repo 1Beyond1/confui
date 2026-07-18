@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "properties": {
+    "server": {
+      "type": "object",
+      "title": "服务",
+      "properties": {
+        "host": {
+          "type": "string",
+          "title": "监听地址",
+          "description": "服务绑定的本地或网络地址。"
+        },
+        "port": {
+          "type": "integer",
+          "title": "监听端口",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "enabled": {
+          "type": "boolean",
+          "title": "启用服务"
+        }
+      },
+      "required": ["host", "port"]
+    },
+    "themeColor": {
+      "type": "string",
+      "title": "主题色",
+      "format": "color"
+    },
+    "logLevel": {
+      "type": "string",
+      "title": "日志级别",
+      "enum": ["debug", "info", "warn", "error"]
+    },
+    "apiToken": {
+      "type": "string",
+      "title": "API Token",
+      "writeOnly": true
+    },
+    "features": {
+      "type": "array",
+      "title": "功能列表",
+      "items": { "type": "string" }
+    }
+  }
+}

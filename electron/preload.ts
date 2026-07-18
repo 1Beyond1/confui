@@ -1,19 +1,32 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type {
+  AppSettings,
+  ConfigChange,
+  ConfuiAPI,
+  FileChangedEvent,
+  FileVersion,
+  InferOptions,
+  SavePreview,
+} from "../shared/schema.ts";
 
-const api = {
-  selectFolder: (): Promise<string | null> => ipcRenderer.invoke("confui:selectFolder"),
-  scanProject: (root: string) => ipcRenderer.invoke("confui:scanProject", root),
-  inferSchema: (root: string, file: string, options?: { readme?: string }) =>
+const api: ConfuiAPI = {
+  selectFolder: () => ipcRenderer.invoke("confui:selectFolder"),
+  scanProject: (root: string, githubUrl?: string) => ipcRenderer.invoke("confui:scanProject", root, githubUrl),
+  inferSchema: (root: string, file: string, options?: InferOptions) =>
     ipcRenderer.invoke("confui:inferSchema", root, file, options),
-  readFile: (root: string, file: string) =>
-    ipcRenderer.invoke("confui:readFile", root, file),
-  saveConfig: (root: string, file: string, value: unknown) =>
-    ipcRenderer.invoke("confui:saveConfig", root, file, value),
+  previewSave: (root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion) =>
+    ipcRenderer.invoke("confui:previewSave", root, file, changes, expectedVersion),
+  saveConfig: (root: string, preview: SavePreview) =>
+    ipcRenderer.invoke("confui:saveConfig", root, preview),
   getSettings: () => ipcRenderer.invoke("confui:getSettings"),
-  setSettings: (settings: unknown) =>
-    ipcRenderer.invoke("confui:setSettings", settings),
-  onFileChanged: (callback: (data: { path: string }) => void) =>
-    ipcRenderer.on("confui:fileChanged", (_, data) => callback(data)),
+  setSettings: (settings: AppSettings) => ipcRenderer.invoke("confui:setSettings", settings),
+  testAI: (settings: AppSettings["ai"]) => ipcRenderer.invoke("confui:testAI", settings),
+  setDirtyState: (dirty: boolean) => ipcRenderer.send("confui:setDirtyState", dirty),
+  onFileChanged: (callback: (event: FileChangedEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: FileChangedEvent) => callback(payload);
+    ipcRenderer.on("confui:fileChanged", listener);
+    return () => ipcRenderer.removeListener("confui:fileChanged", listener);
+  },
 };
 
-contextBridge.exposeInMainWorld("confui", api);
+contextBridge.exposeInMainWorld("confui", Object.freeze(api));

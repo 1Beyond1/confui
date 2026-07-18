@@ -1,9 +1,11 @@
-/**
- * Form Schema — the shared contract between server (inference) and web (rendering).
- * One source of truth, imported by both. This is the heart of easy_json.
- */
-
-export type ConfigFormat = "json" | "yaml" | "toml" | "env" | "ini" | "properties";
+export type ConfigFormat =
+  | "json"
+  | "jsonc"
+  | "yaml"
+  | "toml"
+  | "env"
+  | "ini"
+  | "properties";
 
 export type FieldType =
   | "string"
@@ -13,7 +15,6 @@ export type FieldType =
   | "enum"
   | "secret"
   | "color"
-  | "object"
   | "array"
   | "json";
 
@@ -22,79 +23,216 @@ export type FieldSource =
   | "known-template"
   | "example"
   | "readme"
-  | "heuristic"
-  | "ai";
+  | "ai"
+  | "heuristic";
 
-/** A single configurable field. */
+export type FieldProperty =
+  | "label"
+  | "description"
+  | "type"
+  | "required"
+  | "default"
+  | "enum"
+  | "minimum"
+  | "maximum"
+  | "minLength"
+  | "maxLength"
+  | "pattern"
+  | "placeholder"
+  | "secret"
+  | "group";
+
+export type PathSegment = string | number;
+
+export interface FieldEvidence {
+  property: FieldProperty;
+  source: FieldSource;
+  confidence: number;
+  detail?: string;
+}
+
 export interface FieldSpec {
-  /** Dotted path in the JSON, e.g. "server.port" or "db[0].host". */
+  /** Stable display path. Use `segments` for all reads and writes. */
   path: string;
-  /** Human-readable label, e.g. "Server Port". */
+  segments: PathSegment[];
   label: string;
-  /** Help text sourced from schema / README / AI. */
   description?: string;
-  /** Controls the UI widget. */
   type: FieldType;
   required?: boolean;
   default?: unknown;
-  /** Current value read from the file. */
   value?: unknown;
-  /** Options for enum widgets. */
   enum?: Array<string | number>;
   minimum?: number;
   maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
   placeholder?: string;
-  /** Render as password. */
   secret?: boolean;
-  /** Nested fields when type === "object". */
-  properties?: FieldSpec[];
-  /** Item template when type === "array". */
-  items?: FieldSpec;
-  /** UI grouping / section. */
   group?: string;
-  /** How this spec was derived. */
-  source?: FieldSource;
-}
-
-/** Inferred schema for one config file. */
-export interface ConfigFormSchema {
-  /** Relative path within the project. */
-  file: string;
-  /** Detected kind, e.g. "package.json", "tsconfig.json", "json". */
-  kind: string;
-  fields: FieldSpec[];
   source: FieldSource;
-  writable: boolean;
+  confidence: number;
+  evidence: FieldEvidence[];
 }
 
-/** A discovered config file (pre-inference). */
+export interface FileVersion {
+  mtimeMs: number;
+  size: number;
+  hash: string;
+}
+
+export interface SourceSummary {
+  source: FieldSource;
+  fieldCount: number;
+}
+
+export interface ConfigFormSchema {
+  file: string;
+  kind: string;
+  format: ConfigFormat;
+  fields: FieldSpec[];
+  sources: SourceSummary[];
+  writable: boolean;
+  warnings: string[];
+  exampleFiles: string[];
+  readmeSource?: "local" | "github";
+  version: FileVersion;
+  rawText: string;
+}
+
+export type ConfigFileStatus = "ready" | "large" | "too-large" | "unreadable";
+
 export interface ConfigFile {
   path: string;
-  absPath: string;
   kind: string;
   size: number;
+  modifiedAt: number;
   format: ConfigFormat;
+  confidence: "known" | "likely" | "possible";
+  status: ConfigFileStatus;
+  warning?: string;
 }
 
-/** Persisted app settings. */
+export interface ProjectScanResult {
+  root: string;
+  name: string;
+  files: ConfigFile[];
+  detectedGithubUrl?: string;
+  scannedAt: number;
+  skippedCount: number;
+  warnings: string[];
+}
+
+export interface InferOptions {
+  githubUrl?: string;
+}
+
+export interface ConfigChange {
+  segments: PathSegment[];
+  value: unknown;
+}
+
+export interface SaveChangePreview {
+  path: string;
+  before: unknown;
+  after: unknown;
+}
+
+export interface SavePreview {
+  file: string;
+  format: ConfigFormat;
+  changes: SaveChangePreview[];
+  operations: ConfigChange[];
+  output: string;
+  warnings: string[];
+  expectedVersion: FileVersion;
+}
+
+export interface SaveResult {
+  file: string;
+  version: FileVersion;
+  backupPath: string;
+}
+
+export interface FileChangedEvent {
+  file: string;
+  version?: FileVersion;
+}
+
+export type ThemePreference = "system" | "light" | "dark";
+
+export interface RecentProject {
+  path: string;
+  name: string;
+  githubUrl?: string;
+  openedAt: number;
+}
+
 export interface AppSettings {
+  theme: ThemePreference;
   ai: {
     enabled: boolean;
-    /** Active provider id. */
     provider: string;
     model: string;
-    /** Custom OpenAI-compatible base URL. Empty = official OpenAI. */
     baseUrl: string;
     apiKey: string;
+    timeoutMs: number;
   };
+  github: {
+    token: string;
+  };
+  recentProjects: RecentProject[];
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  theme: "system",
   ai: {
-    enabled: true,
-    provider: "openai-compatible",
-    model: "gpt-4o-mini",
+    enabled: false,
+    provider: "custom",
+    model: "",
     baseUrl: "",
     apiKey: "",
+    timeoutMs: 45_000,
   },
+  github: { token: "" },
+  recentProjects: [],
 };
+
+export type AppErrorCode =
+  | "INVALID_INPUT"
+  | "NOT_FOUND"
+  | "PARSE_ERROR"
+  | "FILE_TOO_LARGE"
+  | "FILE_CONFLICT"
+  | "SAVE_ERROR"
+  | "NETWORK_ERROR"
+  | "AI_ERROR"
+  | "UNKNOWN";
+
+export interface AppError {
+  code: AppErrorCode;
+  message: string;
+  detail?: string;
+}
+
+export type Result<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: AppError };
+
+export interface ConnectionTestResult {
+  latencyMs: number;
+  message: string;
+}
+
+export interface ConfuiAPI {
+  selectFolder(): Promise<Result<string | null>>;
+  scanProject(root: string, githubUrl?: string): Promise<Result<ProjectScanResult>>;
+  inferSchema(root: string, file: string, options?: InferOptions): Promise<Result<ConfigFormSchema>>;
+  previewSave(root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion): Promise<Result<SavePreview>>;
+  saveConfig(root: string, preview: SavePreview): Promise<Result<SaveResult>>;
+  getSettings(): Promise<Result<AppSettings>>;
+  setSettings(settings: AppSettings): Promise<Result<AppSettings>>;
+  testAI(settings: AppSettings["ai"]): Promise<Result<ConnectionTestResult>>;
+  setDirtyState(dirty: boolean): void;
+  onFileChanged(callback: (event: FileChangedEvent) => void): () => void;
+}

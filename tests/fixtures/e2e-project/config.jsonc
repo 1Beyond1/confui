@@ -1,0 +1,13 @@
+{
+  "$schema": "./config.schema.json",
+  // HTTP service settings
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3000,
+    "enabled": true,
+  },
+  "themeColor": "#2f6fed",
+  "logLevel": "info",
+  "apiToken": "demo-token",
+  "features": ["dashboard", "editor"],
+}

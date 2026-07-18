@@ -1,0 +1,5 @@
+# YAML comments are intentionally present for the save warning.
+server:
+  port: 4000
+  secure: false
+workers: 2

@@ -1,0 +1,11 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "enabled": true
+  },
+  "themeColor": "#2f6fed",
+  "logLevel": "info",
+  "apiToken": "<YOUR_API_TOKEN>",
+  "features": ["dashboard"]
+}

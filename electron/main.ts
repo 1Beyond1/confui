@@ -1,168 +1,314 @@
-import { app, BrowserWindow, ipcMain, dialog, safeStorage, WebContents } from "electron";
-import path from "node:path";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  safeStorage,
+  type IpcMainInvokeEvent,
+  type OpenDialogOptions,
+} from "electron";
+import { watch, type FSWatcher } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { scanProject } from "../server/src/scanner.ts";
-import { inferSchema } from "../server/src/schema/infer.ts";
-import { loadSettings, saveSettings } from "../server/src/config.ts";
-import { createProvider } from "../server/src/ai/provider.ts";
-import { parseConfig, stringifyConfig } from "../server/src/formats.ts";
-import type { AppSettings, ConfigFormat } from "../shared/schema.ts";
-import { readFile, writeFile, copyFile } from "node:fs/promises";
-import { watch, FSWatcher } from "node:fs";
-import { resolve, sep } from "node:path";
-import { modify as jsoncModify } from "jsonc-parser";
+import { OpenAICompatibleProvider, testAIConnection } from "../core/ai/provider.ts";
+import { toAppError, ConfuiError } from "../core/errors.ts";
+import { currentVersion } from "../core/files.ts";
+import { inferConfig } from "../core/inference/index.ts";
+import { safeJoin } from "../core/paths.ts";
+import { commitSave, previewSave } from "../core/save.ts";
+import { scanProject } from "../core/scanner.ts";
+import { SettingsStore, type SecretCodec } from "../core/settings.ts";
+import type {
+  AppSettings,
+  ConfigChange,
+  FileChangedEvent,
+  FileVersion,
+  InferOptions,
+  Result,
+  SavePreview,
+} from "../shared/schema.ts";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-let mainWindow: BrowserWindow | null = null;
-let fileWatcher: FSWatcher | null = null;
+const currentDirectory = fileURLToPath(new URL(".", import.meta.url));
+let mainWindow: BrowserWindow | undefined;
+let settingsStore: SettingsStore;
+let watchedFile: { watcher: FSWatcher; absolutePath: string; relativePath: string } | undefined;
+let suppressChange: { absolutePath: string; until: number; hash?: string } | undefined;
+let watcherTimer: NodeJS.Timeout | undefined;
+let hasUnsavedChanges = false;
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1200, height: 800, minWidth: 900, minHeight: 600,
+app.setName("Confui");
+
+app.whenReady().then(async () => {
+  settingsStore = new SettingsStore(join(app.getPath("userData"), "settings.json"), createSecretCodec());
+  registerIpcHandlers();
+  createWindow();
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+app.on("window-all-closed", () => {
+  closeWatcher();
+  if (process.platform !== "darwin") app.quit();
+});
+
+function createWindow(): void {
+  let allowClose = false;
+  const window = new BrowserWindow({
+    title: "Confui",
+    width: 1360,
+    height: 860,
+    minWidth: 1024,
+    minHeight: 680,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: "#f3f5f8",
     webPreferences: {
-      preload: path.join(__dirname, "../preload/preload.mjs"),
-      contextIsolation: true, nodeIntegration: false,
+      preload: join(currentDirectory, "../preload/preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
     },
   });
+  mainWindow = window;
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event, url) => {
+    if (url !== window.webContents.getURL()) event.preventDefault();
+  });
+  window.once("ready-to-show", () => window.show());
+  window.on("close", (event) => {
+    if (allowClose || !hasUnsavedChanges) return;
+    event.preventDefault();
+    const choice = dialog.showMessageBoxSync(window, {
+      type: "warning",
+      title: "Confui",
+      message: "还有未保存的更改",
+      detail: "关闭 Confui 会放弃当前配置或设置中的更改。",
+      buttons: ["继续编辑", "放弃更改并退出"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (choice === 1) {
+      allowClose = true;
+      window.close();
+    }
+  });
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = undefined;
+    hasUnsavedChanges = false;
+  });
+
   if (process.env.ELECTRON_RENDERER_URL) {
-    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+    void window.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
-    mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+    void window.loadFile(join(currentDirectory, "../renderer/index.html"));
   }
 }
 
-app.whenReady().then(() => {
-  registerIpcHandlers();
-  createWindow();
-  app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-});
-app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
+function registerIpcHandlers(): void {
+  ipcMain.removeAllListeners("confui:setDirtyState");
+  ipcMain.on("confui:setDirtyState", (_event, dirty: unknown) => {
+    if (typeof dirty === "boolean") hasUnsavedChanges = dirty;
+  });
 
-function safeJoin(root: string, file: string): string {
-  const r = resolve(root); const j = resolve(r, file);
-  if (j !== r && !j.startsWith(r + sep)) throw new Error("path traversal rejected");
-  return j;
-}
+  handle("confui:selectFolder", async () => {
+    const options: OpenDialogOptions = {
+      title: "选择项目文件夹",
+      properties: ["openDirectory"],
+      buttonLabel: "打开项目",
+    };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, options)
+      : await dialog.showOpenDialog(options);
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
 
-function sendToRenderer(channel: string, data?: unknown) {
-  mainWindow?.webContents.send(channel, data);
-}
-
-/** Start watching a file for external changes. */
-function watchFile(absPath: string) {
-  if (fileWatcher) fileWatcher.close();
-  try {
-    fileWatcher = watch(absPath, (eventType) => {
-      if (eventType === "change") sendToRenderer("confui:fileChanged", { path: absPath });
+  handle("confui:scanProject", async (_event, root: unknown, githubUrl?: unknown) => {
+    assertString(root, "项目路径");
+    const result = await scanProject(root);
+    await settingsStore.rememberProject({
+      path: result.root,
+      name: result.name,
+      githubUrl: typeof githubUrl === "string" && githubUrl.trim()
+        ? githubUrl.trim()
+        : result.detectedGithubUrl,
+      openedAt: Date.now(),
     });
-  } catch {}
-}
-
-/** Encrypt API key with safeStorage (returns base64). */
-function encryptKey(plain: string): string {
-  if (!plain || !safeStorage.isEncryptionAvailable()) return plain;
-  return safeStorage.encryptString(plain).toString("base64");
-}
-/** Decrypt API key from safeStorage (from base64). */
-function decryptKey(encoded: string): string {
-  if (!encoded) return "";
-  try {
-    if (safeStorage.isEncryptionAvailable()) {
-      return safeStorage.decryptString(Buffer.from(encoded, "base64"));
-    }
-  } catch {}
-  return encoded;
-}
-
-function registerIpcHandlers() {
-  ipcMain.handle("confui:selectFolder", async () => {
-    const r = await dialog.showOpenDialog({ properties: ["openDirectory"], title: "Select a project folder" });
-    return r.canceled ? null : r.filePaths[0];
+    return result;
   });
 
-  ipcMain.handle("confui:scanProject", async (_, root: string) => {
-    try { return { files: await scanProject(root) }; }
-    catch (e: any) { return { error: e.message }; }
+  handle("confui:inferSchema", async (_event, root: unknown, file: unknown, options?: InferOptions) => {
+    assertString(root, "项目路径");
+    assertString(file, "配置文件路径");
+    const settings = await settingsStore.load();
+    const ai = settings.ai.enabled && settings.ai.baseUrl && settings.ai.model
+      ? new OpenAICompatibleProvider(settings.ai)
+      : undefined;
+    const schema = await inferConfig(root, file, {
+      githubUrl: typeof options?.githubUrl === "string" ? options.githubUrl : undefined,
+      githubToken: settings.github.token,
+      ai,
+    });
+    watchConfigFile(root, file);
+    return schema;
   });
 
-  ipcMain.handle("confui:inferSchema", async (_, root: string, file: string, options?: { readme?: string }) => {
-    try {
-      const settings = await loadSettings();
-      const ai = settings.ai.enabled && settings.ai.apiKey ? createProvider(settings.ai) : undefined;
-      const absPath = safeJoin(root, file);
-      const cfg = { path: file, absPath, kind: file, size: 0, format: detectFormat(file) };
-      const result = await inferSchema(cfg, { ai, aiModel: settings.ai.model, projectRoot: root, readme: options?.readme });
-      watchFile(absPath);
-      return result;
-    } catch (e: any) { return { error: e.message }; }
-  });
-
-  ipcMain.handle("confui:readFile", async (_, root: string, file: string) => {
-    try { return { text: await readFile(safeJoin(root, file), "utf8") }; }
-    catch (e: any) { return { error: e.message }; }
-  });
-
-  ipcMain.handle("confui:saveConfig", async (_, root: string, file: string, value: unknown) => {
-    try {
-      const absPath = safeJoin(root, file);
-      const format = detectFormat(file);
-      const originalText = await readFile(absPath, "utf8");
-
-      // Backup
-      try { await copyFile(absPath, absPath + ".bak"); } catch {}
-
-      let output: string;
-      if (format === "json") {
-        // AST-level edit with jsonc-parser (preserves comments, formatting, key order)
-        let text = originalText;
-        const original = parseConfig(originalText, "json") as Record<string, unknown> | null;
-        const newVal = value as Record<string, unknown>;
-        if (original && typeof newVal === "object") {
-          for (const [key, val] of Object.entries(newVal)) {
-            if (JSON.stringify(original[key]) !== JSON.stringify(val)) {
-              text = jsoncModify(text, [key], val, {
-                formattingOptions: { tabSize: 2, insertSpaces: true },
-              });
-            }
-          }
-        } else {
-          text = stringifyConfig(value, format);
-        }
-        output = text;
-      } else {
-        // Non-JSON: merge and full serialize
-        let existing: any = {};
-        try { existing = parseConfig(originalText, format); } catch {}
-        const merged = value && typeof value === "object" ? { ...existing, ...(value as object) } : value;
-        output = stringifyConfig(merged, format);
+  handle(
+    "confui:previewSave",
+    async (_event, root: unknown, file: unknown, changes: unknown, expectedVersion: unknown) => {
+      assertString(root, "项目路径");
+      assertString(file, "配置文件路径");
+      if (!Array.isArray(changes) || !isFileVersion(expectedVersion)) {
+        throw new ConfuiError("INVALID_INPUT", "保存参数无效");
       }
+      return previewSave(root, file, changes as ConfigChange[], expectedVersion);
+    },
+  );
 
-      await writeFile(absPath, output, "utf8");
-      return { ok: true };
-    } catch (e: any) { return { error: e.message }; }
+  handle("confui:saveConfig", async (_event, root: unknown, preview: unknown) => {
+    assertString(root, "项目路径");
+    if (!isSavePreview(preview)) throw new ConfuiError("INVALID_INPUT", "保存预览无效");
+    const absolutePath = safeJoin(root, preview.file);
+    suppressChange = { absolutePath, until: Date.now() + 2_000 };
+    try {
+      const result = await commitSave(root, preview);
+      suppressChange.hash = result.version.hash;
+      suppressChange.until = Date.now() + 1_000;
+      return result;
+    } catch (error) {
+      suppressChange = undefined;
+      throw error;
+    }
   });
 
-  ipcMain.handle("confui:getSettings", async () => {
-    const s = await loadSettings();
-    // Decrypt API key before sending to renderer
-    if (s.ai?.apiKey) s.ai.apiKey = decryptKey(s.ai.apiKey);
-    return s;
+  handle("confui:getSettings", async () => settingsStore.load());
+
+  handle("confui:setSettings", async (_event, settings: unknown) => {
+    if (!isAppSettings(settings)) throw new ConfuiError("INVALID_INPUT", "设置内容无效");
+    const current = await settingsStore.load();
+    return settingsStore.save({ ...settings, recentProjects: current.recentProjects });
   });
 
-  ipcMain.handle("confui:setSettings", async (_, settings: AppSettings) => {
-    // Encrypt API key before saving
-    if (settings.ai?.apiKey) settings.ai.apiKey = encryptKey(settings.ai.apiKey);
-    await saveSettings(settings);
-    return { ok: true };
+  handle("confui:testAI", async (_event, settings: unknown) => {
+    if (!isAiSettings(settings)) throw new ConfuiError("INVALID_INPUT", "AI 设置内容无效");
+    return testAIConnection(settings);
   });
 }
 
-function detectFormat(filename: string): ConfigFormat {
-  const f = filename.toLowerCase();
-  if (f.endsWith(".yaml") || f.endsWith(".yml")) return "yaml";
-  if (f.endsWith(".toml")) return "toml";
-  if (f === ".env" || f.endsWith(".env") || f.startsWith(".env.")) return "env";
-  if (f.endsWith(".ini") || f.endsWith(".conf") || f.endsWith(".cfg")) return "ini";
-  if (f.endsWith(".properties")) return "properties";
-  return "json";
+function handle<T>(
+  channel: string,
+  action: (event: IpcMainInvokeEvent, ...args: never[]) => Promise<T>,
+): void {
+  ipcMain.removeHandler(channel);
+  ipcMain.handle(channel, async (event, ...args): Promise<Result<T>> => {
+    try {
+      return { ok: true, data: await action(event, ...(args as never[])) };
+    } catch (error) {
+      return { ok: false, error: toAppError(error) };
+    }
+  });
+}
+
+function watchConfigFile(root: string, relativeFile: string): void {
+  const absolutePath = safeJoin(root, relativeFile);
+  if (watchedFile?.absolutePath === absolutePath) return;
+  closeWatcher();
+  try {
+    const targetName = basename(absolutePath).toLowerCase();
+    // Watch the containing directory rather than the file itself. Editors and
+    // Confui both use atomic rename-on-save, which invalidates file-level
+    // watchers on Windows after the first replacement.
+    const watcher = watch(dirname(absolutePath), { persistent: false }, (_eventType, filename) => {
+      if (filename && filename.toString().toLowerCase() !== targetName) return;
+      if (watcherTimer) clearTimeout(watcherTimer);
+      watcherTimer = setTimeout(() => void emitFileChange(absolutePath, relativeFile), 140);
+    });
+    watchedFile = { watcher, absolutePath, relativePath: relativeFile };
+  } catch {
+    // Watching is a convenience; opening the file still works if the platform refuses it.
+  }
+}
+
+async function emitFileChange(absolutePath: string, relativeFile: string): Promise<void> {
+  let version: FileVersion | undefined;
+  try {
+    version = await currentVersion(absolutePath);
+  } catch {
+    // A rename-save from another editor can make the file briefly unavailable.
+  }
+  const suppression = suppressChange;
+  if (suppression?.absolutePath === absolutePath && Date.now() <= suppression.until) {
+    if (!suppression.hash || suppression.hash === version?.hash) return;
+  }
+  suppressChange = undefined;
+  const event: FileChangedEvent = { file: relativeFile.replace(/\\/g, "/"), version };
+  mainWindow?.webContents.send("confui:fileChanged", event);
+}
+
+function closeWatcher(): void {
+  if (watcherTimer) clearTimeout(watcherTimer);
+  watcherTimer = undefined;
+  watchedFile?.watcher.close();
+  watchedFile = undefined;
+}
+
+function createSecretCodec(): SecretCodec {
+  return {
+    encode(value) {
+      if (!value) return "";
+      if (!safeStorage.isEncryptionAvailable()) {
+        throw new ConfuiError("SAVE_ERROR", "系统安全存储暂不可用，敏感设置没有保存");
+      }
+      return `enc:v1:${safeStorage.encryptString(value).toString("base64")}`;
+    },
+    decode(value) {
+      if (!value) return "";
+      if (!value.startsWith("enc:v1:")) return value;
+      if (!safeStorage.isEncryptionAvailable()) return "";
+      try {
+        return safeStorage.decryptString(Buffer.from(value.slice(7), "base64"));
+      } catch {
+        return "";
+      }
+    },
+  };
+}
+
+function assertString(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || !value.trim()) throw new ConfuiError("INVALID_INPUT", `${label}不能为空`);
+}
+
+function isFileVersion(value: unknown): value is FileVersion {
+  return value !== null && typeof value === "object"
+    && typeof (value as FileVersion).hash === "string"
+    && typeof (value as FileVersion).mtimeMs === "number"
+    && typeof (value as FileVersion).size === "number";
+}
+
+function isSavePreview(value: unknown): value is SavePreview {
+  return value !== null && typeof value === "object"
+    && typeof (value as SavePreview).file === "string"
+    && typeof (value as SavePreview).output === "string"
+    && Array.isArray((value as SavePreview).operations)
+    && isFileVersion((value as SavePreview).expectedVersion);
+}
+
+function isAiSettings(value: unknown): value is AppSettings["ai"] {
+  return value !== null && typeof value === "object"
+    && typeof (value as AppSettings["ai"]).enabled === "boolean"
+    && typeof (value as AppSettings["ai"]).provider === "string"
+    && typeof (value as AppSettings["ai"]).model === "string"
+    && typeof (value as AppSettings["ai"]).baseUrl === "string"
+    && typeof (value as AppSettings["ai"]).apiKey === "string";
+}
+
+function isAppSettings(value: unknown): value is AppSettings {
+  return value !== null && typeof value === "object"
+    && isAiSettings((value as AppSettings).ai)
+    && (value as AppSettings).github !== null
+    && typeof (value as AppSettings).github === "object"
+    && typeof (value as AppSettings).github.token === "string"
+    && Array.isArray((value as AppSettings).recentProjects);
 }
