@@ -1,6 +1,7 @@
 import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import rcedit from "rcedit";
 
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const electronDist = join(workspace, "node_modules", "electron", "dist");
@@ -24,7 +25,20 @@ const appPackage = {
 await rm(target, { recursive: true, force: true });
 await mkdir(target, { recursive: true });
 await cp(electronDist, target, { recursive: true, force: true });
-await rename(join(target, "electron.exe"), join(target, "Confui.exe"));
+const executable = join(target, "Confui.exe");
+await rename(join(target, "electron.exe"), executable);
+await rcedit(executable, {
+  icon: join(workspace, "assets", "confui-icon.ico"),
+  "file-version": windowsVersion(appPackage.version),
+  "product-version": windowsVersion(appPackage.version),
+  "version-string": {
+    CompanyName: "1Beyond1",
+    FileDescription: "Confui configuration editor",
+    InternalName: "Confui",
+    OriginalFilename: "Confui.exe",
+    ProductName: "Confui",
+  },
+});
 
 const resources = join(target, "resources");
 const appResources = join(resources, "app");
@@ -42,4 +56,9 @@ function assertInside(parent, child) {
   if (childPath === parentPath || !childPath.startsWith(parentPath + sep)) {
     throw new Error(`Unsafe package path: ${relative(workspace, childPath)}`);
   }
+}
+
+function windowsVersion(version) {
+  const numeric = version.split(/[+-]/, 1)[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
+  return [...numeric, 0, 0, 0, 0].slice(0, 4).join(".");
 }

@@ -15,7 +15,7 @@ export const SOURCE_LABELS: Record<FieldSource, string> = {
 export function Logo({ compact = false }: { compact?: boolean }) {
   return (
     <div class={`brand ${compact ? "brand--compact" : ""}`}>
-      <span class="brand__mark" aria-hidden="true"><span/><span/><span/></span>
+      <img class="brand__mark" src="./confui-icon.png" alt="" aria-hidden="true"/>
       {!compact && <span class="brand__copy"><strong>Confui</strong><small>配置，终于看得懂</small></span>}
     </div>
   );

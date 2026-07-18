@@ -91,14 +91,9 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 .sidebar__brand { height: 74px; display: flex; align-items: center; padding: 0 21px; border-bottom: 1px solid var(--line-soft); }
 .brand { display: flex; align-items: center; gap: 11px; }
 .brand__mark {
-  width: 36px; height: 36px; border-radius: 11px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 0 8px;
-  color: white; background: linear-gradient(145deg, #477ff0, #245ed1); box-shadow: 0 6px 14px rgba(47, 111, 237, .23);
+  width: 42px; height: 42px; flex: 0 0 auto; display: block; object-fit: contain;
+  filter: drop-shadow(0 5px 9px rgba(47, 111, 237, .16));
 }
-.brand__mark span { height: 2px; border-radius: 2px; background: currentColor; position: relative; }
-.brand__mark span::after { content: ""; position: absolute; width: 4px; height: 4px; top: -1px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 1.5px #3974e4; }
-.brand__mark span:nth-child(1)::after { left: 3px; }
-.brand__mark span:nth-child(2)::after { right: 2px; }
-.brand__mark span:nth-child(3)::after { left: 7px; }
 .brand__copy { display: flex; min-width: 0; flex-direction: column; line-height: 1.15; }
 .brand__copy strong { font-size: 17px; letter-spacing: 0; }
 .brand__copy small { margin-top: 4px; font-size: 10.5px; color: var(--text-muted); letter-spacing: 0; }
@@ -219,7 +214,7 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 .open-project-card p, .section-heading p { margin: 3px 0 0; color: var(--text-muted); font-size: 10.5px; }
 .local-pill { display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--success) 22%, var(--line)); border-radius: 999px; color: var(--success); background: var(--success-soft); font-size: 9.5px; font-weight: 700; }
 .project-input-block { padding: 15px 22px 0; }
-.project-input-block label, .setting-field > span { display: block; margin-bottom: 6px; color: var(--text-secondary); font-size: 11px; font-weight: 650; }
+.project-input-block label, .setting-field > span, .setting-field > label { display: block; margin-bottom: 6px; color: var(--text-secondary); font-size: 11px; font-weight: 650; }
 .project-input-block label em { margin-left: 5px; color: var(--danger); font-size: 9px; font-style: normal; }
 .project-input-block label span { margin-left: 5px; color: var(--text-muted); font-size: 9px; font-weight: 400; }
 .path-control { position: relative; display: flex; align-items: center; gap: 8px; }
@@ -358,7 +353,7 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 .settings-card__body--disabled { opacity: .52; }
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
 .setting-field { min-width: 0; }.setting-field--wide { grid-column: 1 / -1; }
-.setting-field > span em { margin-left: 5px; color: var(--text-muted); font-size: 9px; font-style: normal; font-weight: 400; }
+.setting-field > span em, .setting-field > label em { margin-left: 5px; color: var(--text-muted); font-size: 9px; font-style: normal; font-weight: 400; }
 .setting-field small { display: flex; align-items: center; gap: 5px; margin-top: 6px; color: var(--text-muted); font-size: 9px; line-height: 1.4; }
 .setting-field .secure-note { color: var(--success); }
 .settings-inline-action { display: flex; justify-content: flex-end; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-soft); }

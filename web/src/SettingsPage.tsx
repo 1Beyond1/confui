@@ -126,14 +126,14 @@ export function SettingsPage({
               <input class="control" value={draft.ai.baseUrl} disabled={!draft.ai.enabled} placeholder="https://api.example.com/v1" onInput={(event) => setAi({ baseUrl: event.currentTarget.value })}/>
               <small>兼容 OpenAI 的 /chat/completions 接口；也可以填写本地 Ollama。</small>
             </label>
-            <label class="setting-field setting-field--wide">
-              <span>API Key</span>
+            <div class="setting-field setting-field--wide">
+              <label for="settings-ai-api-key">API Key</label>
               <div class="input-with-action">
-                <input class="control" type={showApiKey ? "text" : "password"} value={draft.ai.apiKey} disabled={!draft.ai.enabled} autocomplete="off" placeholder="本地模型可留空" onInput={(event) => setAi({ apiKey: event.currentTarget.value })}/>
+                <input id="settings-ai-api-key" class="control" type={showApiKey ? "text" : "password"} value={draft.ai.apiKey} disabled={!draft.ai.enabled} autocomplete="off" placeholder="本地模型可留空" onInput={(event) => setAi({ apiKey: event.currentTarget.value })}/>
                 <button class="icon-button" type="button" disabled={!draft.ai.enabled} onClick={() => setShowApiKey(!showApiKey)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}><Icon name={showApiKey ? "eye-off" : "eye"}/></button>
               </div>
               <small class="secure-note"><Icon name="shield" size={14}/>使用 Windows 安全存储加密，不会写入项目文件。</small>
-            </label>
+            </div>
           </div>
           <div class="settings-inline-action">
             <Button icon="refresh" onClick={() => void testConnection()} busy={testing} disabled={!draft.ai.enabled || testing}>测试连接</Button>
@@ -147,14 +147,14 @@ export function SettingsPage({
           <div><h2>GitHub 文档</h2><p>本地没有 README 时，使用仓库链接补充读取；私有仓库需要 Token。</p></div>
         </header>
         <div class="settings-card__body">
-          <label class="setting-field setting-field--wide">
-            <span>Personal Access Token <em>可选</em></span>
+          <div class="setting-field setting-field--wide">
+            <label for="settings-github-token">Personal Access Token <em>可选</em></label>
             <div class="input-with-action">
-              <input class="control" type={showGithubToken ? "text" : "password"} value={draft.github.token} autocomplete="off" placeholder="github_pat_..." onInput={(event) => setDraft((current) => ({ ...current, github: { token: event.currentTarget.value } }))}/>
+              <input id="settings-github-token" class="control" type={showGithubToken ? "text" : "password"} value={draft.github.token} autocomplete="off" placeholder="github_pat_..." onInput={(event) => setDraft((current) => ({ ...current, github: { token: event.currentTarget.value } }))}/>
               <button class="icon-button" type="button" onClick={() => setShowGithubToken(!showGithubToken)} aria-label={showGithubToken ? "隐藏 GitHub Token" : "显示 GitHub Token"}><Icon name={showGithubToken ? "eye-off" : "eye"}/></button>
             </div>
             <small>公开仓库通常无需填写。Token 同样会加密保存。</small>
-          </label>
+          </div>
         </div>
       </section>
 

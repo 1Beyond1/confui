@@ -7,7 +7,7 @@ import {
   type IpcMainInvokeEvent,
   type OpenDialogOptions,
 } from "electron";
-import { watch, type FSWatcher } from "node:fs";
+import { existsSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OpenAICompatibleProvider, testAIConnection } from "../core/ai/provider.ts";
@@ -37,6 +37,7 @@ let watcherTimer: NodeJS.Timeout | undefined;
 let hasUnsavedChanges = false;
 
 app.setName("Confui");
+if (process.platform === "win32") app.setAppUserModelId("com.1beyond1.confui");
 
 app.whenReady().then(async () => {
   settingsStore = new SettingsStore(join(app.getPath("userData"), "settings.json"), createSecretCodec());
@@ -60,6 +61,7 @@ function createWindow(): void {
     height: 860,
     minWidth: 1024,
     minHeight: 680,
+    icon: resolveWindowIcon(),
     show: false,
     autoHideMenuBar: true,
     backgroundColor: "#f3f5f8",
@@ -105,6 +107,13 @@ function createWindow(): void {
   } else {
     void window.loadFile(join(currentDirectory, "../renderer/index.html"));
   }
+}
+
+function resolveWindowIcon(): string | undefined {
+  return [
+    join(currentDirectory, "../renderer/confui-icon.png"),
+    join(app.getAppPath(), "web", "public", "confui-icon.png"),
+  ].find(existsSync);
 }
 
 function registerIpcHandlers(): void {
