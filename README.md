@@ -2,6 +2,8 @@
 
 Confui 是一个 Windows 桌面配置编辑器。选择本地项目后，它会发现配置文件、组合项目中的 Schema / 示例 / README 信息，并把字段转换成可校验的表单。用户确认差异后，Confui 才会写回原文件。
 
+![Confui 配置编辑器界面](assets/confui-preview.png)
+
 ## 支持范围
 
 | 格式 | 读取 | 保存策略 |
