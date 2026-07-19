@@ -8,6 +8,7 @@ export type IconName =
   | "code"
   | "eye"
   | "eye-off"
+  | "external-link"
   | "file"
   | "folder"
   | "folder-open"
@@ -33,6 +34,7 @@ const paths: Record<IconName, JSX.Element> = {
   code: <><path d="m8 9-3 3 3 3"/><path d="m16 9 3 3-3 3"/><path d="m14 5-4 14"/></>,
   eye: <><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.5"/></>,
   "eye-off": <><path d="m3 3 18 18"/><path d="M10.6 6.2A9.4 9.4 0 0 1 12 6c6 0 9.5 6 9.5 6a14 14 0 0 1-2.1 2.8"/><path d="M6.2 6.2C3.8 7.8 2.5 12 2.5 12s3.5 6 9.5 6c1.2 0 2.3-.2 3.3-.6"/></>,
+  "external-link": <><path d="M14 4h6v6"/><path d="m20 4-9 9"/><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/></>,
   file: <><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/></>,
   folder: <path d="M3 6h7l2 2h9v11H3z"/>,
   "folder-open": <><path d="M3 7h7l2 2h9"/><path d="m3 9 2 10h14l2-10z"/></>,

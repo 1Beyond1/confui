@@ -1,6 +1,6 @@
 {
   "name": "confui",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "Turn project configuration files into clear, safely editable desktop forms.",

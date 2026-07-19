@@ -21,6 +21,9 @@ const api: ConfuiAPI = {
   getSettings: () => ipcRenderer.invoke("confui:getSettings"),
   setSettings: (settings: AppSettings) => ipcRenderer.invoke("confui:setSettings", settings),
   testAI: (settings: AppSettings["ai"]) => ipcRenderer.invoke("confui:testAI", settings),
+  getAppInfo: () => ipcRenderer.invoke("confui:getAppInfo"),
+  checkForUpdates: () => ipcRenderer.invoke("confui:checkForUpdates"),
+  openReleasePage: () => ipcRenderer.invoke("confui:openReleasePage"),
   setDirtyState: (dirty: boolean) => ipcRenderer.send("confui:setDirtyState", dirty),
   onFileChanged: (callback: (event: FileChangedEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: FileChangedEvent) => callback(payload);

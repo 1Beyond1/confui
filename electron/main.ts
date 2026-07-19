@@ -4,6 +4,7 @@ import {
   dialog,
   ipcMain,
   safeStorage,
+  shell,
   type IpcMainInvokeEvent,
   type OpenDialogOptions,
 } from "electron";
@@ -18,6 +19,7 @@ import { safeJoin } from "../core/paths.ts";
 import { commitSave, previewSave } from "../core/save.ts";
 import { scanProject } from "../core/scanner.ts";
 import { SettingsStore, type SecretCodec } from "../core/settings.ts";
+import { checkForUpdates } from "../core/update.ts";
 import type {
   AppSettings,
   ConfigChange,
@@ -203,6 +205,15 @@ function registerIpcHandlers(): void {
   handle("confui:testAI", async (_event, settings: unknown) => {
     if (!isAiSettings(settings)) throw new ConfuiError("INVALID_INPUT", "AI 设置内容无效");
     return testAIConnection(settings);
+  });
+
+  handle("confui:getAppInfo", async () => ({ version: app.getVersion() }));
+
+  handle("confui:checkForUpdates", async () => checkForUpdates(app.getVersion()));
+
+  handle("confui:openReleasePage", async () => {
+    await shell.openExternal("https://github.com/1Beyond1/confui/releases/latest");
+    return null;
   });
 }
 

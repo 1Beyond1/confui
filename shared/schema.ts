@@ -224,6 +224,19 @@ export interface ConnectionTestResult {
   message: string;
 }
 
+export interface AppInfo {
+  version: string;
+}
+
+export interface UpdateCheckResult {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  releaseName: string;
+  releaseUrl: string;
+  publishedAt?: string;
+}
+
 export interface ConfuiAPI {
   selectFolder(): Promise<Result<string | null>>;
   scanProject(root: string, githubUrl?: string): Promise<Result<ProjectScanResult>>;
@@ -233,6 +246,9 @@ export interface ConfuiAPI {
   getSettings(): Promise<Result<AppSettings>>;
   setSettings(settings: AppSettings): Promise<Result<AppSettings>>;
   testAI(settings: AppSettings["ai"]): Promise<Result<ConnectionTestResult>>;
+  getAppInfo(): Promise<Result<AppInfo>>;
+  checkForUpdates(): Promise<Result<UpdateCheckResult>>;
+  openReleasePage(): Promise<Result<null>>;
   setDirtyState(dirty: boolean): void;
   onFileChanged(callback: (event: FileChangedEvent) => void): () => void;
 }

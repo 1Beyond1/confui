@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
-import type { AppSettings, ThemePreference } from "../../shared/schema.ts";
+import type { AppInfo, AppSettings, ThemePreference, UpdateCheckResult } from "../../shared/schema.ts";
 import { Icon } from "./icons.tsx";
 import { Button } from "./ui.tsx";
 
@@ -29,8 +29,16 @@ export function SettingsPage({
   const [testing, setTesting] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [showGithubToken, setShowGithubToken] = useState(false);
+  const [appInfo, setAppInfo] = useState<AppInfo>();
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult>();
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   useEffect(() => setDraft(structuredClone(settings)), [settings]);
+  useEffect(() => {
+    void window.confui.getAppInfo().then((result) => {
+      if (result.ok) setAppInfo(result.data);
+    });
+  }, []);
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(settings), [draft, settings]);
   useEffect(() => {
     onDirtyChange(dirty);
@@ -81,6 +89,31 @@ export function SettingsPage({
       provider: provider.id,
       ...(provider.id !== "custom" ? { baseUrl: provider.baseUrl, model: provider.model } : {}),
     });
+  }
+
+  async function checkUpdates(): Promise<void> {
+    setCheckingUpdate(true);
+    try {
+      const result = await window.confui.checkForUpdates();
+      if (!result.ok) throw new Error(result.error.detail || result.error.message);
+      setUpdateResult(result.data);
+      const currentRelease = result.data.currentVersion === result.data.latestVersion;
+      onToast(
+        result.data.updateAvailable
+          ? `发现新版本 v${result.data.latestVersion}`
+          : currentRelease ? "当前已是最新版本" : "当前版本已领先于公开版本",
+        result.data.updateAvailable ? "info" : "success",
+      );
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "检查更新失败", "error");
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+
+  async function openReleasePage(): Promise<void> {
+    const result = await window.confui.openReleasePage();
+    if (!result.ok) onToast(result.error.detail || result.error.message, "error");
   }
 
   return (
@@ -180,6 +213,34 @@ export function SettingsPage({
                 <strong>{theme === "system" ? "跟随系统" : theme === "light" ? "浅色" : "深色"}</strong>
               </button>
             ))}
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-card">
+        <header class="settings-card__header">
+          <span class="settings-card__icon settings-card__icon--blue"><Icon name="refresh"/></span>
+          <div><h2>软件更新</h2><p>从 GitHub Release 检查 Confui 是否有新版本。</p></div>
+        </header>
+        <div class="settings-card__body">
+          <div class={`update-panel ${updateResult?.updateAvailable ? "update-panel--available" : ""}`}>
+            <div class="update-status">
+              <span class="update-status__icon"><Icon name={updateResult?.updateAvailable ? "sparkles" : "check"}/></span>
+              <div class="update-status__copy">
+                <strong>{appInfo ? `当前版本 v${appInfo.version}` : "正在读取当前版本"}</strong>
+                <p>{updateResult
+                  ? updateResult.updateAvailable
+                    ? `发现 v${updateResult.latestVersion} · ${updateResult.releaseName}`
+                    : updateResult.currentVersion === updateResult.latestVersion
+                      ? `已是最新版本 v${updateResult.latestVersion}`
+                      : `当前版本已领先于公开版本 v${updateResult.latestVersion}`
+                  : "点击按钮检查 GitHub 上的最新 Release"}</p>
+              </div>
+            </div>
+            <div class="update-actions">
+              <Button icon="refresh" busy={checkingUpdate} disabled={checkingUpdate} onClick={() => void checkUpdates()}>检查更新</Button>
+              {updateResult?.updateAvailable && <Button variant="primary" icon="external-link" onClick={() => void openReleasePage()}>打开下载页</Button>}
+            </div>
           </div>
         </div>
       </section>
