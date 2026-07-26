@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OpenAICompatibleProvider } from "../core/ai/provider.ts";
+import { endpointFor, OpenAICompatibleProvider } from "../core/ai/provider.ts";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -23,5 +23,35 @@ describe("OpenAI-compatible provider", () => {
       detail: "bad credentials",
     });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("only builds an endpoint from an http or https Base URL", () => {
+    expect(endpointFor("https://provider.example/v1")).toBe("https://provider.example/v1/chat/completions");
+    expect(endpointFor("http://127.0.0.1:11434/v1/")).toBe("http://127.0.0.1:11434/v1/chat/completions");
+    expect(endpointFor("http://127.0.0.1:11434/v1/chat/completions"))
+      .toBe("http://127.0.0.1:11434/v1/chat/completions");
+
+    for (const bad of ["file:///c:/windows/win.ini", "data:application/json,{}", "ftp://example.com/v1"]) {
+      expect(() => endpointFor(bad)).toThrow(/只支持 http 或 https/);
+    }
+    expect(() => endpointFor("provider.example/v1")).toThrow(/不是有效地址/);
+  });
+
+  it("reports an unusable Base URL without sending a request", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const provider = new OpenAICompatibleProvider({
+      enabled: true,
+      provider: "custom",
+      model: "test-model",
+      baseUrl: "file:///etc/passwd",
+      apiKey: "",
+      timeoutMs: 5_000,
+    });
+
+    await expect(provider.chat([{ role: "user", content: "test" }])).rejects.toMatchObject({
+      code: "AI_ERROR",
+      message: "AI Base URL 只支持 http 或 https，当前是 file:",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

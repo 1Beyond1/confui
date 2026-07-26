@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import type { ConfigFormSchema, InferOptions } from "../../shared/schema.ts";
 import type { AIProvider } from "../ai/provider.ts";
 import { AI_FILE_LIMIT, readTextSnapshot } from "../files.ts";
-import { detectFormat, parseConfig } from "../formats.ts";
+import { assertEditableSyntax, detectFormat, parseConfig } from "../formats.ts";
 import { safeJoin } from "../paths.ts";
 import { inferAIFields } from "./ai.ts";
 import { inferExampleFields } from "./examples.ts";
@@ -27,6 +27,7 @@ export async function inferConfig(
   const format = detectFormat(relativeFile);
   if (!format) throw new Error("不支持这个配置文件格式");
   const { text, version } = await readTextSnapshot(absolutePath);
+  assertEditableSyntax(relativeFile, text);
   const parsed = parseConfig(text, format);
   const warnings: string[] = [];
   const candidates: FieldCandidate[] = [];

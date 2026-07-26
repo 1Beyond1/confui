@@ -14,7 +14,7 @@ Confui 是一个 Windows 桌面配置编辑器。选择本地项目后，它会�
 | --- | --- | --- |
 | JSON / JSONC | 支持注释、尾随逗号 | AST 增量编辑，保留注释、缩进和键顺序 |
 | ENV | 支持 `export`、引号和注释 | 逐行修改，保留相邻内容 |
-| INI / CFG / CONF | 支持节与键 | 逐行修改 |
+| INI / CFG / CONF | 仅限 INI 语法（节与键）；nginx、httpd、redis 这类指令式 `.conf` / `.cfg` 会被标记为不支持且不可编辑 | 逐行修改 |
 | Java Properties | 支持转义键 | 逐行修改 |
 | YAML | 完整解析 | 保存前提示可能重新排版或丢失注释 |
 | TOML | 完整解析 | 保存前提示可能重新排版或丢失注释 |
@@ -41,7 +41,7 @@ JavaScript / TypeScript 配置文件不会被伪装成 JSON 打开。范例文�
 - 保存前展示逐字段差异。
 - 保存时校验文件 hash，拒绝覆盖外部修改。
 - 写入前生成 `.bak`，再通过同目录临时文件原子替换。
-- API Key 与 GitHub Token 使用 Electron `safeStorage` 加密。
+- API Key 与 GitHub Token 使用 Electron `safeStorage` 加密；系统安全存储不可用时保留原密文、不会被空值覆盖，并在设置页明确标注"已保存但无法解密"。
 - 发给 AI 的配置会先按字段名屏蔽 Token、密码、密钥等敏感值。
 
 ## 开发
@@ -78,8 +78,26 @@ tests/      单元、集成与端到端测试项目
 scripts/    确定性便携打包脚本
 ```
 
+## 网络行为
+
+Confui 只在下面三种情况下联网，其余功能完全本地：
+
+| 场景 | 目标 | 触发条件 |
+| --- | --- | --- |
+| 补充文档 | GitHub README API | 本地 README 缺失，且项目填写了 GitHub 链接 |
+| 拉取远程 JSON Schema | 仅 `json.schemastore.org`、`schemastore.org`、`raw.githubusercontent.com`、`unpkg.com`、`cdn.jsdelivr.net` | 配置文件声明了指向以上域名的 `https` `$schema` |
+| 检查更新 | GitHub Release API | 在设置页手动点击检查 |
+
+远程 `$schema` 只接受 `https` 与上述域名，其他地址会被跳过并在界面给出提示；拉取结果在内存中缓存 10 分钟。AI 请求只发往用户自己配置的 Base URL（必须是 `http` 或 `https`）。
+
 ## 已知边界
 
 - GitHub 链接只用于本地 README 缺失时补充文档；编辑仍需要本地项目文件夹。
 - YAML / TOML 的语义会保留，但第三方解析器无法承诺完整保留注释和原排版，因此保存前会明确提示。
 - AI 是可选的最后回退层；未配置供应商时，其余推断能力仍可正常工作。
+- 打包产物没有代码签名，首次运行时 Windows SmartScreen 可能提示"未知发布者"。
+- 界面文案目前只有中文，尚未抽出 i18n 层。
+
+## 许可证
+
+[MIT](LICENSE)

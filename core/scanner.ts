@@ -1,9 +1,12 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
-import type { ConfigFile, ProjectScanResult } from "../shared/schema.ts";
+import type { ConfigFile, ConfigFileStatus, ProjectScanResult } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
 import { AI_FILE_LIMIT, HARD_FILE_LIMIT } from "./files.ts";
-import { detectFormat } from "./formats.ts";
+import { detectFormat, isUnambiguousIniName, looksLikeIni } from "./formats.ts";
+
+/** Enough of a `.conf` / `.cfg` file to tell INI apart from nginx-style syntax. */
+const SNIFF_BYTES = 64 * 1024;
 
 const KNOWN_FILES = new Set([
   "package.json",
@@ -119,11 +122,14 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
         const info = await stat(absolutePath);
         const relativePath = relative(root, absolutePath).replace(/\\/g, "/");
         const confidence = classifyConfidence(entry.name, relativePath);
-        const status = info.size > HARD_FILE_LIMIT
+        let status: ConfigFileStatus = info.size > HARD_FILE_LIMIT
           ? "too-large"
           : info.size > AI_FILE_LIMIT
             ? "large"
             : "ready";
+        if (status !== "too-large" && format === "ini" && !isUnambiguousIniName(entry.name)) {
+          if (!looksLikeIni(await readPrefix(absolutePath, SNIFF_BYTES))) status = "unsupported";
+        }
         files.push({
           path: relativePath,
           kind: KNOWN_FILES.has(lowerName) ? lowerName : format,
@@ -134,9 +140,11 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
           status,
           warning: status === "too-large"
             ? "文件超过 5 MB，仅显示但不会打开"
-            : status === "large"
-              ? "文件超过 1 MB，将跳过 AI 分析"
-              : undefined,
+            : status === "unsupported"
+              ? "这不是 INI 语法（例如 nginx / httpd 指令式配置），Confui 不会编辑它"
+              : status === "large"
+                ? "文件超过 1 MB，将跳过 AI 分析"
+                : undefined,
         });
       } catch {
         skippedCount += 1;
@@ -157,6 +165,21 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
     skippedCount,
     warnings,
   };
+}
+
+/** Reads at most `maxBytes` and drops a trailing partial line. */
+async function readPrefix(absolutePath: string, maxBytes: number): Promise<string> {
+  const handle = await open(absolutePath, "r");
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
+    if (bytesRead < maxBytes) return text;
+    const lastBreak = text.lastIndexOf("\n");
+    return lastBreak > 0 ? text.slice(0, lastBreak) : text;
+  } finally {
+    await handle.close();
+  }
 }
 
 export function isExampleFilename(filename: string): boolean {

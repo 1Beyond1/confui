@@ -40,6 +40,9 @@ export function SettingsPage({
     });
   }, []);
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(settings), [draft, settings]);
+  // A locked credential is shown as an empty field, so say why: otherwise the
+  // user reads it as "never saved" and cannot tell that a value is still stored.
+  const locked = settings.lockedSecrets;
   useEffect(() => {
     onDirtyChange(dirty);
     return () => onDirtyChange(false);
@@ -165,7 +168,9 @@ export function SettingsPage({
                 <input id="settings-ai-api-key" class="control" type={showApiKey ? "text" : "password"} value={draft.ai.apiKey} disabled={!draft.ai.enabled} autocomplete="off" placeholder="本地模型可留空" onInput={(event) => setAi({ apiKey: event.currentTarget.value })}/>
                 <button class="icon-button" type="button" disabled={!draft.ai.enabled} onClick={() => setShowApiKey(!showApiKey)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}><Icon name={showApiKey ? "eye-off" : "eye"}/></button>
               </div>
-              <small class="secure-note"><Icon name="shield" size={14}/>使用 Windows 安全存储加密，不会写入项目文件。</small>
+              {locked?.apiKey
+                ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>已保存的 API Key 无法解密（Windows 安全存储不可用），密文已保留。留空保存不会清除它；填入新值会覆盖。</small>
+                : <small class="secure-note"><Icon name="shield" size={14}/>使用 Windows 安全存储加密，不会写入项目文件。</small>}
             </div>
           </div>
           <div class="settings-inline-action">
@@ -186,7 +191,9 @@ export function SettingsPage({
               <input id="settings-github-token" class="control" type={showGithubToken ? "text" : "password"} value={draft.github.token} autocomplete="off" placeholder="github_pat_..." onInput={(event) => setDraft((current) => ({ ...current, github: { token: event.currentTarget.value } }))}/>
               <button class="icon-button" type="button" onClick={() => setShowGithubToken(!showGithubToken)} aria-label={showGithubToken ? "隐藏 GitHub Token" : "显示 GitHub Token"}><Icon name={showGithubToken ? "eye-off" : "eye"}/></button>
             </div>
-            <small>公开仓库通常无需填写。Token 同样会加密保存。</small>
+            {locked?.githubToken
+              ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>已保存的 Token 无法解密（Windows 安全存储不可用），密文已保留。留空保存不会清除它；填入新值会覆盖。</small>
+              : <small>公开仓库通常无需填写。Token 同样会加密保存。</small>}
           </div>
         </div>
       </section>

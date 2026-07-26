@@ -12,15 +12,35 @@ interface SchemaResult {
 }
 
 type JsonSchema = Record<string, unknown>;
-const remoteSchemaCache = new Map<string, Promise<JsonSchema>>();
+
+/**
+ * Hosts whose schemas Confui is willing to fetch. A config file in an untrusted
+ * project can name any `$schema` URL, and an unrestricted fetch would turn
+ * merely opening that project into an outbound request carrying the user's IP.
+ * Everything outside this list is skipped with a warning instead.
+ */
+const SCHEMA_HOSTS = new Set([
+  "json.schemastore.org",
+  "schemastore.org",
+  "raw.githubusercontent.com",
+  "unpkg.com",
+  "cdn.jsdelivr.net",
+]);
+
+/** Remote schemas change rarely, but the cache must not outlive a long session. */
+const SCHEMA_CACHE_TTL_MS = 10 * 60 * 1_000;
+const SCHEMA_CACHE_LIMIT = 32;
+
+const remoteSchemaCache = new Map<string, { fetchedAt: number; schema: Promise<JsonSchema> }>();
 
 export async function inferJsonSchemaFields(
   filePath: string,
   projectRoot: string,
   value: unknown,
+  fetcher: typeof fetch = fetch,
 ): Promise<SchemaResult> {
   const warnings: string[] = [];
-  const schema = await findSchema(filePath, projectRoot, value, warnings);
+  const schema = await findSchema(filePath, projectRoot, value, warnings, fetcher);
   if (!schema) return { fields: [], warnings };
   try {
     return { fields: fieldsFromSchema(schema, schema, value), warnings };
@@ -35,18 +55,25 @@ async function findSchema(
   projectRoot: string,
   value: unknown,
   warnings: string[],
+  fetcher: typeof fetch,
 ): Promise<JsonSchema | undefined> {
   const schemaRef = value !== null && typeof value === "object"
     ? (value as Record<string, unknown>).$schema
     : undefined;
   if (typeof schemaRef === "string") {
     try {
-      if (/^https?:\/\//i.test(schemaRef)) return await fetchSchema(schemaRef);
-      const candidate = schemaRef.startsWith("file:")
-        ? fileURLToPath(schemaRef)
-        : resolve(dirname(filePath), schemaRef);
-      if (isInsideProject(candidate, projectRoot)) return await readSchema(candidate);
-      warnings.push("配置声明的 JSON Schema 位于项目目录之外，已跳过");
+      if (/^https?:\/\//i.test(schemaRef)) {
+        const target = allowedSchemaUrl(schemaRef);
+        if (target) return await fetchSchema(target, fetcher);
+        // Fall through to the conventional local schema files below.
+        warnings.push(`配置声明的 JSON Schema 来自未授信的地址，已跳过：${describeHost(schemaRef)}`);
+      } else {
+        const candidate = schemaRef.startsWith("file:")
+          ? fileURLToPath(schemaRef)
+          : resolve(dirname(filePath), schemaRef);
+        if (isInsideProject(candidate, projectRoot)) return await readSchema(candidate);
+        warnings.push("配置声明的 JSON Schema 位于项目目录之外，已跳过");
+      }
     } catch (error) {
       warnings.push(`未能读取配置声明的 JSON Schema：${error instanceof Error ? error.message : String(error)}`);
     }
@@ -70,24 +97,46 @@ async function readSchema(path: string): Promise<JsonSchema> {
   return JSON.parse(text) as JsonSchema;
 }
 
-async function fetchSchema(url: string): Promise<JsonSchema> {
+/**
+ * Returns the URL to fetch, or `undefined` when the reference is not one Confui
+ * will request. HTTPS only — the allowlisted hosts all serve it, and plain HTTP
+ * would let anything on the path rewrite the schema that drives the form.
+ */
+export function allowedSchemaUrl(schemaRef: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(schemaRef);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:") return undefined;
+  return SCHEMA_HOSTS.has(url.hostname.toLowerCase()) ? url.href : undefined;
+}
+
+async function fetchSchema(url: string, fetcher: typeof fetch): Promise<JsonSchema> {
   const cached = remoteSchemaCache.get(url);
-  if (cached) return cached;
-  const request = fetchSchemaUncached(url);
-  remoteSchemaCache.set(url, request);
+  if (cached && Date.now() - cached.fetchedAt < SCHEMA_CACHE_TTL_MS) return cached.schema;
+  const request = fetchSchemaUncached(url, fetcher);
+  // Re-inserting keeps the Map ordered oldest-first for the size cap below.
+  remoteSchemaCache.delete(url);
+  remoteSchemaCache.set(url, { fetchedAt: Date.now(), schema: request });
+  for (const key of remoteSchemaCache.keys()) {
+    if (remoteSchemaCache.size <= SCHEMA_CACHE_LIMIT) break;
+    remoteSchemaCache.delete(key);
+  }
   try {
     return await request;
   } catch (error) {
-    remoteSchemaCache.delete(url);
+    if (remoteSchemaCache.get(url)?.schema === request) remoteSchemaCache.delete(url);
     throw error;
   }
 }
 
-async function fetchSchemaUncached(url: string): Promise<JsonSchema> {
+async function fetchSchemaUncached(url: string, fetcher: typeof fetch): Promise<JsonSchema> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 4_000);
   try {
-    const response = await fetch(url, {
+    const response = await fetcher(url, {
       headers: { Accept: "application/schema+json, application/json" },
       signal: controller.signal,
     });
@@ -206,6 +255,15 @@ function schemaType(schema: JsonSchema, key: string, value: unknown): FieldType 
       if (Array.isArray(value)) return "array";
       if (value !== null && typeof value === "object") return "json";
       return "string";
+  }
+}
+
+/** Names the host in a warning without echoing a possibly huge URL back to the UI. */
+function describeHost(schemaRef: string): string {
+  try {
+    return new URL(schemaRef).host || schemaRef.slice(0, 80);
+  } catch {
+    return schemaRef.slice(0, 80);
   }
 }
 

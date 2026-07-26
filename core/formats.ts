@@ -11,7 +11,10 @@ import {
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { ConfigChange, ConfigFormat, PathSegment } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
-import { cloneValue, setAtPath } from "./paths.ts";
+import { cloneValue, getAtPath, setAtPath } from "./paths.ts";
+
+/** Share of meaningful lines that must look like `[section]` or `key=value`. */
+const INI_ASSIGNMENT_RATIO = 0.8;
 
 export function detectFormat(filename: string): ConfigFormat | null {
   const lower = filename.toLowerCase();
@@ -23,6 +26,48 @@ export function detectFormat(filename: string): ConfigFormat | null {
   if (lower.endsWith(".ini") || lower.endsWith(".conf") || lower.endsWith(".cfg")) return "ini";
   if (lower.endsWith(".properties")) return "properties";
   return null;
+}
+
+/** True when the extension alone is enough to trust the INI parser. */
+export function isUnambiguousIniName(filename: string): boolean {
+  return filename.toLowerCase().endsWith(".ini");
+}
+
+/**
+ * `.conf` and `.cfg` are shared by many unrelated syntaxes — nginx, httpd,
+ * redis and sshd all use them. The INI parser accepts every one of those
+ * without complaint and turns bare directives into boolean keys, so the
+ * content has to be sniffed before the extension can be trusted.
+ */
+export function looksLikeIni(text: string): boolean {
+  let assignments = 0;
+  let others = 0;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    if (/^\[[^\]]+]$/.test(line) || /^[^=]+=/.test(line)) assignments += 1;
+    else others += 1;
+  }
+  const total = assignments + others;
+  // An empty or comment-only file has nothing that could be misread.
+  if (!total) return true;
+  return assignments / total >= INI_ASSIGNMENT_RATIO;
+}
+
+/**
+ * Main-process guard for the `.conf` / `.cfg` sniff. The scanner already marks
+ * these files `unsupported`, but inference and save must not depend on the
+ * renderer honouring that flag.
+ */
+export function assertEditableSyntax(filename: string, text: string): void {
+  if (detectFormat(filename) !== "ini" || isUnambiguousIniName(filename)) return;
+  if (looksLikeIni(text)) return;
+  throw new ConfuiError(
+    "PARSE_ERROR",
+    "这个文件不是 INI 语法，Confui 不会编辑它",
+    `${filename}：nginx / httpd / redis 这类指令式配置只是共用了 .conf / .cfg 扩展名，`
+      + "按 INI 解析会把指令误读成开关，保存时还会写入无效内容。",
+  );
 }
 
 export function parseConfig(text: string, format: ConfigFormat): unknown {
@@ -173,7 +218,6 @@ function patchFlatAssignments(
   format: "env" | "properties",
 ): string {
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
-  const lines = text.split(/\r?\n/);
   const updates = new Map<string, unknown>();
   for (const change of changes) {
     if (change.segments.length !== 1 || typeof change.segments[0] !== "string") {
@@ -181,25 +225,34 @@ function patchFlatAssignments(
     }
     updates.set(change.segments[0], change.value);
   }
+  const parsed = format === "env" ? parseEnv(text) : parseProperties(text);
   const seen = new Set<string>();
-  const nextLines = lines.map((line) => {
+  const nextLines: string[] = [];
+  // Properties values may span several physical lines via a trailing "\".
+  // Match against the joined logical line so the whole group is replaced
+  // together and no continuation is left behind as an orphan key.
+  for (const group of groupLogicalLines(text.split(/\r?\n/), format)) {
+    const logical = group.length > 1 ? joinContinuations(group.join("\n")) : group[0] ?? "";
     const match = format === "env"
-      ? line.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/)
-      : line.match(/^(\s*)((?:\\.|[^:=\s])+?)(\s*(?:[:=]|\s)\s*)(.*)$/);
+      ? logical.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/)
+      : logical.match(/^(\s*)((?:\\.|[^:=\s])+?)(\s*(?:[:=]|\s)\s*)(.*)$/);
     const rawKey = match?.[2];
-    if (!rawKey) return line;
-    const key = format === "properties" ? unescapeProperty(rawKey) : rawKey;
-    if (!updates.has(key)) return line;
+    const key = rawKey && format === "properties" ? unescapeProperty(rawKey) : rawKey;
+    if (!rawKey || !key || !updates.has(key)) {
+      nextLines.push(...group);
+      continue;
+    }
     seen.add(key);
     const oldValue = match?.[4] ?? "";
     const envParts = format === "env" ? splitEnvValueAndComment(oldValue) : undefined;
     const nextValue = format === "env"
       ? `${formatEnvValue(updates.get(key), envParts?.value)}${envParts?.comment ?? ""}`
       : escapeProperty(String(updates.get(key) ?? ""));
-    return `${match?.[1] ?? ""}${rawKey}${match?.[3] ?? "="}${nextValue}`;
-  });
+    nextLines.push(`${match?.[1] ?? ""}${rawKey}${match?.[3] ?? "="}${nextValue}`);
+  }
   for (const [key, value] of updates) {
     if (seen.has(key)) continue;
+    assertAppendable(parsed, [key], format);
     nextLines.push(
       format === "env"
         ? `${key}=${formatEnvValue(value)}`
@@ -208,6 +261,44 @@ function patchFlatAssignments(
   }
   while (nextLines.length > 1 && nextLines.at(-1) === "" && nextLines.at(-2) === "") nextLines.pop();
   return nextLines.join(eol).replace(new RegExp(`${escapeRegExp(eol)}+$`), "") + eol;
+}
+
+/**
+ * Groups physical lines into logical ones. A properties line continues into
+ * the next when it ends with an odd number of backslashes.
+ */
+function groupLogicalLines(lines: readonly string[], format: "env" | "properties"): string[][] {
+  if (format !== "properties") return lines.map((line) => [line]);
+  const groups: string[][] = [];
+  let current: string[] = [];
+  for (const line of lines) {
+    current.push(line);
+    if (!(/(?:^|[^\\])(\\\\)*\\$/.test(line))) {
+      groups.push(current);
+      current = [];
+    }
+  }
+  if (current.length) groups.push(current);
+  return groups;
+}
+
+/**
+ * Refuses to append a key that the parser already reported. Hitting this means
+ * the text scan could not find the line the value came from, so appending
+ * would add a second, contradictory definition instead of editing in place.
+ */
+function assertAppendable(
+  parsed: unknown,
+  segments: readonly PathSegment[],
+  format: ConfigFormat,
+): void {
+  if (getAtPath(parsed, segments) === undefined) return;
+  throw new ConfuiError(
+    "SAVE_ERROR",
+    "无法在原文件中定位这个配置项，已取消保存",
+    `${segments.join(".")}：该键存在于解析结果中，但文件里没有对应的赋值行。`
+      + `这通常说明文件不是标准 ${format.toUpperCase()} 语法，Confui 不会向它追加内容。`,
+  );
 }
 
 function patchIni(text: string, changes: readonly ConfigChange[]): string {
@@ -220,6 +311,7 @@ function patchIni(text: string, changes: readonly ConfigChange[]): string {
     }
     updates.set(JSON.stringify(change.segments), change);
   }
+  const parsed = ini.parse(text);
   const seen = new Set<string>();
   let section: string[] = [];
   const next = lines.map((line) => {
@@ -245,6 +337,7 @@ function patchIni(text: string, changes: readonly ConfigChange[]): string {
     const stringSegments = change.segments as string[];
     const key = stringSegments.at(-1);
     if (!key) continue;
+    assertAppendable(parsed, stringSegments, "ini");
     const sectionSegments = stringSegments.slice(0, -1);
     const assignment = `${ini.safe(key)}=${ini.safe(String(change.value ?? ""))}`;
     if (sectionSegments.length) {

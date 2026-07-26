@@ -16,7 +16,7 @@ export function Logo({ compact = false }: { compact?: boolean }) {
   return (
     <div class={`brand ${compact ? "brand--compact" : ""}`}>
       <img class="brand__mark" src="./confui-icon.png" alt="" aria-hidden="true"/>
-      {!compact && <span class="brand__copy"><strong>Confui</strong><small>配置，终于看得懂</small></span>}
+      {!compact && <span class="brand__copy"><strong>Con<em>fui</em></strong><small>配置，终于看得懂</small></span>}
     </div>
   );
 }

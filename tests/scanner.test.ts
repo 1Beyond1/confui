@@ -38,4 +38,20 @@ describe("project scanner", () => {
     expect(result.files[0]?.confidence).toBe("known");
     expect(result.files.at(-1)?.confidence).toBe("possible");
   });
+
+  it("marks a directive-style .conf unsupported but keeps a real INI editable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-conf-"));
+    temporaryDirectories.push(root);
+    await Promise.all([
+      writeFile(join(root, "nginx.conf"), "user nginx;\nhttp {\n    listen 80;\n}\n"),
+      writeFile(join(root, "app.cfg"), "[database]\nhost=localhost\n"),
+      writeFile(join(root, "plain.ini"), "key=value\n"),
+    ]);
+
+    const byPath = new Map((await scanProject(root)).files.map((file) => [file.path, file]));
+    expect(byPath.get("nginx.conf")?.status).toBe("unsupported");
+    expect(byPath.get("nginx.conf")?.warning).toContain("nginx");
+    expect(byPath.get("app.cfg")?.status).toBe("ready");
+    expect(byPath.get("plain.ini")?.status).toBe("ready");
+  });
 });

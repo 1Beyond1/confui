@@ -199,6 +199,33 @@ function FieldControl({
   }
 
   if (field.type === "number" || field.type === "integer") {
+    const current = typeof value === "number" && Number.isFinite(value) ? value : undefined;
+    // 上下界都已知且跨度不大的整数用滑块；端口号那种上万的跨度滑块反而更难对准，仍走数字输入框。
+    const { minimum, maximum } = field;
+    const slidable = field.type === "integer"
+      && typeof minimum === "number" && Number.isFinite(minimum)
+      && typeof maximum === "number" && Number.isFinite(maximum)
+      && maximum > minimum && maximum - minimum <= 1000;
+    if (slidable) {
+      return (
+        <div class={`range-control ${error ? "range-control--error" : ""}`}>
+          <input
+            id={id}
+            type="range"
+            min={minimum}
+            max={maximum}
+            step={1}
+            value={current ?? minimum}
+            aria-describedby={describedBy}
+            aria-invalid={Boolean(error)}
+            aria-required={field.required}
+            aria-valuetext={current === undefined ? "未设置" : String(current)}
+            onInput={(event) => onChange(event.currentTarget.valueAsNumber)}
+          />
+          <b class="range-control__value">{current ?? "—"}</b>
+        </div>
+      );
+    }
     return (
       <input
         id={id}
@@ -207,7 +234,7 @@ function FieldControl({
         step={field.type === "integer" ? 1 : "any"}
         min={field.minimum}
         max={field.maximum}
-        value={typeof value === "number" && Number.isFinite(value) ? value : ""}
+        value={current ?? ""}
         placeholder={field.placeholder}
         aria-describedby={describedBy}
         aria-invalid={Boolean(error)}

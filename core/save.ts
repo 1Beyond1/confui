@@ -9,7 +9,7 @@ import type {
 } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
 import { currentVersion, readTextSnapshot } from "./files.ts";
-import { detectFormat, parseConfig, updateConfigText } from "./formats.ts";
+import { assertEditableSyntax, detectFormat, parseConfig, updateConfigText } from "./formats.ts";
 import { formatPath, getAtPath, safeJoin } from "./paths.ts";
 
 const FORBIDDEN_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
@@ -25,6 +25,7 @@ export async function previewSave(
   if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
   const snapshot = await readTextSnapshot(absolutePath);
   assertSameVersion(snapshot.version, expectedVersion);
+  assertEditableSyntax(relativeFile, snapshot.text);
   const parsed = parseConfig(snapshot.text, format);
   const operations = requestedChanges.filter((change) => {
     validateChange(change);
@@ -52,6 +53,7 @@ export async function commitSave(root: string, preview: SavePreview): Promise<Sa
   if (!format || format !== preview.format) throw new ConfuiError("INVALID_INPUT", "保存请求中的文件格式不一致");
   const snapshot = await readTextSnapshot(absolutePath);
   assertSameVersion(snapshot.version, preview.expectedVersion);
+  assertEditableSyntax(preview.file, snapshot.text);
   for (const operation of preview.operations) validateChange(operation);
   const generated = updateConfigText(snapshot.text, format, preview.operations);
   if (generated.output !== preview.output) {

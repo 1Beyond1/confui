@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { parseConfig, updateConfigText } from "../core/formats.ts";
+import { assertEditableSyntax, looksLikeIni, parseConfig, updateConfigText } from "../core/formats.ts";
+
+const NGINX_CONF = `user nginx;
+worker_processes auto;
+
+http {
+    server {
+        listen 80;
+        server_name example.com;
+    }
+}
+`;
 
 describe("configuration formats", () => {
   it("applies nested JSONC edits while preserving comments, trailing commas and indentation", () => {
@@ -89,6 +100,48 @@ app\\:mode=dev
     expect(propertiesOutput).toContain("app\\:mode=prod");
     expect(propertiesOutput).toContain("new\\ key=\\ leading");
     expect(parseConfig(propertiesOutput, "properties")).toMatchObject({ "new key": " leading" });
+  });
+
+  it("refuses to treat a directive-style .conf as INI", () => {
+    expect(looksLikeIni(NGINX_CONF)).toBe(false);
+    expect(looksLikeIni("[core]\n\trepositoryformatversion = 0\n")).toBe(true);
+    expect(looksLikeIni("; only comments\n")).toBe(true);
+
+    expect(() => assertEditableSyntax("nginx.conf", NGINX_CONF)).toThrow(/不是 INI 语法/);
+    // A real INI keeps working, and the .ini extension is trusted outright.
+    expect(() => assertEditableSyntax("app.cfg", "[a]\nb=1\n")).not.toThrow();
+    expect(() => assertEditableSyntax("odd.ini", NGINX_CONF)).not.toThrow();
+  });
+
+  it("rejects a save it cannot apply in place instead of appending a stray line", () => {
+    // `ini.parse` turns every nginx directive into a boolean key, so the field
+    // exists in the parsed document but no `key=value` line backs it.
+    expect(parseConfig(NGINX_CONF, "ini")).toMatchObject({ "listen 80": true });
+    expect(() => updateConfigText(NGINX_CONF, "ini", [{ segments: ["listen 80"], value: false }]))
+      .toThrow(/无法在原文件中定位/);
+
+    const properties = "app.name=Confui\n";
+    expect(() => updateConfigText(properties, "properties", [{ segments: ["app.name"], value: "x" }]))
+      .not.toThrow();
+  });
+
+  it("replaces a whole properties continuation instead of orphaning its tail", () => {
+    const original = `# paths
+app.path=/first \\
+    /second
+app.name=Confui
+`;
+    expect(parseConfig(original, "properties")).toMatchObject({ "app.path": "/first /second" });
+
+    const { output } = updateConfigText(original, "properties", [
+      { segments: ["app.path"], value: "/only" },
+    ]);
+    expect(output).toContain("# paths");
+    expect(output).not.toContain("/second");
+    expect(parseConfig(output, "properties")).toEqual({
+      "app.path": "/only",
+      "app.name": "Confui",
+    });
   });
 
   it("round-trips YAML and TOML values and reports formatting risk", () => {

@@ -1,10 +1,11 @@
 {
   "name": "confui",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Turn project configuration files into clear, safely editable desktop forms.",
   "author": "1Beyond1",
+  "license": "MIT",
   "repository": "https://github.com/1Beyond1/confui",
   "engines": {
     "node": ">=20.19.0"

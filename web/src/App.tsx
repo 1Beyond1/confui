@@ -73,6 +73,7 @@ export function App() {
   const [settingsPageRevision, setSettingsPageRevision] = useState(0);
   const [pendingSettingsAction, setPendingSettingsAction] = useState<PendingAction>();
   const [afterSaveAction, setAfterSaveAction] = useState<PendingAction>();
+  const [appVersion, setAppVersion] = useState("");
   const toastTimer = useRef<number>();
   const openSequence = useRef(0);
   const mainContentRef = useRef<HTMLDivElement>(null);
@@ -100,6 +101,13 @@ export function App() {
         notify(result.error.message, "error");
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    // The footer label must track package.json, so it comes from the main process.
+    void window.confui.getAppInfo().then((result) => {
+      if (result.ok) setAppVersion(result.data.version);
+    });
   }, []);
 
   useEffect(() => {
@@ -183,7 +191,7 @@ export function App() {
       setView("editor");
       const refreshedSettings = await window.confui.getSettings();
       if (refreshedSettings.ok) setSettings(refreshedSettings.data);
-      const first = scanned.files.find((file) => file.status !== "too-large");
+      const first = scanned.files.find((file) => file.status === "ready" || file.status === "large");
       if (first) await loadFile(first, scanned.root, resolvedGithub);
       else if (!scanned.files.length) notify("项目中没有发现支持的配置文件", "info");
     } catch (error) {
@@ -205,8 +213,8 @@ export function App() {
     githubUrl = githubInput,
   ): Promise<void> {
     if (!root) return;
-    if (file.status === "too-large") {
-      notify(file.warning || "这个文件太大，无法安全打开", "error");
+    if (file.status === "too-large" || file.status === "unsupported") {
+      notify(file.warning || "这个文件无法安全打开", "error");
       return;
     }
     const sequence = ++openSequence.current;
@@ -444,7 +452,7 @@ export function App() {
 
         <nav class="sidebar-footer" aria-label="设置">
           <button class={view === "settings" ? "active" : ""} onClick={() => requestAction({ kind: "settings" })}><Icon name="settings"/><span>设置</span></button>
-          <small>Confui 0.2</small>
+          <small>{appVersion ? `Confui ${appVersion}` : "Confui"}</small>
         </nav>
       </aside>
 

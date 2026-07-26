@@ -100,7 +100,7 @@ export interface ConfigFormSchema {
   rawText: string;
 }
 
-export type ConfigFileStatus = "ready" | "large" | "too-large" | "unreadable";
+export type ConfigFileStatus = "ready" | "large" | "too-large" | "unreadable" | "unsupported";
 
 export interface ConfigFile {
   path: string;
@@ -168,6 +168,17 @@ export interface RecentProject {
   openedAt: number;
 }
 
+/**
+ * Which stored credentials exist on disk but could not be decrypted — an OS
+ * keychain that is locked or unavailable, or a value encrypted under another
+ * user profile. Confui reports those as empty strings so the settings page stays
+ * usable, and keeps the ciphertext untouched rather than overwriting it.
+ */
+export interface LockedSecrets {
+  apiKey: boolean;
+  githubToken: boolean;
+}
+
 export interface AppSettings {
   theme: ThemePreference;
   ai: {
@@ -182,6 +193,11 @@ export interface AppSettings {
     token: string;
   };
   recentProjects: RecentProject[];
+  /**
+   * Derived in the main process on every read; `normalizeSettings` never emits
+   * it, so a value sent by the renderer is discarded rather than trusted.
+   */
+  lockedSecrets?: LockedSecrets;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {

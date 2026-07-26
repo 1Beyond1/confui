@@ -41,14 +41,27 @@ let hasUnsavedChanges = false;
 app.setName("Confui");
 if (process.platform === "win32") app.setAppUserModelId("com.1beyond1.confui");
 
-app.whenReady().then(async () => {
-  settingsStore = new SettingsStore(join(app.getPath("userData"), "settings.json"), createSecretCodec());
-  registerIpcHandlers();
-  createWindow();
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+// Two instances editing one file would overwrite each other's `.bak` and only
+// discover the conflict at save time, so a second launch focuses the first.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
   });
-});
+
+  app.whenReady().then(async () => {
+    settingsStore = new SettingsStore(join(app.getPath("userData"), "settings.json"), createSecretCodec());
+    registerIpcHandlers();
+    createWindow();
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+}
 
 app.on("window-all-closed", () => {
   closeWatcher();
@@ -286,11 +299,12 @@ function createSecretCodec(): SecretCodec {
     decode(value) {
       if (!value) return "";
       if (!value.startsWith("enc:v1:")) return value;
-      if (!safeStorage.isEncryptionAvailable()) return "";
+      // `undefined` keeps the stored ciphertext alive — see SecretCodec.decode.
+      if (!safeStorage.isEncryptionAvailable()) return undefined;
       try {
         return safeStorage.decryptString(Buffer.from(value.slice(7), "base64"));
       } catch {
-        return "";
+        return undefined;
       }
     },
   };

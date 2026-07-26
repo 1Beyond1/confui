@@ -6,7 +6,13 @@ import { ConfuiError } from "./errors.ts";
 
 export interface SecretCodec {
   encode(value: string): string;
-  decode(value: string): string;
+  /**
+   * Returns the plaintext, or `undefined` when a ciphertext is present but
+   * cannot be read — an OS keychain that is locked or unavailable, or a value
+   * encrypted under a different user profile. The distinction matters: an
+   * unreadable secret must never be treated as an empty one.
+   */
+  decode(value: string): string | undefined;
 }
 
 interface PersistedSettings extends Omit<AppSettings, "ai" | "github"> {
@@ -21,13 +27,46 @@ export class SettingsStore {
   ) {}
 
   async load(): Promise<AppSettings> {
+    return this.decodeSecrets(await this.readPersisted());
+  }
+
+  async save(input: AppSettings): Promise<AppSettings> {
+    const settings = normalizeSettings(input);
+    // A corrupt settings file has to stay repairable by saving over it, so a
+    // parse failure here means "no ciphertext worth preserving", not an error.
+    const stored = await this.readPersisted().catch((error: unknown) => {
+      if (error instanceof ConfuiError && error.code === "PARSE_ERROR") return structuredClone(DEFAULT_SETTINGS);
+      throw error;
+    });
+    const persisted: PersistedSettings = {
+      ...settings,
+      ai: { ...settings.ai, apiKey: this.encodeSecret(settings.ai.apiKey, stored.ai.apiKey) },
+      github: { token: this.encodeSecret(settings.github.token, stored.github.token) },
+    };
+    await this.writePersisted(persisted);
+    // Reported from what was actually written, not from `input`: a locked secret
+    // is preserved rather than cleared, and the caller needs to know that.
+    return this.decodeSecrets(persisted);
+  }
+
+  async rememberProject(project: RecentProject): Promise<AppSettings> {
+    // Opening a project deliberately skips the decode/encode round trip: when
+    // the keychain is locked the secrets cannot be read, and writing back what
+    // `load()` reported would replace the ciphertext with an empty string.
+    const persisted = await this.readPersisted();
+    persisted.recentProjects = [
+      project,
+      ...persisted.recentProjects.filter((item) => item.path.toLowerCase() !== project.path.toLowerCase()),
+    ].slice(0, 10);
+    await this.writePersisted(persisted);
+    return this.decodeSecrets(persisted);
+  }
+
+  /** Reads the on-disk settings with the secrets left in their stored form. */
+  private async readPersisted(): Promise<PersistedSettings> {
     try {
       const text = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(text) as Partial<PersistedSettings>;
-      const settings = normalizeSettings(parsed);
-      settings.ai.apiKey = this.codec.decode(settings.ai.apiKey);
-      settings.github.token = this.codec.decode(settings.github.token);
-      return settings;
+      return normalizeSettings(JSON.parse(text) as Partial<PersistedSettings>);
     } catch (error) {
       if (isMissingFile(error)) return structuredClone(DEFAULT_SETTINGS);
       if (error instanceof SyntaxError) throw new ConfuiError("PARSE_ERROR", "Confui 设置文件已损坏", error.message);
@@ -35,13 +74,7 @@ export class SettingsStore {
     }
   }
 
-  async save(input: AppSettings): Promise<AppSettings> {
-    const settings = normalizeSettings(input);
-    const persisted: PersistedSettings = {
-      ...settings,
-      ai: { ...settings.ai, apiKey: this.codec.encode(settings.ai.apiKey) },
-      github: { token: this.codec.encode(settings.github.token) },
-    };
+  private async writePersisted(persisted: PersistedSettings): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
     const temporary = `${this.filePath}.${process.pid}.tmp`;
     try {
@@ -51,16 +84,37 @@ export class SettingsStore {
       await unlink(temporary).catch(() => undefined);
       throw new ConfuiError("SAVE_ERROR", "无法保存 Confui 设置", error instanceof Error ? error.message : String(error));
     }
+  }
+
+  /**
+   * An unreadable secret is reported as empty so the settings page stays usable,
+   * plus a `lockedSecrets` flag so the page can say why the field looks empty
+   * instead of letting the user believe the credential was never saved.
+   */
+  private decodeSecrets(persisted: PersistedSettings): AppSettings {
+    const apiKey = this.codec.decode(persisted.ai.apiKey);
+    const githubToken = this.codec.decode(persisted.github.token);
+    const settings: AppSettings = {
+      ...persisted,
+      ai: { ...persisted.ai, apiKey: apiKey ?? "" },
+      github: { token: githubToken ?? "" },
+      lockedSecrets: undefined,
+    };
+    if (apiKey === undefined || githubToken === undefined) {
+      settings.lockedSecrets = { apiKey: apiKey === undefined, githubToken: githubToken === undefined };
+    }
     return settings;
   }
 
-  async rememberProject(project: RecentProject): Promise<AppSettings> {
-    const current = await this.load();
-    current.recentProjects = [
-      project,
-      ...current.recentProjects.filter((item) => item.path.toLowerCase() !== project.path.toLowerCase()),
-    ].slice(0, 10);
-    return this.save(current);
+  /**
+   * Refuses to overwrite an unreadable ciphertext with an empty string. `load()`
+   * reports a locked secret as `""`, so without this guard merely opening a
+   * project would round-trip that `""` back to disk and destroy a key that a
+   * later, working session could still have decrypted.
+   */
+  private encodeSecret(value: string, stored: string): string {
+    if (!value && stored && this.codec.decode(stored) === undefined) return stored;
+    return this.codec.encode(value);
   }
 }
 

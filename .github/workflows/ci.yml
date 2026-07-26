@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    # Confui only ships for Windows, so the gate runs on the target platform:
+    # path handling and the atomic rename-on-save behave differently elsewhere.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20.19"
+          cache: npm
+
+      - run: npm ci
+
+      # typecheck + vitest + electron-vite build, per PROJECT_SPEC §7.
+      - run: npm run check
+
+      # The release gate requires a clean tree: tests must not touch fixtures.
+      - name: Verify the working tree is clean
+        shell: bash
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Working tree is dirty after npm run check:"
+            git status --porcelain
+            exit 1
+          fi

@@ -87,10 +87,29 @@ export async function testAIConnection(settings: AppSettings["ai"]): Promise<Con
   };
 }
 
-function endpointFor(baseUrl: string): string {
-  const base = baseUrl.trim().replace(/\/+$/, "");
-  if (/\/chat\/completions$/i.test(base)) return base;
-  return `${base}/chat/completions`;
+/**
+ * Resolves the chat endpoint, refusing anything that is not plain HTTP(S) —
+ * `fetch` also speaks `file:` and `data:`, and a mistyped Base URL should fail
+ * with a readable message rather than reach for something local.
+ *
+ * The check lives here rather than in `normalizeSettings` because that runs when
+ * loading an existing settings file too: throwing there would lock the user out
+ * of the very settings page that lets them correct the value.
+ */
+export function endpointFor(baseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl.trim());
+  } catch {
+    throw new ConfuiError("AI_ERROR", "AI Base URL 不是有效地址", baseUrl.trim().slice(0, 200));
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new ConfuiError("AI_ERROR", `AI Base URL 只支持 http 或 https，当前是 ${url.protocol}`);
+  }
+  if (!/\/chat\/completions$/i.test(url.pathname)) {
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/chat/completions`;
+  }
+  return url.href;
 }
 
 function clampTimeout(value: number): number {
