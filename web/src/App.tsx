@@ -227,6 +227,13 @@ export function App() {
     }
     const sequence = ++openSequence.current;
     setBusy("infer");
+    // Switch the selection immediately. Keeping the previous form visible
+    // while a new file is being inferred makes it too easy to edit the wrong
+    // file, even though the controls are temporarily disabled.
+    setActiveFile(file);
+    setSchema(undefined);
+    setValues({});
+    setExternalChange(false);
     setView("editor");
     setEditorTab("form");
     try {
@@ -441,7 +448,7 @@ export function App() {
             <div class="project-card">
               <div class="project-card__icon"><Icon name="folder-open"/></div>
               <div><strong title={project.root}>{project.name}</strong><span>{project.files.length} 个配置文件</span></div>
-              <button class="icon-button" aria-label="重新扫描项目" title="重新扫描项目" onClick={() => requestAction({ kind: "rescan" })}><Icon name="refresh" size={16}/></button>
+              <button class="icon-button" aria-label="重新扫描项目" title="重新扫描项目" disabled={busy !== null} onClick={() => requestAction({ kind: "rescan" })}><Icon name="refresh" size={16}/></button>
             </div>
             <div class="file-tools">
               <label class="search-box">
@@ -464,6 +471,7 @@ export function App() {
                   role="option"
                   aria-selected={activeFile?.path === file.path && view === "editor"}
                   class={`file-item ${activeFile?.path === file.path && view === "editor" ? "active" : ""}`}
+                  disabled={busy !== null}
                   onClick={() => requestAction({ kind: "file", file })}
                   title={file.warning || file.path}
                 >

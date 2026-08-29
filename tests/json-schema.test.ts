@@ -126,6 +126,19 @@ describe("remote JSON Schema gating", () => {
     expect(result.fields.map((field) => field.label)).toEqual(["端口"]);
   });
 
+  it("stops expanding a schema with an excessive number of fields", async () => {
+    const { root, file } = await projectWith({ $schema: "./large.schema.json" });
+    const properties = Object.fromEntries(
+      Array.from({ length: 6_005 }, (_, index) => [`option${index}`, { type: "string" }]),
+    );
+    await writeFile(join(root, "large.schema.json"), JSON.stringify({ type: "object", properties }));
+
+    const result = await inferJsonSchemaFields(file, root, { $schema: "./large.schema.json" });
+
+    expect(result.fields).toHaveLength(6_000);
+    expect(result.truncated).toBe(true);
+  });
+
   it("rejects and cancels an oversized remote schema stream", async () => {
     const url = "https://json.schemastore.org/confui-oversized-stream-test.json";
     const { root, file } = await projectWith({ $schema: url });

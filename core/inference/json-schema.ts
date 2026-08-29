@@ -9,9 +9,14 @@ import type { FieldCandidate } from "./types.ts";
 interface SchemaResult {
   fields: FieldCandidate[];
   warnings: string[];
+  truncated: boolean;
 }
 
 type JsonSchema = Record<string, unknown>;
+interface SchemaTraversalState {
+  value: number;
+  truncated: boolean;
+}
 
 /**
  * Hosts whose schemas Confui is willing to fetch. A config file in an untrusted
@@ -31,6 +36,11 @@ const SCHEMA_HOSTS = new Set([
 const SCHEMA_CACHE_TTL_MS = 10 * 60 * 1_000;
 const SCHEMA_CACHE_LIMIT = 32;
 const SCHEMA_MAX_BYTES = 2 * 1024 * 1024;
+const MAX_SCHEMA_FIELDS = 6_000;
+const MAX_SCHEMA_ENUM_VALUES = 100;
+const MAX_SCHEMA_TEXT_CHARS = 500;
+const MAX_SCHEMA_DEFAULT_CHARS = 4_000;
+const MAX_SCHEMA_RESOLUTION_DEPTH = 32;
 
 const remoteSchemaCache = new Map<string, { fetchedAt: number; schema: Promise<JsonSchema> }>();
 
@@ -42,12 +52,13 @@ export async function inferJsonSchemaFields(
 ): Promise<SchemaResult> {
   const warnings: string[] = [];
   const schema = await findSchema(filePath, projectRoot, value, warnings, fetcher);
-  if (!schema) return { fields: [], warnings };
+  if (!schema) return { fields: [], warnings, truncated: false };
   try {
-    return { fields: fieldsFromSchema(schema, schema, value), warnings };
+    const state: SchemaTraversalState = { value: 0, truncated: false };
+    return { fields: fieldsFromSchema(schema, schema, value, [], state), warnings, truncated: state.truncated };
   } catch (error) {
     warnings.push(`JSON Schema 解析失败：${error instanceof Error ? error.message : String(error)}`);
-    return { fields: [], warnings };
+    return { fields: [], warnings, truncated: false };
   }
 }
 
@@ -173,15 +184,20 @@ function fieldsFromSchema(
   rootSchema: JsonSchema,
   value: unknown,
   prefix: PathSegment[] = [],
-  order = { value: 0 },
+  order: SchemaTraversalState = { value: 0, truncated: false },
   groupHint?: string,
 ): FieldCandidate[] {
+  if (order.truncated) return [];
   const schema = resolveSchema(schemaInput, rootSchema);
   const properties = isRecord(schema.properties) ? schema.properties : {};
   const required = new Set(Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === "string") : []);
   const fields: FieldCandidate[] = [];
 
   for (const [key, rawChild] of Object.entries(properties)) {
+    if (order.value >= MAX_SCHEMA_FIELDS) {
+      order.truncated = true;
+      break;
+    }
     if (!isRecord(rawChild)) continue;
     const child = resolveSchema(rawChild, rootSchema);
     const segments = [...prefix, key];
@@ -201,23 +217,24 @@ function fieldsFromSchema(
     }
     const enumValues = Array.isArray(child.enum)
       ? child.enum.filter((item): item is string | number => typeof item === "string" || typeof item === "number")
+        .slice(0, MAX_SCHEMA_ENUM_VALUES)
       : undefined;
     const secret = isSecretPath(segments) || child.writeOnly === true || child.format === "password";
     fields.push({
       segments,
-      label: typeof child.title === "string" ? child.title : humanize(key),
-      description: typeof child.description === "string" ? child.description : undefined,
+      label: boundedText(child.title, MAX_SCHEMA_TEXT_CHARS) ?? humanize(key),
+      description: boundedText(child.description, MAX_SCHEMA_TEXT_CHARS),
       type: secret ? "secret" : enumValues?.length ? "enum" : type,
       required: required.has(key),
-      default: child.default,
+      default: safeSchemaValue(child.default),
       enum: enumValues?.length ? enumValues : undefined,
       minimum: asNumber(child.minimum),
       maximum: asNumber(child.maximum),
       minLength: asNumber(child.minLength),
       maxLength: asNumber(child.maxLength),
-      pattern: typeof child.pattern === "string" ? child.pattern : undefined,
+      pattern: boundedText(child.pattern, MAX_SCHEMA_TEXT_CHARS),
       placeholder: typeof child.examples === "object" && Array.isArray(child.examples) && child.examples.length
-        ? String(child.examples[0] ?? "")
+        ? String(child.examples[0] ?? "").slice(0, MAX_SCHEMA_TEXT_CHARS)
         : undefined,
       secret,
       group: groupHint ?? groupForPath(segments),
@@ -230,23 +247,40 @@ function fieldsFromSchema(
   return fields;
 }
 
-function resolveSchema(schema: JsonSchema, root: JsonSchema): JsonSchema {
+function resolveSchema(
+  schema: JsonSchema,
+  root: JsonSchema,
+  resolvingRefs: ReadonlySet<string> = new Set(),
+  depth = 0,
+): JsonSchema {
+  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) return schema;
   const reference = schema.$ref;
-  if (typeof reference !== "string" || !reference.startsWith("#/")) return mergeAllOf(schema, root);
+  if (typeof reference !== "string" || !reference.startsWith("#/")) return mergeAllOf(schema, root, resolvingRefs, depth);
+  if (resolvingRefs.has(reference)) return schema;
   const parts = reference.slice(2).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~"));
   let current: unknown = root;
   for (const part of parts) {
     if (!isRecord(current)) return schema;
     current = current[part];
   }
-  return isRecord(current) ? mergeAllOf({ ...current, ...schema, $ref: undefined }, root) : schema;
+  const nextRefs = new Set(resolvingRefs);
+  nextRefs.add(reference);
+  return isRecord(current)
+    ? mergeAllOf({ ...current, ...schema, $ref: undefined }, root, nextRefs, depth + 1)
+    : schema;
 }
 
-function mergeAllOf(schema: JsonSchema, root: JsonSchema): JsonSchema {
+function mergeAllOf(
+  schema: JsonSchema,
+  root: JsonSchema,
+  resolvingRefs: ReadonlySet<string> = new Set(),
+  depth = 0,
+): JsonSchema {
+  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) return schema;
   if (!Array.isArray(schema.allOf)) return schema;
   return schema.allOf.reduce<JsonSchema>((merged, item) => {
     if (!isRecord(item)) return merged;
-    const child = resolveSchema(item, root);
+    const child = resolveSchema(item, root, resolvingRefs, depth + 1);
     return {
       ...merged,
       ...child,
@@ -291,5 +325,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function asNumber(value: unknown): number | undefined {
-  return typeof value === "number" ? value : undefined;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function boundedText(value: unknown, limit: number): string | undefined {
+  return typeof value === "string" && value.trim() ? value.slice(0, limit) : undefined;
+}
+
+function safeSchemaValue(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized && serialized.length <= MAX_SCHEMA_DEFAULT_CHARS ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }

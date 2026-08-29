@@ -5,12 +5,29 @@ import type { FieldCandidate } from "./types.ts";
 
 const MAX_OBJECT_DEPTH = 3;
 const MAX_OBJECT_KEYS = 40;
+const MAX_HEURISTIC_FIELDS = 6_000;
+const MAX_MASK_NODES = 20_000;
+const MAX_MASK_DEPTH = 32;
 
-export function inferHeuristicFields(value: unknown): FieldCandidate[] {
+interface HeuristicResult {
+  fields: FieldCandidate[];
+  truncated: boolean;
+}
+
+interface MaskState {
+  nodes: number;
+}
+
+export function inferHeuristicFields(value: unknown): HeuristicResult {
   const fields: FieldCandidate[] = [];
+  let truncated = false;
   let order = 0;
 
   function visit(current: unknown, segments: PathSegment[], depth: number): void {
+    if (fields.length >= MAX_HEURISTIC_FIELDS) {
+      truncated = true;
+      return;
+    }
     if (current !== null && typeof current === "object" && !Array.isArray(current)) {
       const entries = Object.entries(current as Record<string, unknown>);
       if (segments.length && (depth >= MAX_OBJECT_DEPTH || entries.length > MAX_OBJECT_KEYS || entries.length === 0)) {
@@ -20,6 +37,7 @@ export function inferHeuristicFields(value: unknown): FieldCandidate[] {
       for (const [key, child] of entries) {
         if (key === "$schema") continue;
         visit(child, [...segments, key], depth + 1);
+        if (truncated) return;
       }
       return;
     }
@@ -44,16 +62,34 @@ export function inferHeuristicFields(value: unknown): FieldCandidate[] {
   }
 
   visit(value, [], 0);
-  return fields;
+  return { fields, truncated };
 }
 
-export function maskSecrets(value: unknown, segments: PathSegment[] = []): unknown {
+export function maskSecrets(value: unknown, segments: PathSegment[] = [], state: MaskState = { nodes: 0 }): unknown {
   if (isSecretPath(segments)) return "***";
-  if (Array.isArray(value)) return value.map((item, index) => maskSecrets(item, [...segments, index]));
+  if (segments.length >= MAX_MASK_DEPTH || state.nodes >= MAX_MASK_NODES) return "[内容已省略]";
+  state.nodes += 1;
+  if (Array.isArray(value)) {
+    const result: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      if (state.nodes >= MAX_MASK_NODES) {
+        result.push("[内容已省略]");
+        break;
+      }
+      result.push(maskSecrets(value[index], [...segments, index], state));
+    }
+    return result;
+  }
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, maskSecrets(item, [...segments, key])]),
-    );
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (state.nodes >= MAX_MASK_NODES) {
+        result["…"] = "[内容已省略]";
+        break;
+      }
+      result[key] = maskSecrets(item, [...segments, key], state);
+    }
+    return result;
   }
   if (typeof value === "string") return maskDocumentSecrets(value);
   return value;

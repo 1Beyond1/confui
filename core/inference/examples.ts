@@ -9,11 +9,13 @@ import type { FieldCandidate } from "./types.ts";
 
 const MARKERS = ["example", "sample", "template", "dist", "default"];
 const EXAMPLE_MAX_BYTES = 512 * 1024;
+const MAX_EXAMPLE_FIELDS = 6_000;
 
 export interface ExampleResult {
   fields: FieldCandidate[];
   files: string[];
   context: string;
+  truncated: boolean;
 }
 
 export async function inferExampleFields(
@@ -24,6 +26,7 @@ export async function inferExampleFields(
   const examplePaths = await findExampleFiles(configPath);
   const fields: FieldCandidate[] = [];
   const contextParts: string[] = [];
+  let truncated = false;
   let order = 10_000;
 
   for (const examplePath of examplePaths) {
@@ -34,10 +37,13 @@ export async function inferExampleFields(
       });
       const parsed = parseConfig(text, format);
       const comments = extractComments(text);
-      fields.push(...flattenExample(parsed, comments, () => order++));
+      const flattened = flattenExample(parsed, comments, () => order++);
+      fields.push(...flattened.fields);
+      truncated ||= flattened.truncated;
       contextParts.push(
         `--- ${basename(examplePath)} ---\n${JSON.stringify(maskSecrets(parsed), null, 2).slice(0, 12_000)}`,
       );
+      if (truncated) break;
     } catch {
       // One broken sample should not stop inference from the others.
     }
@@ -47,6 +53,7 @@ export async function inferExampleFields(
     fields,
     files: examplePaths.map((path) => relative(projectRoot, path).replace(/\\/g, "/")),
     context: contextParts.join("\n\n").slice(0, 24_000),
+    truncated,
   };
 }
 
@@ -77,14 +84,22 @@ function flattenExample(
   value: unknown,
   comments: Map<string, string>,
   nextOrder: () => number,
-): FieldCandidate[] {
+): { fields: FieldCandidate[]; truncated: boolean } {
   const fields: FieldCandidate[] = [];
+  let truncated = false;
 
   function visit(current: unknown, segments: PathSegment[], depth: number): void {
+    if (fields.length >= MAX_EXAMPLE_FIELDS) {
+      truncated = true;
+      return;
+    }
     if (current !== null && typeof current === "object" && !Array.isArray(current) && depth < 3) {
       const entries = Object.entries(current as Record<string, unknown>);
       if (entries.length) {
-        for (const [key, child] of entries) visit(child, [...segments, key], depth + 1);
+        for (const [key, child] of entries) {
+          visit(child, [...segments, key], depth + 1);
+          if (truncated) return;
+        }
         return;
       }
     }
@@ -110,7 +125,7 @@ function flattenExample(
   }
 
   visit(value, [], 0);
-  return fields;
+  return { fields, truncated };
 }
 
 function isPlaceholder(value: string): boolean {

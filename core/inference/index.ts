@@ -38,9 +38,11 @@ export async function inferConfig(
   const collapsedPrefixes = known
     .filter((candidate) => candidate.type === "json" && candidate.value !== undefined)
     .map((candidate) => candidate.segments);
-  const heuristic = inferHeuristicFields(parsed).filter((candidate) =>
+  const heuristicResult = inferHeuristicFields(parsed);
+  const heuristic = heuristicResult.fields.filter((candidate) =>
     !collapsedPrefixes.some((prefix) => isDescendantPath(candidate.segments, prefix)),
   );
+  if (heuristicResult.truncated) warnings.push("当前配置字段过多，结构推断已达到安全上限；表单只展示有限字段。");
   candidates.push(...heuristic, ...known);
 
   // These sources do not depend on one another. Running them together is
@@ -48,12 +50,14 @@ export async function inferConfig(
   // schema request and example-file scan add their latency one after another.
   const schemaPromise = format === "json" || format === "jsonc"
     ? inferJsonSchemaFields(absolutePath, projectRoot, parsed)
-    : Promise.resolve({ fields: [], warnings: [] });
+    : Promise.resolve({ fields: [], warnings: [], truncated: false });
   const examplesPromise = inferExampleFields(absolutePath, projectRoot, format);
   const [schema, examples] = await Promise.all([schemaPromise, examplesPromise]);
   candidates.push(...schema.fields);
   warnings.push(...schema.warnings);
+  if (schema.truncated) warnings.push("JSON Schema 字段过多，已停止继续展开其余字段。");
   candidates.push(...examples.fields);
+  if (examples.truncated) warnings.push("示例文件字段过多，已停止继续展开其余字段。");
 
   const knownPaths = uniquePaths(candidates.map((candidate) => candidate.segments));
   const readme = await inferReadmeFields(
