@@ -186,4 +186,19 @@ describe("inference pipeline", () => {
     expect(schema.fields.some((field) => field.path === `option${MAX_FORM_FIELDS + 24}`)).toBe(true);
     expect(schema.warnings.some((warning) => warning.includes("仅展示优先级最高"))).toBe(true);
   });
+
+  it("caps README candidates before a repeated table can inflate inference", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-infer-readme-limit-"));
+    temporaryDirectories.push(root);
+    const rows = Array.from({ length: 6_005 }, () => "| value | repeated explanation |").join("\n");
+    await Promise.all([
+      writeFile(join(root, "config.json"), JSON.stringify({ value: "current" })),
+      writeFile(join(root, "README.md"), `| Field | Description |\n| --- | --- |\n${rows}\n`),
+    ]);
+
+    const schema = await inferConfig(root, "config.json");
+
+    expect(schema.fields.find((field) => field.path === "value")?.description).toBe("repeated explanation");
+    expect(schema.warnings).toContain("README 中可识别字段过多，已停止继续解析其余内容。");
+  });
 });

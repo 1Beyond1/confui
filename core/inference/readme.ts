@@ -10,6 +10,9 @@ import type { FieldCandidate } from "./types.ts";
 const GITHUB_README_CACHE_TTL_MS = 10 * 60 * 1_000;
 const GITHUB_README_CACHE_LIMIT = 32;
 const README_MAX_BYTES = 512 * 1024;
+const MAX_README_FIELDS = 6_000;
+const MAX_README_TEXT_CHARS = 500;
+const MAX_README_DEFAULT_CHARS = 4_000;
 
 // Opening several config files in one project should not spend one GitHub API
 // request per file. Public README responses are safe to reuse for a short
@@ -25,6 +28,7 @@ export interface ReadmeResult {
   text: string;
   source?: "local" | "github";
   warning?: string;
+  truncated: boolean;
 }
 
 export async function inferReadmeFields(
@@ -46,12 +50,14 @@ export async function inferReadmeFields(
       warning = `GitHub README 读取失败：${error instanceof Error ? error.message : String(error)}`;
     }
   }
-  if (!text) return { fields: [], text: "", warning };
+  if (!text) return { fields: [], text: "", warning, truncated: false };
+  const parsed = parseReadmeDetailed(text, knownPaths, format);
   return {
-    fields: parseReadme(text, knownPaths, format),
+    fields: parsed.fields,
     text: text.slice(0, 100_000),
     source,
     warning,
+    truncated: parsed.truncated,
   };
 }
 
@@ -148,10 +154,28 @@ export function parseReadme(
   knownPaths: readonly PathSegment[][],
   format: ConfigFormat,
 ): FieldCandidate[] {
+  return parseReadmeDetailed(text, knownPaths, format).fields;
+}
+
+function parseReadmeDetailed(
+  text: string,
+  knownPaths: readonly PathSegment[][],
+  format: ConfigFormat,
+): { fields: FieldCandidate[]; truncated: boolean } {
   const matcher = createPathMatcher(knownPaths);
   const candidates: FieldCandidate[] = [];
+  let truncated = false;
   let order = 20_000;
   const lines = text.split(/\r?\n/);
+
+  const addCandidate = (candidate: FieldCandidate): boolean => {
+    if (candidates.length >= MAX_README_FIELDS) {
+      truncated = true;
+      return false;
+    }
+    candidates.push(candidate);
+    return true;
+  };
 
   for (let index = 0; index < lines.length - 1; index += 1) {
     const header = parseTableRow(lines[index] ?? "");
@@ -168,47 +192,53 @@ export function parseReadme(
       if (segments) {
         const defaultRaw = columns.default >= 0 ? stripMarkdown(row[columns.default] ?? "") : "";
         const requiredRaw = columns.required >= 0 ? stripMarkdown(row[columns.required] ?? "") : "";
-        candidates.push({
+        if (!addCandidate({
           segments,
           label: humanize(String(segments.at(-1) ?? rawKey)),
-          description: stripMarkdown(row[columns.description] ?? ""),
-          default: defaultRaw && !/^[-—无n/a]+$/i.test(defaultRaw) ? parseScalar(defaultRaw) : undefined,
+          description: limitText(stripMarkdown(row[columns.description] ?? ""), MAX_README_TEXT_CHARS),
+          default: defaultRaw && !/^[-—无n/a]+$/i.test(defaultRaw) && defaultRaw.length <= MAX_README_DEFAULT_CHARS
+            ? parseScalar(defaultRaw)
+            : undefined,
           required: requiredRaw ? /^(?:yes|true|required|必填|是|✓|✅)$/i.test(requiredRaw) : undefined,
           source: "readme",
           confidence: 0.93,
           detail: "来自 README 配置表格",
           order: order++,
-        });
+        })) break;
       }
       index += 1;
     }
+    if (truncated) break;
   }
 
   for (const line of lines) {
+    if (truncated) break;
     const match = line.match(/^\s*(?:[-*+]\s+|\d+[.)]\s+)(?:`([^`]+)`|\*\*([^*]+)\*\*|([A-Za-z_][\w.-]*))\s*(?::|[-–—])\s*(.+)$/);
     const rawKey = match?.[1] ?? match?.[2] ?? match?.[3];
     const description = match?.[4]?.trim();
     if (!rawKey || !description) continue;
     const segments = matcher(rawKey);
     if (!segments) continue;
-    candidates.push({
+    if (!addCandidate({
       segments,
-      description: stripMarkdown(description),
+      description: limitText(stripMarkdown(description), MAX_README_TEXT_CHARS),
       required: /\b(required|must)\b|必填|必须/i.test(description) ? true : undefined,
       source: "readme",
       confidence: 0.78,
       detail: "来自 README 字段说明",
       order: order++,
-    });
+    })) break;
   }
 
   for (const block of extractCodeBlocks(text)) {
+    if (truncated) break;
     try {
       const parsed = parseConfig(block, format);
-      for (const item of flattenCodeExample(parsed)) {
+      const flattened = flattenCodeExample(parsed, MAX_README_FIELDS - candidates.length);
+      for (const item of flattened.items) {
         const segments = matcher(formatPath(item.segments));
         if (!segments) continue;
-        candidates.push({
+        if (!addCandidate({
           segments,
           default: item.value,
           type: inferFieldType(String(segments.at(-1) ?? ""), item.value),
@@ -218,13 +248,14 @@ export function parseReadme(
           confidence: 0.64,
           detail: "来自 README 配置代码块",
           order: order++,
-        });
+        })) break;
       }
+      truncated ||= flattened.truncated;
     } catch {
       // Most README code blocks are unrelated; ignore those that do not parse as this format.
     }
   }
-  return candidates;
+  return { fields: candidates, truncated };
 }
 
 function createPathMatcher(paths: readonly PathSegment[][]): (raw: string) => PathSegment[] | undefined {
@@ -274,20 +305,28 @@ function extractCodeBlocks(text: string): string[] {
   return [...text.matchAll(/```[^\n]*\n([\s\S]*?)```/g)].map((match) => match[1] ?? "").filter(Boolean);
 }
 
-function flattenCodeExample(value: unknown): Array<{ segments: PathSegment[]; value: unknown }> {
+function flattenCodeExample(value: unknown, maxFields: number): { items: Array<{ segments: PathSegment[]; value: unknown }>; truncated: boolean } {
   const result: Array<{ segments: PathSegment[]; value: unknown }> = [];
+  let truncated = false;
   function visit(current: unknown, segments: PathSegment[], depth: number): void {
+    if (result.length >= maxFields) {
+      truncated = true;
+      return;
+    }
     if (current !== null && typeof current === "object" && !Array.isArray(current) && depth < 3) {
       const entries = Object.entries(current as Record<string, unknown>);
       if (entries.length) {
-        for (const [key, item] of entries) visit(item, [...segments, key], depth + 1);
+        for (const [key, item] of entries) {
+          visit(item, [...segments, key], depth + 1);
+          if (truncated) return;
+        }
         return;
       }
     }
     if (segments.length) result.push({ segments, value: current });
   }
   visit(value, [], 0);
-  return result;
+  return { items: result, truncated };
 }
 
 function parseGithubRepository(url: string): { owner: string; repo: string } | undefined {
@@ -317,6 +356,11 @@ function normalizeKey(value: string): string {
 
 function stripMarkdown(value: string): string {
   return value.replace(/[`*_~]/g, "").replace(/<br\s*\/?>/gi, " ").trim();
+}
+
+function limitText(value: string, limit: number): string | undefined {
+  if (!value) return undefined;
+  return value.slice(0, limit);
 }
 
 function parseScalar(value: string): unknown {

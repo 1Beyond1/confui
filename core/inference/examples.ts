@@ -30,6 +30,11 @@ export async function inferExampleFields(
   let order = 10_000;
 
   for (const examplePath of examplePaths) {
+    const remaining = MAX_EXAMPLE_FIELDS - fields.length;
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
     try {
       const text = await readLimitedUtf8File(examplePath, {
         maxBytes: EXAMPLE_MAX_BYTES,
@@ -37,7 +42,7 @@ export async function inferExampleFields(
       });
       const parsed = parseConfig(text, format);
       const comments = extractComments(text);
-      const flattened = flattenExample(parsed, comments, () => order++);
+      const flattened = flattenExample(parsed, comments, () => order++, remaining);
       fields.push(...flattened.fields);
       truncated ||= flattened.truncated;
       contextParts.push(
@@ -84,12 +89,13 @@ function flattenExample(
   value: unknown,
   comments: Map<string, string>,
   nextOrder: () => number,
+  maxFields: number,
 ): { fields: FieldCandidate[]; truncated: boolean } {
   const fields: FieldCandidate[] = [];
   let truncated = false;
 
   function visit(current: unknown, segments: PathSegment[], depth: number): void {
-    if (fields.length >= MAX_EXAMPLE_FIELDS) {
+    if (fields.length >= maxFields) {
       truncated = true;
       return;
     }

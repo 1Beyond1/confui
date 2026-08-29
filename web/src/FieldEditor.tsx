@@ -253,10 +253,15 @@ function FieldControl({
   }
 
   if (field.type === "color") {
-    const color = typeof value === "string" && /^#[\da-f]{6}$/i.test(value) ? value : "#2563eb";
+    // The native picker only understands six-digit opaque colors. Keep it
+    // disabled for shorthand/alpha values so opening the picker cannot
+    // silently replace a value that the text input can preserve.
+    const pickerEnabled = value === undefined || value === ""
+      || typeof value === "string" && /^#[\da-f]{6}$/i.test(value);
+    const color = pickerEnabled && typeof value === "string" && /^#[\da-f]{6}$/i.test(value) ? value : "#2563eb";
     return (
       <div class="color-control">
-        <input id={`${id}-picker`} type="color" value={color} aria-label={`${field.label}颜色选择器`} aria-describedby={describedBy} disabled={disabled} onInput={(event) => onChange(event.currentTarget.value)}/>
+        <input id={`${id}-picker`} type="color" value={color} title={pickerEnabled ? "选择颜色" : "当前颜色包含简写或透明度，请使用文本输入"} aria-label={`${field.label}颜色选择器`} aria-describedby={describedBy} disabled={disabled || !pickerEnabled} onInput={(event) => onChange(event.currentTarget.value)}/>
         <input id={id} class={`control ${error ? "control--error" : ""}`} value={String(value ?? "")} aria-describedby={describedBy} aria-invalid={Boolean(error)} aria-required={field.required} disabled={disabled} onInput={(event) => onChange(event.currentTarget.value)} placeholder="#2563eb"/>
       </div>
     );

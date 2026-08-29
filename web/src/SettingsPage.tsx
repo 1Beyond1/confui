@@ -44,6 +44,7 @@ export function SettingsPage({
     });
   }, []);
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(settings), [draft, settings]);
+  const aiErrors = useMemo(() => validateAiDraft(draft.ai), [draft.ai]);
   // A locked credential is shown as an empty field, so say why: otherwise the
   // user reads it as "never saved" and cannot tell that a value is still stored.
   const locked = settings.lockedSecrets;
@@ -68,8 +69,9 @@ export function SettingsPage({
 
   async function save(): Promise<void> {
     if (saving) return;
-    if (draft.ai.enabled && (!draft.ai.baseUrl || !draft.ai.model)) {
-      onToast("启用 AI 后需要填写 Base URL 和模型名称", "error");
+    if (Object.keys(aiErrors).length) {
+      onToast("请先修正 AI 设置中的错误", "error");
+      focusFirstAiError(aiErrors);
       return;
     }
     setSaving(true);
@@ -85,8 +87,9 @@ export function SettingsPage({
 
   async function testConnection(): Promise<void> {
     if (testing || saving) return;
-    if (!draft.ai.baseUrl || !draft.ai.model) {
-      onToast("请先填写 Base URL 和模型名称", "error");
+    if (Object.keys(aiErrors).length) {
+      onToast("请先修正 AI 设置中的错误", "error");
+      focusFirstAiError(aiErrors);
       return;
     }
     setTesting(true);
@@ -175,11 +178,13 @@ export function SettingsPage({
             </label>
             <label class="setting-field">
               <span>模型名称</span>
-              <input class="control" value={draft.ai.model} disabled={!draft.ai.enabled || saving} placeholder="例如 gpt-4.1-mini" onInput={(event) => setAi({ model: event.currentTarget.value })}/>
+              <input id="settings-ai-model" class="control" value={draft.ai.model} disabled={!draft.ai.enabled || saving} aria-invalid={Boolean(aiErrors.model)} aria-describedby={aiErrors.model ? "settings-ai-model-error" : undefined} placeholder="例如 gpt-4.1-mini" onInput={(event) => setAi({ model: event.currentTarget.value })}/>
+              {aiErrors.model && <small id="settings-ai-model-error" class="field-error"><Icon name="warning" size={14}/>{aiErrors.model}</small>}
             </label>
             <label class="setting-field setting-field--wide">
               <span>Base URL</span>
-              <input class="control" value={draft.ai.baseUrl} disabled={!draft.ai.enabled || saving} placeholder="https://api.example.com/v1" onInput={(event) => setAi({ baseUrl: event.currentTarget.value })}/>
+              <input id="settings-ai-base-url" class="control" value={draft.ai.baseUrl} disabled={!draft.ai.enabled || saving} aria-invalid={Boolean(aiErrors.baseUrl)} aria-describedby={aiErrors.baseUrl ? "settings-ai-base-url-error" : undefined} placeholder="https://api.example.com/v1" onInput={(event) => setAi({ baseUrl: event.currentTarget.value })}/>
+              {aiErrors.baseUrl && <small id="settings-ai-base-url-error" class="field-error"><Icon name="warning" size={14}/>{aiErrors.baseUrl}</small>}
               <small>兼容 OpenAI 的 /chat/completions 接口；也可以填写本地 Ollama。</small>
             </label>
             <div class="setting-field setting-field--wide">
@@ -282,4 +287,36 @@ export function SettingsPage({
       </div>
     </div>
   );
+}
+
+interface AiDraftErrors {
+  model?: string;
+  baseUrl?: string;
+}
+
+function validateAiDraft(ai: AppSettings["ai"]): AiDraftErrors {
+  if (!ai.enabled) return {};
+  const errors: AiDraftErrors = {};
+  if (!ai.model.trim()) errors.model = "启用 AI 后需要填写模型名称";
+  const baseUrl = ai.baseUrl.trim();
+  if (!baseUrl) {
+    errors.baseUrl = "启用 AI 后需要填写 Base URL";
+  } else {
+    try {
+      const url = new URL(baseUrl);
+      if (url.protocol !== "http:" && url.protocol !== "https:") {
+        errors.baseUrl = "Base URL 只支持 http 或 https";
+      } else if (url.username || url.password) {
+        errors.baseUrl = "请把用户名或密码移到 API Key，不要写进 URL";
+      }
+    } catch {
+      errors.baseUrl = "请输入有效的 Base URL，例如 https://api.example.com/v1";
+    }
+  }
+  return errors;
+}
+
+function focusFirstAiError(errors: AiDraftErrors): void {
+  const id = errors.model ? "settings-ai-model" : errors.baseUrl ? "settings-ai-base-url" : undefined;
+  if (id) window.setTimeout(() => document.getElementById(id)?.focus(), 0);
 }

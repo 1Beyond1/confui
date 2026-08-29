@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { AppSettings, RecentProject } from "../shared/schema.ts";
 import { DEFAULT_SETTINGS } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
+import { normalizeGithubUrl } from "./scanner.ts";
+import { readLimitedUtf8File } from "./inference/limited-text.ts";
 
 const SETTINGS_MAX_BYTES = 512 * 1024;
 const SECRET_STORAGE_MAX_CHARS = 24_000;
+const SETTINGS_TOO_LARGE_MESSAGE = "Confui 设置文件过大，无法读取";
+const SETTINGS_INVALID_UTF8_MESSAGE = "Confui 设置文件不是有效的 UTF-8 编码";
 
 export interface SecretCodec {
   encode(value: string): string;
@@ -83,14 +87,22 @@ export class SettingsStore {
       if (info.size > SETTINGS_MAX_BYTES) {
         throw new ConfuiError("PARSE_ERROR", "Confui 设置文件过大，无法读取");
       }
-      const text = await readFile(this.filePath, "utf8");
-      if (Buffer.byteLength(text, "utf8") > SETTINGS_MAX_BYTES) {
-        throw new ConfuiError("PARSE_ERROR", "Confui 设置文件在读取时变得过大");
-      }
+      const text = await readLimitedUtf8File(this.filePath, {
+        maxBytes: SETTINGS_MAX_BYTES,
+        overflow: "reject",
+        tooLargeMessage: SETTINGS_TOO_LARGE_MESSAGE,
+        invalidUtf8Message: SETTINGS_INVALID_UTF8_MESSAGE,
+      });
       return normalizeSettings(JSON.parse(text) as Partial<PersistedSettings>);
     } catch (error) {
       if (isMissingFile(error)) return structuredClone(DEFAULT_SETTINGS);
       if (error instanceof SyntaxError) throw new ConfuiError("PARSE_ERROR", "Confui 设置文件已损坏", error.message);
+      if (error instanceof Error && error.message === SETTINGS_TOO_LARGE_MESSAGE) {
+        throw new ConfuiError("PARSE_ERROR", SETTINGS_TOO_LARGE_MESSAGE);
+      }
+      if (error instanceof Error && error.message === SETTINGS_INVALID_UTF8_MESSAGE) {
+        throw new ConfuiError("PARSE_ERROR", SETTINGS_INVALID_UTF8_MESSAGE);
+      }
       throw error;
     }
   }
@@ -171,7 +183,10 @@ export function normalizeSettings(input: unknown): AppSettings {
       .map((item) => ({
         path: item.path.trim().slice(0, 4_096),
         name: item.name.trim().slice(0, 200),
-        githubUrl: typeof item.githubUrl === "string" ? item.githubUrl.trim().slice(0, 2_000) || undefined : undefined,
+        // Older versions accepted an arbitrary string here. Canonicalize it on
+        // read so a legacy credential-bearing URL is not shown to the renderer
+        // or written back to disk on the next settings update.
+        githubUrl: typeof item.githubUrl === "string" ? normalizeGithubUrl(item.githubUrl.slice(0, 2_000)) : undefined,
         openedAt: Number.isFinite(item.openedAt) ? item.openedAt : Date.now(),
       }))
       .filter((item) => item.path.length > 0 && item.name.length > 0)

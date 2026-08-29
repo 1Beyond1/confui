@@ -1,15 +1,20 @@
-import { lstat, open, readFile, readdir, realpath, stat } from "node:fs/promises";
+import { lstat, open, opendir, realpath, stat } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import type { ConfigFile, ConfigFileStatus, ProjectScanResult } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
 import { AI_FILE_LIMIT, HARD_FILE_LIMIT } from "./files.ts";
 import { detectFormat, isUnambiguousIniName, looksLikeIni } from "./formats.ts";
 import { ensurePathInsideProject } from "./paths.ts";
+import { readLimitedUtf8File } from "./inference/limited-text.ts";
 
 /** Enough of a `.conf` / `.cfg` file to tell INI apart from nginx-style syntax. */
 const SNIFF_BYTES = 64 * 1024;
+const GIT_CONFIG_MAX_BYTES = 128 * 1024;
 const SCAN_CONCURRENCY = 16;
 const MAX_SCAN_DEPTH = 32;
+const MAX_SCAN_ENTRIES = 50_000;
+const MAX_SCAN_DIRECTORIES = 4_096;
+const MAX_CONFIG_FILES = 4_000;
 
 const KNOWN_FILES = new Set([
   "package.json",
@@ -98,12 +103,23 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
   const files: ConfigFile[] = [];
   const warnings: string[] = [];
   let skippedCount = 0;
+  let scannedEntries = 0;
+  let scannedDirectories = 0;
+  let scheduledConfigFiles = 0;
+  let scanCapped = false;
 
   async function walk(directory: string, depth: number): Promise<void> {
+    if (scanCapped) return;
     if (depth > maxDepth) {
       skippedCount += 1;
       return;
     }
+    if (scannedDirectories >= MAX_SCAN_DIRECTORIES) {
+      scanCapped = true;
+      skippedCount += 1;
+      return;
+    }
+    scannedDirectories += 1;
     let physicalDirectory: string;
     try {
       physicalDirectory = await ensurePathInsideProject(root, directory);
@@ -111,9 +127,9 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
       skippedCount += 1;
       return;
     }
-    let entries;
+    let directoryHandle;
     try {
-      entries = await readdir(physicalDirectory, { withFileTypes: true });
+      directoryHandle = await opendir(physicalDirectory);
     } catch {
       skippedCount += 1;
       return;
@@ -121,78 +137,102 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
 
     const directories: string[] = [];
     const fileTasks: Array<() => Promise<void>> = [];
-    for (const entry of entries) {
-      const lowerName = entry.name.toLowerCase();
-      const absolutePath = join(physicalDirectory, entry.name);
-      if (entry.isSymbolicLink()) {
-        skippedCount += 1;
-        continue;
-      }
-      if (entry.isDirectory()) {
-        if (!IGNORE_DIRS.has(lowerName)) directories.push(absolutePath);
-        continue;
-      }
-      if (!entry.isFile() || IGNORE_FILES.has(lowerName)) continue;
-      if (isExampleFilename(entry.name) || SCHEMA_FILE.test(lowerName) || /\.bak(?:\.|$)/i.test(lowerName)) continue;
-      const format = detectFormat(entry.name);
-      if (!format) continue;
-
-      fileTasks.push(async () => {
-        try {
-          // Re-check with lstat so a file swapped to a symlink after readdir is
-          // not followed outside the selected project.
-          const info = await lstat(absolutePath);
-          if (!info.isFile() || info.isSymbolicLink()) {
-            skippedCount += 1;
-            return;
-          }
-          const relativePath = relative(root, absolutePath).replace(/\\/g, "/");
-          const confidence = classifyConfidence(entry.name, relativePath);
-          let status: ConfigFileStatus = info.size > HARD_FILE_LIMIT
-            ? "too-large"
-            : info.size > AI_FILE_LIMIT
-              ? "large"
-              : "ready";
-          let warning: string | undefined;
-          if (status !== "too-large" && format === "ini" && !isUnambiguousIniName(entry.name)) {
-            try {
-              if (!looksLikeIni(await readPrefix(absolutePath, SNIFF_BYTES))) status = "unsupported";
-            } catch {
-              status = "unreadable";
-            }
-          }
-          warning = status === "too-large"
-            ? "文件超过 5 MB，仅显示但不会打开"
-            : status === "unsupported"
-              ? "这不是 INI 语法（例如 nginx / httpd 指令式配置），Confui 不会编辑它"
-              : status === "unreadable"
-                ? "无法读取文件内容，请检查权限或文件是否仍然存在"
-                : status === "large"
-                  ? "文件超过 1 MB，将跳过 AI 分析"
-                  : undefined;
-          files.push({
-            path: relativePath,
-            kind: KNOWN_FILES.has(lowerName) ? lowerName : format,
-            size: info.size,
-            modifiedAt: info.mtimeMs,
-            format,
-            confidence,
-            status,
-            warning,
-          });
-        } catch {
+    try {
+      while (true) {
+        const entry = await directoryHandle.read();
+        if (!entry) break;
+        scannedEntries += 1;
+        if (scannedEntries > MAX_SCAN_ENTRIES) {
+          scanCapped = true;
           skippedCount += 1;
+          break;
         }
-      });
+        const lowerName = entry.name.toLowerCase();
+        const absolutePath = join(physicalDirectory, entry.name);
+        if (entry.isSymbolicLink()) {
+          skippedCount += 1;
+          continue;
+        }
+        if (entry.isDirectory()) {
+          if (!IGNORE_DIRS.has(lowerName)) directories.push(absolutePath);
+          continue;
+        }
+        if (!entry.isFile() || IGNORE_FILES.has(lowerName)) continue;
+        if (isExampleFilename(entry.name) || SCHEMA_FILE.test(lowerName) || /\.bak(?:\.|$)/i.test(lowerName)) continue;
+        const format = detectFormat(entry.name);
+        if (!format) continue;
+        scheduledConfigFiles += 1;
+        if (scheduledConfigFiles > MAX_CONFIG_FILES) {
+          scanCapped = true;
+          skippedCount += 1;
+          break;
+        }
+
+        fileTasks.push(async () => {
+          try {
+            // Re-check with lstat so a file swapped to a symlink after opendir is
+            // not followed outside the selected project.
+            const info = await lstat(absolutePath);
+            if (!info.isFile() || info.isSymbolicLink()) {
+              skippedCount += 1;
+              return;
+            }
+            const relativePath = relative(root, absolutePath).replace(/\\/g, "/");
+            const confidence = classifyConfidence(entry.name, relativePath);
+            let status: ConfigFileStatus = info.size > HARD_FILE_LIMIT
+              ? "too-large"
+              : info.size > AI_FILE_LIMIT
+                ? "large"
+                : "ready";
+            let warning: string | undefined;
+            if (status !== "too-large" && format === "ini" && !isUnambiguousIniName(entry.name)) {
+              try {
+                if (!looksLikeIni(await readPrefix(absolutePath, SNIFF_BYTES))) status = "unsupported";
+              } catch {
+                status = "unreadable";
+              }
+            }
+            warning = status === "too-large"
+              ? "文件超过 5 MB，仅显示但不会打开"
+              : status === "unsupported"
+                ? "这不是 INI 语法（例如 nginx / httpd / redis 这类指令式配置），Confui 不会编辑它"
+                : status === "unreadable"
+                  ? "无法读取文件内容，请检查权限或文件是否仍然存在"
+                  : status === "large"
+                    ? "文件超过 1 MB，将跳过 AI 分析"
+                    : undefined;
+            files.push({
+              path: relativePath,
+              kind: KNOWN_FILES.has(lowerName) ? lowerName : format,
+              size: info.size,
+              modifiedAt: info.mtimeMs,
+              format,
+              confidence,
+              status,
+              warning,
+            });
+          } catch {
+            skippedCount += 1;
+          }
+        });
+      }
+    } catch {
+      skippedCount += 1;
+    } finally {
+      await directoryHandle.close().catch(() => undefined);
     }
 
     await runLimited(fileTasks, SCAN_CONCURRENCY);
-    for (const child of directories) await walk(child, depth + 1);
+    for (const child of directories) {
+      if (scanCapped) break;
+      await walk(child, depth + 1);
+    }
   }
 
   await walk(root, 0);
   files.sort(compareFiles);
   if (!files.length) warnings.push("没有发现 Confui 支持的配置文件");
+  if (scanCapped) warnings.push("项目内容较多，扫描已达到安全上限；可以缩小项目范围后再试。");
 
   return {
     root,
@@ -258,7 +298,13 @@ function compareFiles(left: ConfigFile, right: ConfigFile): number {
 async function detectGithubRemote(root: string): Promise<string | undefined> {
   try {
     const gitConfig = await ensurePathInsideProject(root, join(root, ".git", "config"));
-    const config = await readFile(gitConfig, "utf8");
+    const config = await readLimitedUtf8File(gitConfig, {
+      maxBytes: GIT_CONFIG_MAX_BYTES,
+      overflow: "reject",
+      // A malformed/oversized Git config is not relevant to scanning the
+      // project; skip remote detection instead of allocating it in full.
+      tooLargeMessage: "Git 配置过大",
+    });
     const urls = [...config.matchAll(/^\s*url\s*=\s*(.+?)\s*$/gm)].map((match) => match[1]).filter(Boolean) as string[];
     for (const url of urls) {
       const normalized = normalizeGithubUrl(url);

@@ -42,6 +42,11 @@ interface ToastState {
   type: ToastType;
 }
 
+interface LoadErrorState {
+  file: string;
+  message: string;
+}
+
 const FORMAT_LABELS: Record<ConfigFormat, string> = {
   json: "JSON",
   jsonc: "JSONC",
@@ -67,6 +72,7 @@ export function App() {
   const [busy, setBusy] = useState<BusyState>(null);
   const [toast, setToast] = useState<ToastState>();
   const [externalChange, setExternalChange] = useState(false);
+  const [loadError, setLoadError] = useState<LoadErrorState>();
   const [savePreview, setSavePreview] = useState<SavePreview>();
   const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [settingsDirty, setSettingsDirty] = useState(false);
@@ -188,6 +194,7 @@ export function App() {
       const resolvedGithub = scanned.detectedGithubUrl || "";
       setProject(scanned);
       setExternalChange(false);
+      setLoadError(undefined);
       setRootInput(scanned.root);
       setGithubInput(resolvedGithub);
       setActiveFile(undefined);
@@ -234,6 +241,7 @@ export function App() {
     setSchema(undefined);
     setValues({});
     setExternalChange(false);
+    setLoadError(undefined);
     setView("editor");
     setEditorTab("form");
     try {
@@ -245,7 +253,11 @@ export function App() {
       setValues(initializeEditorValues(result.data.fields));
       setExternalChange(false);
     } catch (error) {
-      if (sequence === openSequence.current) notify(errorMessage(error), "error");
+      if (sequence === openSequence.current) {
+        const message = errorMessage(error);
+        setLoadError({ file: file.path, message });
+        notify(message, "error");
+      }
     } finally {
       if (sequence === openSequence.current) setBusy(null);
     }
@@ -257,7 +269,7 @@ export function App() {
       return;
     }
     const sameFile = action.kind === "file" && action.file.path === activeFile?.path;
-    if (sameFile) {
+    if (sameFile && !loadError) {
       setView("editor");
       return;
     }
@@ -557,7 +569,14 @@ export function App() {
 
           {view === "editor" && busy === "infer" && !schema && <EditorSkeleton/>}
 
-          {view === "editor" && !schema && busy !== "infer" && (
+          {view === "editor" && !schema && busy !== "infer" && loadError?.file === activeFile?.path ? (
+            <div class="editor-load-error" role="alert">
+              <span class="editor-load-error__icon"><Icon name="warning"/></span>
+              <h1>这个配置文件暂时打不开</h1>
+              <p>{loadError?.message}</p>
+              <Button variant="primary" icon="refresh" onClick={() => activeFile && void loadFile(activeFile)}>重试</Button>
+            </div>
+          ) : view === "editor" && !schema && busy !== "infer" && (
             <div class="editor-empty">
               <EmptyIllustration/>
               <h1>{project?.files.length ? "选择一个配置文件" : "没有发现配置文件"}</h1>
@@ -601,7 +620,7 @@ export function App() {
       </main>
 
       {toast && (
-        <div key={toast.id} class={`toast toast--${toast.type}`} role={toast.type === "error" ? "alert" : "status"}>
+        <div key={toast.id} class={`toast toast--${toast.type} ${(dirty || settingsDirty) ? "toast--above-savebar" : ""}`} role={toast.type === "error" ? "alert" : "status"}>
           <span><Icon name={toast.type === "success" ? "check" : toast.type === "error" ? "warning" : "info"}/></span>
           <p>{toast.message}</p>
           <button class="icon-button" onClick={() => setToast(undefined)} aria-label="关闭提示"><Icon name="x" size={15}/></button>

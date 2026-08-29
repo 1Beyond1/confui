@@ -69,6 +69,7 @@ export async function inferConfig(
   );
   candidates.push(...readme.fields);
   if (readme.warning) warnings.push(readme.warning);
+  if (readme.truncated) warnings.push("README 中可识别字段过多，已停止继续解析其余内容。");
 
   const unresolvedPaths = mergeCandidates(candidates).fields
     .filter((field) => !field.description)

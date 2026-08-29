@@ -331,14 +331,20 @@ function assertString(value: unknown, label: string): asserts value is string {
 function isFileVersion(value: unknown): value is FileVersion {
   return value !== null && typeof value === "object"
     && typeof (value as FileVersion).hash === "string"
+    && /^[0-9a-f]{64}$/i.test((value as FileVersion).hash)
     && typeof (value as FileVersion).mtimeMs === "number"
-    && typeof (value as FileVersion).size === "number";
+    && Number.isFinite((value as FileVersion).mtimeMs)
+    && (value as FileVersion).mtimeMs >= 0
+    && typeof (value as FileVersion).size === "number"
+    && Number.isSafeInteger((value as FileVersion).size)
+    && (value as FileVersion).size >= 0;
 }
 
 function isSavePreview(value: unknown): value is SavePreview {
   return value !== null && typeof value === "object"
     && typeof (value as SavePreview).projectRoot === "string"
     && typeof (value as SavePreview).file === "string"
+    && typeof (value as SavePreview).format === "string"
     && typeof (value as SavePreview).output === "string"
     && Array.isArray((value as SavePreview).operations)
     && isFileVersion((value as SavePreview).expectedVersion);
@@ -347,10 +353,12 @@ function isSavePreview(value: unknown): value is SavePreview {
 function isAiSettings(value: unknown): value is AppSettings["ai"] {
   return value !== null && typeof value === "object"
     && typeof (value as AppSettings["ai"]).enabled === "boolean"
-    && typeof (value as AppSettings["ai"]).provider === "string"
-    && typeof (value as AppSettings["ai"]).model === "string"
-    && typeof (value as AppSettings["ai"]).baseUrl === "string"
-    && typeof (value as AppSettings["ai"]).apiKey === "string";
+    && boundedString((value as AppSettings["ai"]).provider, 80)
+    && boundedString((value as AppSettings["ai"]).model, 200)
+    && boundedString((value as AppSettings["ai"]).baseUrl, 2_000)
+    && boundedString((value as AppSettings["ai"]).apiKey, 24_000)
+    && typeof (value as AppSettings["ai"]).timeoutMs === "number"
+    && Number.isFinite((value as AppSettings["ai"]).timeoutMs);
 }
 
 function isAppSettings(value: unknown): value is AppSettings {
@@ -360,4 +368,8 @@ function isAppSettings(value: unknown): value is AppSettings {
     && typeof (value as AppSettings).github === "object"
     && typeof (value as AppSettings).github.token === "string"
     && Array.isArray((value as AppSettings).recentProjects);
+}
+
+function boundedString(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" && value.length <= maxLength;
 }

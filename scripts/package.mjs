@@ -117,6 +117,24 @@ async function assertPackagedRuntime(root) {
     await assertNonEmptyFile(join(root, file));
   }
 
+  const rendererRoot = join(root, "resources", "app", "out", "renderer");
+  const rendererIndex = await readFile(join(rendererRoot, "index.html"), "utf8");
+  const rendererAssets = [...rendererIndex.matchAll(/(?:src|href)=["']([^"']+)["']/g)]
+    .map((match) => match[1])
+    .filter((asset) => asset && !/^(?:[a-z]+:|\/\/|data:|#)/i.test(asset));
+  for (const asset of rendererAssets) {
+    const assetPath = resolve(rendererRoot, asset);
+    assertInside(rendererRoot, assetPath);
+    await assertNonEmptyFile(assetPath);
+  }
+
+  // The portable bundle is intentionally built from `out/` only. A source
+  // directory accidentally copied into resources/app would increase the
+  // artifact and expose files that are not needed at runtime.
+  for (const sourceDirectory of ["core", "electron", "shared", "tests", "web"]) {
+    await assertMissingPath(join(root, "resources", "app", sourceDirectory));
+  }
+
   const packagedApp = JSON.parse(await readFile(join(root, "resources/app/package.json"), "utf8"));
   if (packagedApp.main !== appPackage.main || packagedApp.version !== appPackage.version) {
     throw new Error("Packaged app metadata does not match the build");
@@ -136,4 +154,14 @@ async function assertPackagedRuntime(root) {
 async function assertNonEmptyFile(path) {
   const info = await stat(path);
   if (!info.isFile() || info.size === 0) throw new Error(`Missing or empty packaged file: ${path}`);
+}
+
+async function assertMissingPath(path) {
+  try {
+    await stat(path);
+    throw new Error(`Unexpected source path in portable package: ${path}`);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Unexpected source path")) throw error;
+    if (error?.code !== "ENOENT") throw error;
+  }
 }

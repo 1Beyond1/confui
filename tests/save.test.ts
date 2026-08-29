@@ -105,4 +105,18 @@ describe("safe save", () => {
     ], snapshot.version)).rejects.toMatchObject({ code: "FILE_TOO_LARGE" });
     expect(await readFile(path, "utf8")).toContain(padding);
   });
+
+  it("rejects malformed or oversized IPC-style changes before parsing values", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-save-input-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "config.json");
+    await writeFile(path, '{"value":"ok"}\n', "utf8");
+    const snapshot = await readTextSnapshot(path);
+
+    await expect(previewSave(root, "config.json", [null as never], snapshot.version))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" } satisfies Partial<ConfuiError>);
+    await expect(previewSave(root, "config.json", [
+      { segments: ["value"], value: "x".repeat(1024 * 1024) },
+    ], snapshot.version)).rejects.toMatchObject({ code: "FILE_TOO_LARGE" } satisfies Partial<ConfuiError>);
+  });
 });

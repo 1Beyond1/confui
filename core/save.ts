@@ -16,6 +16,8 @@ import { formatPath, getAtPath, pathKey, resolveExistingProjectPath } from "./pa
 
 const FORBIDDEN_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
 const activeSavePaths = new Set<string>();
+const MAX_SAVE_CHANGES = 2_000;
+const MAX_CHANGE_VALUE_BYTES = 1 * 1024 * 1024;
 
 export async function previewSave(
   root: string,
@@ -128,6 +130,9 @@ async function commitSaveExclusive(
 }
 
 function validateChanges(changes: readonly ConfigChange[]): void {
+  if (!Array.isArray(changes) || changes.length > MAX_SAVE_CHANGES) {
+    throw new ConfuiError("INVALID_INPUT", `一次最多只能保存 ${MAX_SAVE_CHANGES} 项更改`);
+  }
   const seen = new Set<string>();
   for (const change of changes) {
     validateChange(change);
@@ -186,15 +191,29 @@ export function assertSameVersion(current: FileVersion, expected: FileVersion): 
 }
 
 function validateChange(change: ConfigChange): void {
-  if (!Array.isArray(change.segments) || change.segments.length < 1 || change.segments.length > 32) {
+  if (change === null || typeof change !== "object" || !Array.isArray(change.segments)) {
+    throw new ConfuiError("INVALID_INPUT", "配置字段路径无效");
+  }
+  if (change.segments.length < 1 || change.segments.length > 32) {
     throw new ConfuiError("INVALID_INPUT", "配置字段路径无效");
   }
   for (const segment of change.segments) {
-    if ((typeof segment !== "string" && typeof segment !== "number") || (typeof segment === "number" && (!Number.isInteger(segment) || segment < 0))) {
+    if ((typeof segment !== "string" && typeof segment !== "number")
+      || (typeof segment === "number" && (!Number.isSafeInteger(segment) || segment < 0))
+      || (typeof segment === "string" && (segment.length > 512 || segment.includes("\0")))) {
       throw new ConfuiError("INVALID_INPUT", "配置字段路径无效");
     }
     if (typeof segment === "string" && FORBIDDEN_SEGMENTS.has(segment)) {
       throw new ConfuiError("INVALID_INPUT", "配置字段路径包含不安全的键名");
     }
+  }
+  try {
+    const serialized = JSON.stringify(change.value);
+    if (serialized && Buffer.byteLength(serialized, "utf8") > MAX_CHANGE_VALUE_BYTES) {
+      throw new ConfuiError("FILE_TOO_LARGE", "单个配置项的内容超过 1 MB，已拒绝保存");
+    }
+  } catch (error) {
+    if (error instanceof ConfuiError) throw error;
+    throw new ConfuiError("INVALID_INPUT", "配置字段值无法序列化");
   }
 }

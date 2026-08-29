@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -23,6 +24,16 @@ jobs:
 
       # typecheck + vitest + electron-vite build, per PROJECT_SPEC §7.
       - run: npm run check
+
+      - name: Verify release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tagVersion = ($env:GITHUB_REF_NAME).Substring(1)
+          if ($packageVersion -ne $tagVersion) {
+            throw "Release tag v$tagVersion does not match package.json version $packageVersion"
+          }
 
       # Also exercise the Windows portable bundle; npm run check alone does
       # not catch missing Electron runtime files or locale trimming mistakes.

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { SettingsStore, type SecretCodec } from "../core/settings.ts";
+import { SettingsStore, normalizeSettings, type SecretCodec } from "../core/settings.ts";
 import { DEFAULT_SETTINGS } from "../shared/schema.ts";
 
 /** Mirrors the real codec: `enc:` values are readable only while unlocked. */
@@ -28,6 +28,21 @@ afterEach(async () => {
 });
 
 describe("settings store", () => {
+  it("does not retain credentials or tracking data in legacy recent GitHub URLs", () => {
+    const settings = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      recentProjects: [
+        { path: "C:\\demo", name: "demo", githubUrl: "https://user:password@github.com/owner/repo/issues", openedAt: 1 },
+        { path: "C:\\clean", name: "clean", githubUrl: "https://www.github.com/owner/clean.git", openedAt: 2 },
+      ],
+    });
+
+    expect(settings.recentProjects).toEqual([
+      { path: "C:\\demo", name: "demo", githubUrl: undefined, openedAt: 1 },
+      { path: "C:\\clean", name: "clean", githubUrl: "https://github.com/owner/clean", openedAt: 2 },
+    ]);
+  });
+
   it("never writes provider or GitHub credentials in plaintext", async () => {
     const root = await mkdtemp(join(tmpdir(), "confui-settings-"));
     temporaryDirectories.push(root);
