@@ -47,6 +47,15 @@ export function SettingsPage({
     onDirtyChange(dirty);
     return () => onDirtyChange(false);
   }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      if (dirty && !saving) void save();
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, [dirty, saving]);
 
   const setAi = (patch: Partial<AppSettings["ai"]>) => setDraft((current) => ({
     ...current,
@@ -54,6 +63,7 @@ export function SettingsPage({
   }));
 
   async function save(): Promise<void> {
+    if (saving) return;
     if (draft.ai.enabled && (!draft.ai.baseUrl || !draft.ai.model)) {
       onToast("启用 AI 后需要填写 Base URL 和模型名称", "error");
       return;
@@ -70,6 +80,7 @@ export function SettingsPage({
   }
 
   async function testConnection(): Promise<void> {
+    if (testing || saving) return;
     if (!draft.ai.baseUrl || !draft.ai.model) {
       onToast("请先填写 Base URL 和模型名称", "error");
       return;
@@ -139,6 +150,7 @@ export function SettingsPage({
             role="switch"
             aria-label="启用 AI 字段分析"
             aria-checked={draft.ai.enabled}
+            disabled={saving}
             onClick={() => setAi({ enabled: !draft.ai.enabled })}
           ><i/></button>
         </header>
@@ -147,7 +159,7 @@ export function SettingsPage({
             <label class="setting-field">
               <span>供应商</span>
               <div class="select-wrap">
-                <select class="control" value={draft.ai.provider} disabled={!draft.ai.enabled} onChange={(event) => chooseProvider(event.currentTarget.value)}>
+                <select class="control" value={draft.ai.provider} disabled={!draft.ai.enabled || saving} onChange={(event) => chooseProvider(event.currentTarget.value)}>
                   {PROVIDERS.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
                 </select>
                 <Icon name="chevron-down" size={16}/>
@@ -155,18 +167,18 @@ export function SettingsPage({
             </label>
             <label class="setting-field">
               <span>模型名称</span>
-              <input class="control" value={draft.ai.model} disabled={!draft.ai.enabled} placeholder="例如 gpt-4.1-mini" onInput={(event) => setAi({ model: event.currentTarget.value })}/>
+              <input class="control" value={draft.ai.model} disabled={!draft.ai.enabled || saving} placeholder="例如 gpt-4.1-mini" onInput={(event) => setAi({ model: event.currentTarget.value })}/>
             </label>
             <label class="setting-field setting-field--wide">
               <span>Base URL</span>
-              <input class="control" value={draft.ai.baseUrl} disabled={!draft.ai.enabled} placeholder="https://api.example.com/v1" onInput={(event) => setAi({ baseUrl: event.currentTarget.value })}/>
+              <input class="control" value={draft.ai.baseUrl} disabled={!draft.ai.enabled || saving} placeholder="https://api.example.com/v1" onInput={(event) => setAi({ baseUrl: event.currentTarget.value })}/>
               <small>兼容 OpenAI 的 /chat/completions 接口；也可以填写本地 Ollama。</small>
             </label>
             <div class="setting-field setting-field--wide">
               <label for="settings-ai-api-key">API Key</label>
               <div class="input-with-action">
-                <input id="settings-ai-api-key" class="control" type={showApiKey ? "text" : "password"} value={draft.ai.apiKey} disabled={!draft.ai.enabled} autocomplete="off" placeholder="本地模型可留空" onInput={(event) => setAi({ apiKey: event.currentTarget.value })}/>
-                <button class="icon-button" type="button" disabled={!draft.ai.enabled} onClick={() => setShowApiKey(!showApiKey)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}><Icon name={showApiKey ? "eye-off" : "eye"}/></button>
+                <input id="settings-ai-api-key" class="control" type={showApiKey ? "text" : "password"} value={draft.ai.apiKey} maxlength={8_000} disabled={!draft.ai.enabled || saving} autocomplete="off" placeholder="本地模型可留空" onInput={(event) => setAi({ apiKey: event.currentTarget.value })}/>
+                <button class="icon-button" type="button" disabled={!draft.ai.enabled || saving} onClick={() => setShowApiKey(!showApiKey)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}><Icon name={showApiKey ? "eye-off" : "eye"}/></button>
               </div>
               {locked?.apiKey
                 ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>已保存的 API Key 无法解密（Windows 安全存储不可用），密文已保留。留空保存不会清除它；填入新值会覆盖。</small>
@@ -174,7 +186,7 @@ export function SettingsPage({
             </div>
           </div>
           <div class="settings-inline-action">
-            <Button icon="refresh" onClick={() => void testConnection()} busy={testing} disabled={!draft.ai.enabled || testing}>测试连接</Button>
+            <Button icon="refresh" onClick={() => void testConnection()} busy={testing} disabled={!draft.ai.enabled || testing || saving}>测试连接</Button>
           </div>
         </div>
       </section>
@@ -188,8 +200,8 @@ export function SettingsPage({
           <div class="setting-field setting-field--wide">
             <label for="settings-github-token">Personal Access Token <em>可选</em></label>
             <div class="input-with-action">
-              <input id="settings-github-token" class="control" type={showGithubToken ? "text" : "password"} value={draft.github.token} autocomplete="off" placeholder="github_pat_..." onInput={(event) => setDraft((current) => ({ ...current, github: { token: event.currentTarget.value } }))}/>
-              <button class="icon-button" type="button" onClick={() => setShowGithubToken(!showGithubToken)} aria-label={showGithubToken ? "隐藏 GitHub Token" : "显示 GitHub Token"}><Icon name={showGithubToken ? "eye-off" : "eye"}/></button>
+              <input id="settings-github-token" class="control" type={showGithubToken ? "text" : "password"} value={draft.github.token} maxlength={8_000} disabled={saving} autocomplete="off" placeholder="github_pat_..." onInput={(event) => setDraft((current) => ({ ...current, github: { token: event.currentTarget.value } }))}/>
+              <button class="icon-button" type="button" disabled={saving} onClick={() => setShowGithubToken(!showGithubToken)} aria-label={showGithubToken ? "隐藏 GitHub Token" : "显示 GitHub Token"}><Icon name={showGithubToken ? "eye-off" : "eye"}/></button>
             </div>
             {locked?.githubToken
               ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>已保存的 Token 无法解密（Windows 安全存储不可用），密文已保留。留空保存不会清除它；填入新值会覆盖。</small>
@@ -211,6 +223,7 @@ export function SettingsPage({
                 type="button"
                 class={draft.theme === theme ? "active" : ""}
                 aria-pressed={draft.theme === theme}
+                disabled={saving}
                 onClick={() => {
                   setDraft((current) => ({ ...current, theme }));
                   onThemePreview(theme);
@@ -255,7 +268,7 @@ export function SettingsPage({
       <div class={`settings-savebar ${dirty ? "settings-savebar--visible" : ""}`}>
         <span>{dirty ? "设置有未保存的更改" : "设置已保存"}</span>
         <div>
-          {dirty && <Button variant="ghost" onClick={() => { setDraft(structuredClone(settings)); onThemePreview(settings.theme); }}>撤销</Button>}
+          {dirty && <Button variant="ghost" disabled={saving} onClick={() => { setDraft(structuredClone(settings)); onThemePreview(settings.theme); }}>撤销</Button>}
           <Button variant="primary" icon="save" disabled={!dirty || saving} busy={saving} onClick={() => void save()}>保存设置</Button>
         </div>
       </div>

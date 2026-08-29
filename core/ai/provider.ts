@@ -1,5 +1,8 @@
 import type { AppSettings, ConnectionTestResult } from "../../shared/schema.ts";
 import { ConfuiError } from "../errors.ts";
+import { readLimitedUtf8Response } from "../inference/limited-text.ts";
+
+const MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -54,10 +57,14 @@ export class OpenAICompatibleProvider implements AIProvider {
           Accept: "application/json",
           ...(this.settings.apiKey ? { Authorization: `Bearer ${this.settings.apiKey}` } : {}),
         },
+        redirect: "error",
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-      const responseText = await response.text();
+      const responseText = await readLimitedUtf8Response(response, {
+        maxBytes: MAX_PROVIDER_RESPONSE_BYTES,
+        overflow: "truncate",
+      });
       if (!response.ok) throw new ProviderHttpError(response.status, responseText.slice(0, 800));
       let data: unknown;
       try {
@@ -106,9 +113,10 @@ export function endpointFor(baseUrl: string): string {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new ConfuiError("AI_ERROR", `AI Base URL 只支持 http 或 https，当前是 ${url.protocol}`);
   }
-  if (!/\/chat\/completions$/i.test(url.pathname)) {
-    url.pathname = `${url.pathname.replace(/\/+$/, "")}/chat/completions`;
-  }
+  const pathname = url.pathname.replace(/\/+$/, "");
+  url.pathname = /\/chat\/completions$/i.test(pathname)
+    ? pathname
+    : `${pathname}/chat/completions`;
   return url.href;
 }
 

@@ -139,6 +139,8 @@ export interface SaveChangePreview {
 }
 
 export interface SavePreview {
+  /** Canonical project root this preview was generated from. */
+  projectRoot: string;
   file: string;
   format: ConfigFormat;
   changes: SaveChangePreview[];

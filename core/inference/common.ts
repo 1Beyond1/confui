@@ -1,7 +1,7 @@
 import type { FieldType, PathSegment } from "../../shared/schema.ts";
 import { formatPath } from "../paths.ts";
 
-const SECRET_KEY_PATTERN = /password|passwd|secret|token|api[_-]?key|private[_-]?key|credential|auth(?:orization)?|cookie|jwt|session[_-]?key|signing[_-]?key/i;
+const SECRET_KEY_PATTERN = /password|passwd|secret|token|api[_-]?key|private[_-]?key|credential|auth(?:orization)?|cookie|jwt|session[_-]?key|signing[_-]?key|client[_-]?secret|access[_-]?key|database[_-]?url|connection[_-]?string|dsn|webhook[_-]?(?:url|secret)|(?:openai|anthropic|google|gemini|stripe|slack)[_-]?key/i;
 
 export function humanize(value: string): string {
   const spaced = value

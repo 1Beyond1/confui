@@ -5,16 +5,18 @@ import {
   modify,
   parse,
   printParseErrorCode,
+  visit,
   type FormattingOptions,
   type ParseError,
 } from "jsonc-parser";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { ConfigChange, ConfigFormat, PathSegment } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
-import { cloneValue, getAtPath, setAtPath } from "./paths.ts";
+import { cloneValue, formatPath, getAtPath, setAtPath } from "./paths.ts";
 
 /** Share of meaningful lines that must look like `[section]` or `key=value`. */
 const INI_ASSIGNMENT_RATIO = 0.8;
+const UTF8_BOM = "\uFEFF";
 
 export function detectFormat(filename: string): ConfigFormat | null {
   const lower = filename.toLowerCase();
@@ -42,7 +44,7 @@ export function isUnambiguousIniName(filename: string): boolean {
 export function looksLikeIni(text: string): boolean {
   let assignments = 0;
   let others = 0;
-  for (const rawLine of text.split(/\r?\n/)) {
+  for (const rawLine of stripBom(text).split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#") || line.startsWith(";")) continue;
     if (/^\[[^\]]+]$/.test(line) || /^[^=]+=/.test(line)) assignments += 1;
@@ -72,27 +74,29 @@ export function assertEditableSyntax(filename: string, text: string): void {
 
 export function parseConfig(text: string, format: ConfigFormat): unknown {
   try {
+    const source = stripBom(text);
     switch (format) {
       case "json":
       case "jsonc": {
         const errors: ParseError[] = [];
-        const value = parse(text, errors, { allowTrailingComma: true, disallowComments: false });
+        const value = parse(source, errors, { allowTrailingComma: true, disallowComments: false });
         if (errors.length) {
           const first = errors[0]!;
           throw new Error(`${printParseErrorCode(first.error)} @ ${first.offset}`);
         }
+        assertNoDuplicateJsonKeys(source);
         return value;
       }
       case "yaml":
-        return yaml.load(text) ?? {};
+        return yaml.load(source) ?? {};
       case "toml":
-        return parseToml(text);
+        return parseToml(source);
       case "env":
-        return parseEnv(text);
+        return parseEnv(source);
       case "ini":
-        return ini.parse(text);
+        return ini.parse(source);
       case "properties":
-        return parseProperties(text);
+        return parseProperties(source);
     }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -138,29 +142,52 @@ export function updateConfigText(
   changes: readonly ConfigChange[],
 ): { output: string; warnings: string[] } {
   if (!changes.length) return { output: originalText, warnings: [] };
+  const bom = originalText.startsWith(UTF8_BOM) ? UTF8_BOM : "";
+  const source = bom ? originalText.slice(1) : originalText;
+  let result: { output: string; warnings: string[] };
   switch (format) {
     case "json":
     case "jsonc":
-      return { output: updateJsonc(originalText, changes), warnings: [] };
+      result = { output: updateJsonc(source, changes), warnings: [] };
+      break;
     case "env":
-      return { output: patchFlatAssignments(originalText, changes, "env"), warnings: [] };
+      result = { output: patchFlatAssignments(source, changes, "env"), warnings: [] };
+      break;
     case "properties":
-      return { output: patchFlatAssignments(originalText, changes, "properties"), warnings: [] };
+      result = { output: patchFlatAssignments(source, changes, "properties"), warnings: [] };
+      break;
     case "ini":
-      return { output: patchIni(originalText, changes), warnings: [] };
+      result = { output: patchIni(source, changes), warnings: [] };
+      break;
     case "yaml":
     case "toml": {
-      const parsed = parseConfig(originalText, format);
+      const parsed = parseConfig(source, format);
       const next = cloneValue(parsed);
       for (const change of changes) setAtPath(next, change.segments, change.value);
-      return {
-        output: stringifyConfig(next, format, originalText),
+      result = {
+        output: stringifyConfig(next, format, source),
         warnings: [
           `${format.toUpperCase()} 保存会重新排版文件；键和值会保留，但原有注释可能无法完整保留。`,
         ],
       };
+      break;
     }
   }
+  return { ...result, output: bom + result.output };
+}
+
+function assertNoDuplicateJsonKeys(text: string): void {
+  const seen = new Set<string>();
+  let duplicate: PathSegment[] | undefined;
+  visit(text, {
+    onObjectProperty(property, _offset, _length, _line, _character, pathSupplier) {
+      const path = [...pathSupplier(), property] as PathSegment[];
+      const id = JSON.stringify(path);
+      if (seen.has(id)) duplicate ??= path;
+      else seen.add(id);
+    },
+  }, { allowTrailingComma: true, disallowComments: false });
+  if (duplicate) throw new Error(`存在重复的 JSON 键：${formatPath(duplicate)}`);
 }
 
 function updateJsonc(originalText: string, changes: readonly ConfigChange[]): string {
@@ -203,7 +230,7 @@ function parseEnv(text: string): Record<string, string> {
 
 function parseProperties(text: string): Record<string, string> {
   const result: Record<string, string> = {};
-  for (const rawLine of joinContinuations(text).split(/\r?\n/)) {
+  for (const rawLine of joinPropertyLines(text.split(/\r?\n/))) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#") || line.startsWith("!")) continue;
     const match = rawLine.match(/^\s*((?:\\.|[^:=\s])+?)\s*(?:[:=]|\s)\s*(.*)$/);
@@ -232,7 +259,7 @@ function patchFlatAssignments(
   // Match against the joined logical line so the whole group is replaced
   // together and no continuation is left behind as an orphan key.
   for (const group of groupLogicalLines(text.split(/\r?\n/), format)) {
-    const logical = group.length > 1 ? joinContinuations(group.join("\n")) : group[0] ?? "";
+    const logical = format === "properties" ? joinPropertyLines(group)[0] ?? "" : group[0] ?? "";
     const match = format === "env"
       ? logical.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/)
       : logical.match(/^(\s*)((?:\\.|[^:=\s])+?)(\s*(?:[:=]|\s)\s*)(.*)$/);
@@ -253,6 +280,10 @@ function patchFlatAssignments(
   for (const [key, value] of updates) {
     if (seen.has(key)) continue;
     assertAppendable(parsed, [key], format);
+    // split() represents the existing terminal newline as one empty item.
+    // Remove only that sentinel before appending, while preserving real blank
+    // lines that the user intentionally left at the end of the file.
+    if (nextLines.at(-1) === "") nextLines.pop();
     nextLines.push(
       format === "env"
         ? `${key}=${formatEnvValue(value)}`
@@ -273,13 +304,36 @@ function groupLogicalLines(lines: readonly string[], format: "env" | "properties
   let current: string[] = [];
   for (const line of lines) {
     current.push(line);
-    if (!(/(?:^|[^\\])(\\\\)*\\$/.test(line))) {
+    if (!hasPropertyContinuation(line)) {
       groups.push(current);
       current = [];
     }
   }
   if (current.length) groups.push(current);
   return groups;
+}
+
+function joinPropertyLines(lines: readonly string[]): string[] {
+  const logical: string[] = [];
+  let current: string | undefined;
+  for (const physical of lines) {
+    const continuedPart = current === undefined ? physical : physical.replace(/^\s+/, "");
+    current = (current ?? "") + continuedPart;
+    if (hasPropertyContinuation(physical)) {
+      current = current.slice(0, -1);
+      continue;
+    }
+    logical.push(current);
+    current = undefined;
+  }
+  if (current !== undefined) logical.push(current);
+  return logical;
+}
+
+function hasPropertyContinuation(line: string): boolean {
+  let slashes = 0;
+  for (let index = line.length - 1; index >= 0 && line[index] === "\\"; index -= 1) slashes += 1;
+  return slashes % 2 === 1;
 }
 
 /**
@@ -372,12 +426,19 @@ function formatEnvValue(value: unknown, previous = ""): string {
     ? "\""
     : previousValue.startsWith("'") && previousValue.endsWith("'")
       ? "'"
-      : /[\s#=]/.test(stringValue)
+      : /[\s#=\\\"]/.test(stringValue)
         ? "\""
         : "";
   if (quote === "'" && stringValue.includes("'")) quote = "\"";
   if (!quote) return stringValue;
-  const escaped = quote === "\"" ? stringValue.replace(/\\/g, "\\\\").replace(/"/g, '\\"') : stringValue;
+  const escaped = quote === "\""
+    ? stringValue
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\r/g, "\\r")
+      .replace(/\n/g, "\\n")
+      .replace(/\t/g, "\\t")
+    : stringValue;
   return `${quote}${escaped}${quote}`;
 }
 
@@ -457,26 +518,82 @@ function splitEnvValueAndComment(raw: string): { value: string; comment: string 
 function unquote(value: string): string {
   const trimmed = value.trim();
   if (trimmed.length >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-    return trimmed.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    return decodeEnvEscapes(trimmed.slice(1, -1));
   }
   if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1);
   return trimmed.replace(/\s+#.*$/, "");
 }
 
-function joinContinuations(text: string): string {
-  return text.replace(/\\\r?\n\s*/g, "");
+function decodeEnvEscapes(value: string): string {
+  let output = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character !== "\\" || index === value.length - 1) {
+      output += character;
+      continue;
+    }
+    const escaped = value[index + 1];
+    index += 1;
+    output += escaped === "n"
+      ? "\n"
+      : escaped === "r"
+        ? "\r"
+        : escaped === "t"
+          ? "\t"
+          : escaped === "\\" || escaped === '"'
+            ? escaped
+            // dotenv-style files are not JavaScript strings. Preserve an
+            // unknown escape verbatim so quoted Windows paths such as
+            // `C:\\Program Files` do not silently lose their backslashes.
+            : `\\${escaped ?? ""}`;
+  }
+  return output;
 }
 
 function escapeProperty(value: string, key = false): string {
-  const escaped = value.replace(/\\/g, "\\\\").replace(/([:=])/g, "\\$1").replace(/\n/g, "\\n");
+  const escaped = value
+    .replace(/\\/g, "\\\\")
+    .replace(/\t/g, "\\t")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
+    .replace(/\f/g, "\\f")
+    .replace(/([:=])/g, "\\$1");
   if (key) return escaped.replace(/ /g, "\\ ").replace(/^([#!])/, "\\$1");
   return escaped.replace(/^ +/, (spaces) => spaces.replace(/ /g, "\\ "));
 }
 
 function unescapeProperty(value: string): string {
-  return value.replace(/\\n/g, "\n").replace(/\\([\\:= ])/g, "$1");
+  let output = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character !== "\\" || index === value.length - 1) {
+      output += character;
+      continue;
+    }
+    const escaped = value[index + 1];
+    if (escaped === "u" && /^[0-9a-fA-F]{4}$/.test(value.slice(index + 2, index + 6))) {
+      output += String.fromCharCode(Number.parseInt(value.slice(index + 2, index + 6), 16));
+      index += 5;
+      continue;
+    }
+    index += 1;
+    output += escaped === "n"
+      ? "\n"
+      : escaped === "r"
+        ? "\r"
+        : escaped === "t"
+          ? "\t"
+          : escaped === "f"
+            ? "\f"
+            : escaped ?? "";
+  }
+  return output;
 }
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripBom(text: string): string {
+  return text.startsWith(UTF8_BOM) ? text.slice(1) : text;
 }

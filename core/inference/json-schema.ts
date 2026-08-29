@@ -1,9 +1,9 @@
-import { readFile } from "node:fs/promises";
-import { dirname, extname, join, resolve, sep } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FieldType, PathSegment } from "../../shared/schema.ts";
-import { getAtPath } from "../paths.ts";
+import { ensurePathInsideProject, getAtPath } from "../paths.ts";
 import { groupForPath, humanize, isSecretPath } from "./common.ts";
+import { readLimitedUtf8File, readLimitedUtf8Response } from "./limited-text.ts";
 import type { FieldCandidate } from "./types.ts";
 
 interface SchemaResult {
@@ -30,6 +30,7 @@ const SCHEMA_HOSTS = new Set([
 /** Remote schemas change rarely, but the cache must not outlive a long session. */
 const SCHEMA_CACHE_TTL_MS = 10 * 60 * 1_000;
 const SCHEMA_CACHE_LIMIT = 32;
+const SCHEMA_MAX_BYTES = 2 * 1024 * 1024;
 
 const remoteSchemaCache = new Map<string, { fetchedAt: number; schema: Promise<JsonSchema> }>();
 
@@ -71,8 +72,7 @@ async function findSchema(
         const candidate = schemaRef.startsWith("file:")
           ? fileURLToPath(schemaRef)
           : resolve(dirname(filePath), schemaRef);
-        if (isInsideProject(candidate, projectRoot)) return await readSchema(candidate);
-        warnings.push("配置声明的 JSON Schema 位于项目目录之外，已跳过");
+        return await readSchema(candidate, projectRoot);
       }
     } catch (error) {
       warnings.push(`未能读取配置声明的 JSON Schema：${error instanceof Error ? error.message : String(error)}`);
@@ -83,7 +83,7 @@ async function findSchema(
   const stem = filePath.slice(0, extension ? -extension.length : undefined);
   for (const candidate of [`${stem}.schema.json`, join(dirname(filePath), "schema.json")]) {
     try {
-      return await readSchema(candidate);
+      return await readSchema(candidate, projectRoot);
     } catch {
       // Missing conventional schema files are expected.
     }
@@ -91,10 +91,15 @@ async function findSchema(
   return undefined;
 }
 
-async function readSchema(path: string): Promise<JsonSchema> {
-  const text = await readFile(path, "utf8");
-  if (text.length > 2 * 1024 * 1024) throw new Error("Schema 超过 2 MB");
-  return JSON.parse(text) as JsonSchema;
+async function readSchema(path: string, projectRoot: string): Promise<JsonSchema> {
+  const safePath = await ensurePathInsideProject(projectRoot, path);
+  const text = await readLimitedUtf8File(safePath, {
+    maxBytes: SCHEMA_MAX_BYTES,
+    overflow: "reject",
+    tooLargeMessage: "Schema 超过 2 MiB",
+    invalidUtf8Message: "Schema 不是有效的 UTF-8 编码",
+  });
+  return JSON.parse(text.replace(/^\uFEFF/, "")) as JsonSchema;
 }
 
 /**
@@ -110,6 +115,9 @@ export function allowedSchemaUrl(schemaRef: string): string | undefined {
     return undefined;
   }
   if (url.protocol !== "https:") return undefined;
+  // Do not allow credentials embedded in a project-controlled URL. Even on an
+  // allowlisted host they would be sent as part of the request unexpectedly.
+  if (url.username || url.password) return undefined;
   return SCHEMA_HOSTS.has(url.hostname.toLowerCase()) ? url.href : undefined;
 }
 
@@ -138,12 +146,23 @@ async function fetchSchemaUncached(url: string, fetcher: typeof fetch): Promise<
   try {
     const response = await fetcher(url, {
       headers: { Accept: "application/schema+json, application/json" },
+      // The allowlist applies to the actual request, not just the first URL.
+      // Refusing redirects prevents an allowlisted URL from bouncing to an
+      // arbitrary host while a project is being opened.
+      redirect: "error",
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const text = await response.text();
-    if (text.length > 2 * 1024 * 1024) throw new Error("Schema 超过 2 MB");
-    return JSON.parse(text) as JsonSchema;
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const text = await readLimitedUtf8Response(response, {
+      maxBytes: SCHEMA_MAX_BYTES,
+      overflow: "reject",
+      tooLargeMessage: "Schema 超过 2 MiB",
+      invalidUtf8Message: "Schema 不是有效的 UTF-8 编码",
+    });
+    return JSON.parse(text.replace(/^\uFEFF/, "")) as JsonSchema;
   } finally {
     clearTimeout(timeout);
   }
@@ -265,12 +284,6 @@ function describeHost(schemaRef: string): string {
   } catch {
     return schemaRef.slice(0, 80);
   }
-}
-
-function isInsideProject(candidate: string, root: string): boolean {
-  const resolvedRoot = resolve(root);
-  const resolvedCandidate = resolve(candidate);
-  return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(resolvedRoot + sep);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -3,7 +3,7 @@ import type { ConfigFormSchema, InferOptions } from "../../shared/schema.ts";
 import type { AIProvider } from "../ai/provider.ts";
 import { AI_FILE_LIMIT, readTextSnapshot } from "../files.ts";
 import { assertEditableSyntax, detectFormat, parseConfig } from "../formats.ts";
-import { safeJoin } from "../paths.ts";
+import { resolveExistingProjectPath } from "../paths.ts";
 import { inferAIFields } from "./ai.ts";
 import { inferExampleFields } from "./examples.ts";
 import { inferHeuristicFields, maskDocumentSecrets, maskSecrets } from "./heuristic.ts";
@@ -23,7 +23,9 @@ export async function inferConfig(
   relativeFile: string,
   options: InferenceContext = {},
 ): Promise<ConfigFormSchema> {
-  const absolutePath = safeJoin(root, relativeFile);
+  const resolved = await resolveExistingProjectPath(root, relativeFile);
+  const projectRoot = resolved.root;
+  const absolutePath = resolved.path;
   const format = detectFormat(relativeFile);
   if (!format) throw new Error("不支持这个配置文件格式");
   const { text, version } = await readTextSnapshot(absolutePath);
@@ -41,18 +43,21 @@ export async function inferConfig(
   );
   candidates.push(...heuristic, ...known);
 
-  if (format === "json" || format === "jsonc") {
-    const schema = await inferJsonSchemaFields(absolutePath, root, parsed);
-    candidates.push(...schema.fields);
-    warnings.push(...schema.warnings);
-  }
-
-  const examples = await inferExampleFields(absolutePath, root, format);
+  // These sources do not depend on one another. Running them together is
+  // especially useful for projects whose `$schema` is remote: otherwise a
+  // schema request and example-file scan add their latency one after another.
+  const schemaPromise = format === "json" || format === "jsonc"
+    ? inferJsonSchemaFields(absolutePath, projectRoot, parsed)
+    : Promise.resolve({ fields: [], warnings: [] });
+  const examplesPromise = inferExampleFields(absolutePath, projectRoot, format);
+  const [schema, examples] = await Promise.all([schemaPromise, examplesPromise]);
+  candidates.push(...schema.fields);
+  warnings.push(...schema.warnings);
   candidates.push(...examples.fields);
 
   const knownPaths = uniquePaths(candidates.map((candidate) => candidate.segments));
   const readme = await inferReadmeFields(
-    root,
+    projectRoot,
     options.githubUrl,
     options.githubToken,
     knownPaths,

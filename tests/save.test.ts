@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { readTextSnapshot } from "../core/files.ts";
+import { HARD_FILE_LIMIT, readTextSnapshot } from "../core/files.ts";
 import { commitSave, previewSave } from "../core/save.ts";
 import { ConfuiError } from "../core/errors.ts";
 
@@ -46,5 +46,63 @@ describe("safe save", () => {
 
     await expect(commitSave(root, preview)).rejects.toMatchObject({ code: "FILE_CONFLICT" } satisfies Partial<ConfuiError>);
     expect(await readFile(path, "utf8")).toBe('{"port":9000}\n');
+  });
+
+  it("binds a preview to the project it was created from", async () => {
+    const firstRoot = await mkdtemp(join(tmpdir(), "confui-save-project-a-"));
+    const secondRoot = await mkdtemp(join(tmpdir(), "confui-save-project-b-"));
+    temporaryDirectories.push(firstRoot, secondRoot);
+    await Promise.all([
+      writeFile(join(firstRoot, "config.json"), '{"port":3000}\n'),
+      writeFile(join(secondRoot, "config.json"), '{"port":3000}\n'),
+    ]);
+
+    const snapshot = await readTextSnapshot(join(firstRoot, "config.json"));
+    const preview = await previewSave(firstRoot, "config.json", [
+      { segments: ["port"], value: 8080 },
+    ], snapshot.version);
+
+    await expect(commitSave(secondRoot, preview)).rejects.toMatchObject({ code: "FILE_CONFLICT" });
+    expect(await readFile(join(secondRoot, "config.json"), "utf8")).toBe('{"port":3000}\n');
+  });
+
+  it("rejects concurrent commits so the original backup cannot be overwritten", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-concurrent-save-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "config.json");
+    const original = '{"port":3000}\n';
+    await writeFile(path, original);
+    const snapshot = await readTextSnapshot(path);
+    const preview = await previewSave(root, "config.json", [{ segments: ["port"], value: 8080 }], snapshot.version);
+
+    const results = await Promise.allSettled([
+      commitSave(root, preview),
+      commitSave(root, preview),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(rejected).toMatchObject({
+      status: "rejected",
+      reason: { code: "FILE_CONFLICT" },
+    });
+    expect(await readFile(path, "utf8")).toBe('{"port":8080}\n');
+    expect(await readFile(`${path}.bak`, "utf8")).toBe(original);
+  });
+
+  it("rejects a generated file that would exceed the safe size limit before writing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-save-too-large-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "config.json");
+    // {"value":"<padding>"} adds exactly 12 ASCII bytes around the value;
+    // adding two characters in the preview therefore crosses the limit.
+    const padding = "x".repeat(HARD_FILE_LIMIT - 12);
+    await writeFile(path, JSON.stringify({ value: padding }), "utf8");
+    const snapshot = await readTextSnapshot(path);
+
+    await expect(previewSave(root, "config.json", [
+      { segments: ["value"], value: `${padding}!!` },
+    ], snapshot.version)).rejects.toMatchObject({ code: "FILE_TOO_LARGE" });
+    expect(await readFile(path, "utf8")).toContain(padding);
   });
 });

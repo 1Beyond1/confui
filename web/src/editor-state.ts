@@ -82,7 +82,7 @@ export function validateField(field: FieldSpec, editorValue: unknown): string | 
     if (field.maximum !== undefined && value > field.maximum) return `不能大于 ${field.maximum}`;
   }
   if (field.type === "boolean" && typeof value !== "boolean") return "请使用开关选择布尔值";
-  if (field.type === "enum" && field.enum?.length && !field.enum.some((option) => String(option) === String(value))) {
+  if (field.type === "enum" && field.enum?.length && !field.enum.some((option) => Object.is(option, value))) {
     return "请选择列表中的有效选项";
   }
   if (typeof value === "string") {

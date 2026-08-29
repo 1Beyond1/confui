@@ -30,6 +30,8 @@ describe("OpenAI-compatible provider", () => {
     expect(endpointFor("http://127.0.0.1:11434/v1/")).toBe("http://127.0.0.1:11434/v1/chat/completions");
     expect(endpointFor("http://127.0.0.1:11434/v1/chat/completions"))
       .toBe("http://127.0.0.1:11434/v1/chat/completions");
+    expect(endpointFor("https://provider.example/v1/chat/completions/"))
+      .toBe("https://provider.example/v1/chat/completions");
 
     for (const bad of ["file:///c:/windows/win.ini", "data:application/json,{}", "ftp://example.com/v1"]) {
       expect(() => endpointFor(bad)).toThrow(/只支持 http 或 https/);

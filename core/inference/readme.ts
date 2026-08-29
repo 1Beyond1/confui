@@ -1,10 +1,24 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { ConfigFormat, PathSegment } from "../../shared/schema.ts";
 import { parseConfig } from "../formats.ts";
-import { formatPath, pathKey } from "../paths.ts";
+import { ensurePathInsideProject, formatPath, pathKey } from "../paths.ts";
 import { groupForPath, humanize, inferFieldType, isSecretPath } from "./common.ts";
+import { readLimitedUtf8File, readLimitedUtf8Response } from "./limited-text.ts";
 import type { FieldCandidate } from "./types.ts";
+
+const GITHUB_README_CACHE_TTL_MS = 10 * 60 * 1_000;
+const GITHUB_README_CACHE_LIMIT = 32;
+const README_MAX_BYTES = 512 * 1024;
+
+// Opening several config files in one project should not spend one GitHub API
+// request per file. Public README responses are safe to reuse for a short
+// session; authenticated responses deliberately bypass this cache so a token
+// change can never expose one account's private README to another request.
+const githubReadmeCache = new Map<string, {
+  fetchedAt: number;
+  text: Promise<string | undefined>;
+}>();
 
 export interface ReadmeResult {
   fields: FieldCandidate[];
@@ -45,12 +59,19 @@ export async function readLocalReadme(projectRoot: string): Promise<string | und
   const roots = [projectRoot, join(projectRoot, "docs")];
   for (const directory of roots) {
     try {
-      const entries = await readdir(directory, { withFileTypes: true });
+      const safeDirectory = await ensurePathInsideProject(projectRoot, directory);
+      const entries = await readdir(safeDirectory, { withFileTypes: true });
       const readmes = entries
-        .filter((entry) => entry.isFile() && /^readme(?:\.[a-z0-9_-]+)?\.(?:md|mdx|rst|txt)$/i.test(entry.name))
+        .filter((entry) => !entry.isSymbolicLink() && entry.isFile() && /^readme(?:\.[a-z0-9_-]+)?\.(?:md|mdx|rst|txt)$/i.test(entry.name))
         .sort((left, right) => scoreReadme(left.name) - scoreReadme(right.name));
       const first = readmes[0];
-      if (first) return (await readFile(join(directory, first.name), "utf8")).slice(0, 512 * 1024);
+      if (first) {
+        const safeReadme = await ensurePathInsideProject(projectRoot, join(safeDirectory, first.name));
+        return await readLimitedUtf8File(safeReadme, {
+          maxBytes: README_MAX_BYTES,
+          overflow: "truncate",
+        });
+      }
     } catch {
       // Try the next conventional location.
     }
@@ -58,24 +79,65 @@ export async function readLocalReadme(projectRoot: string): Promise<string | und
   return undefined;
 }
 
-export async function fetchGithubReadme(githubUrl: string, token?: string): Promise<string | undefined> {
+export async function fetchGithubReadme(
+  githubUrl: string,
+  token?: string,
+  fetcher: typeof fetch = fetch,
+): Promise<string | undefined> {
   const repository = parseGithubRepository(githubUrl);
   if (!repository) throw new Error("GitHub 仓库链接格式不正确");
+  const authToken = token?.trim() || undefined;
+  if (authToken) return fetchGithubReadmeUncached(repository, authToken, fetcher);
+
+  const cacheKey = `${repository.owner}/${repository.repo}`.toLowerCase();
+  const cached = githubReadmeCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < GITHUB_README_CACHE_TTL_MS) return cached.text;
+
+  const request = fetchGithubReadmeUncached(repository, undefined, fetcher);
+  githubReadmeCache.delete(cacheKey);
+  githubReadmeCache.set(cacheKey, { fetchedAt: Date.now(), text: request });
+  while (githubReadmeCache.size > GITHUB_README_CACHE_LIMIT) {
+    const oldest = githubReadmeCache.keys().next().value;
+    if (oldest === undefined) break;
+    githubReadmeCache.delete(oldest);
+  }
+  try {
+    return await request;
+  } catch (error) {
+    if (githubReadmeCache.get(cacheKey)?.text === request) githubReadmeCache.delete(cacheKey);
+    throw error;
+  }
+}
+
+async function fetchGithubReadmeUncached(
+  repository: { owner: string; repo: string },
+  token: string | undefined,
+  fetcher: typeof fetch,
+): Promise<string | undefined> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
-    const response = await fetch(`https://api.github.com/repos/${repository.owner}/${repository.repo}/readme`, {
+    const response = await fetcher(`https://api.github.com/repos/${repository.owner}/${repository.repo}/readme`, {
       headers: {
         Accept: "application/vnd.github.raw+json",
-        "User-Agent": "Confui/0.2",
+        "User-Agent": "Confui",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
+      redirect: "error",
       signal: controller.signal,
     });
-    if (response.status === 404) return undefined;
-    if (!response.ok) throw new Error(`GitHub API 返回 ${response.status}`);
-    const text = await response.text();
-    return text.slice(0, 512 * 1024);
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => undefined);
+      return undefined;
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`GitHub API 返回 ${response.status}`);
+    }
+    return await readLimitedUtf8Response(response, {
+      maxBytes: README_MAX_BYTES,
+      overflow: "truncate",
+    });
   } finally {
     clearTimeout(timeout);
   }
@@ -229,9 +291,23 @@ function flattenCodeExample(value: unknown): Array<{ segments: PathSegment[]; va
 }
 
 function parseGithubRepository(url: string): { owner: string; repo: string } | undefined {
-  const match = url.trim().match(/github\.com[/:]([^/]+)\/([^/#?]+?)(?:\.git)?(?:[/?#]|$)/i);
-  if (!match?.[1] || !match[2]) return undefined;
-  return { owner: match[1], repo: match[2].replace(/\.git$/i, "") };
+  const trimmed = url.trim();
+  const candidate = trimmed.match(/^git@github\.com:(.+)$/i)
+    ? `https://github.com/${trimmed.slice("git@github.com:".length)}`
+    : trimmed;
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return undefined;
+  }
+  if (!/^https?:$/i.test(parsed.protocol) || !/^(?:www\.)?github\.com$/i.test(parsed.hostname)) return undefined;
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  if (parts.length < 2) return undefined;
+  const owner = parts[0];
+  const repo = parts[1]?.replace(/\.git$/i, "");
+  if (!owner || !repo || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(owner) || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repo)) return undefined;
+  return { owner, repo };
 }
 
 function normalizeKey(value: string): string {

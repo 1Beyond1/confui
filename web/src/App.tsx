@@ -126,7 +126,7 @@ export function App() {
     const listener = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        if (dirty && !savePreview && !pendingAction) void beginSave();
+        if (view === "editor" && dirty && busy === null && !savePreview && !pendingAction) void beginSave();
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
         event.preventDefault();
@@ -174,11 +174,12 @@ export function App() {
       notify("请先选择本地项目文件夹", "error");
       return;
     }
-    openSequence.current += 1;
+    const sequence = ++openSequence.current;
     setBusy("scan");
     try {
       const result = await window.confui.scanProject(root.trim(), githubUrl.trim() || undefined);
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
+      if (sequence !== openSequence.current) return;
       const scanned = result.data;
       const resolvedGithub = githubUrl.trim() || scanned.detectedGithubUrl || "";
       setProject(scanned);
@@ -190,14 +191,17 @@ export function App() {
       setValues({});
       setView("editor");
       const refreshedSettings = await window.confui.getSettings();
+      if (sequence !== openSequence.current) return;
       if (refreshedSettings.ok) setSettings(refreshedSettings.data);
       const first = scanned.files.find((file) => file.status === "ready" || file.status === "large");
       if (first) await loadFile(first, scanned.root, resolvedGithub);
       else if (!scanned.files.length) notify("项目中没有发现支持的配置文件", "info");
     } catch (error) {
-      notify(errorMessage(error), "error");
+      if (sequence === openSequence.current) notify(errorMessage(error), "error");
     } finally {
-      setBusy(null);
+      // loadFile() owns the busy state after it increments the sequence. An old
+      // scan must never clear the spinner for a newer project/file operation.
+      if (sequence === openSequence.current) setBusy(null);
     }
   }
 
@@ -213,7 +217,7 @@ export function App() {
     githubUrl = githubInput,
   ): Promise<void> {
     if (!root) return;
-    if (file.status === "too-large" || file.status === "unsupported") {
+    if (file.status === "too-large" || file.status === "unsupported" || file.status === "unreadable") {
       notify(file.warning || "这个文件无法安全打开", "error");
       return;
     }
@@ -308,9 +312,14 @@ export function App() {
     try {
       const result = await window.confui.saveConfig(project.root, savePreview);
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
+      const savedValues = new Map(
+        savePreview.operations.map((operation) => [JSON.stringify(operation.segments), operation.value]),
+      );
       const nextFields = schema.fields.map((field) => ({
         ...field,
-        value: effectiveValue(values[fieldKey(field)]),
+        value: savedValues.has(fieldKey(field))
+          ? savedValues.get(fieldKey(field))
+          : effectiveValue(values[fieldKey(field)]),
       }));
       const nextSchema = {
         ...schema,
@@ -378,7 +387,7 @@ export function App() {
     const overFloatingBar = target instanceof Element
       && Boolean(target.closest(".editor-savebar, .settings-savebar"));
     if (!scroller || scroller.scrollHeight <= scroller.clientHeight) return;
-    if (scroller.contains(target as Node) && !overFloatingBar) return;
+    if (target instanceof Node && scroller.contains(target) && !overFloatingBar) return;
     if (event.deltaX === 0 && event.deltaY === 0) return;
     event.preventDefault();
     scroller.scrollBy({ left: event.deltaX, top: event.deltaY });
@@ -473,7 +482,7 @@ export function App() {
                 </Button>
               </>
             )}
-            {view === "home" && <Button icon="folder-open" onClick={() => void browseForProject()}>选择文件夹</Button>}
+            {view === "home" && <Button icon="folder-open" disabled={busy !== null} onClick={() => void browseForProject()}>选择文件夹</Button>}
           </div>
         </header>
 
@@ -527,7 +536,7 @@ export function App() {
             <div id="editor-panel-form" class="editor-page page-wide" role="tabpanel" aria-labelledby="editor-tab-form">
               <EditorSummary schema={schema}/>
               {schema.fields.length ? (
-                <FieldEditor fields={schema.fields} values={values} errors={errors} onChange={updateField}/>
+                <FieldEditor fields={schema.fields} values={values} errors={errors} disabled={busy !== null} onChange={updateField}/>
               ) : (
                 <div class="empty-card"><Icon name="info"/><div><h2>暂时无法生成表单</h2><p>这个文件没有可识别的键值字段。你仍然可以在“原始内容”中查看它。</p></div></div>
               )}
@@ -550,7 +559,7 @@ export function App() {
           <div class="editor-savebar">
             <div><i/><strong>{changes.length} 项更改尚未保存</strong>{errors.size > 0 && <span>{errors.size} 个字段需要修正</span>}</div>
             <div>
-              <Button variant="ghost" onClick={() => setValues(initializeEditorValues(schema.fields))}>全部撤销</Button>
+              <Button variant="ghost" disabled={busy !== null} onClick={() => setValues(initializeEditorValues(schema.fields))}>全部撤销</Button>
               <Button variant="primary" icon="save" disabled={errors.size > 0 || busy !== null} busy={busy === "preview"} onClick={() => void beginSave()}>查看并保存</Button>
             </div>
           </div>
@@ -645,11 +654,11 @@ function HomePage({
         <div class="open-project-card__head"><div><h2>选择本地项目</h2><p>配置文件只在你的电脑上读取和保存。</p></div><span class="local-pill"><Icon name="shield" size={14}/>本地处理</span></div>
         <div class="project-input-block">
           <label for="project-root">项目文件夹 <em>必选</em></label>
-          <div class="path-control"><Icon name="folder"/><input id="project-root" value={root} placeholder="选择或粘贴项目文件夹路径" onInput={(event) => onRoot(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") onOpen(); }}/><Button onClick={onBrowse}>浏览</Button></div>
+          <div class="path-control"><Icon name="folder"/><input id="project-root" value={root} disabled={busy} placeholder="选择或粘贴项目文件夹路径" onInput={(event) => onRoot(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") onOpen(); }}/><Button disabled={busy} onClick={onBrowse}>浏览</Button></div>
         </div>
         <div class="project-input-block">
           <label for="github-url">GitHub 仓库 <span>可选，用于本地无 README 时补充说明</span></label>
-          <div class="path-control"><Icon name="github"/><input id="github-url" value={github} placeholder="https://github.com/owner/repository" onInput={(event) => onGithub(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") onOpen(); }}/></div>
+          <div class="path-control"><Icon name="github"/><input id="github-url" value={github} disabled={busy} placeholder="https://github.com/owner/repository" onInput={(event) => onGithub(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") onOpen(); }}/></div>
         </div>
         <div class="open-project-card__footer"><p><Icon name="info" size={15}/>优先读取本地 Schema、示例文件和 README；AI 只是最后一层补充。</p><Button variant="primary" icon="folder-open" busy={busy} disabled={busy || !root.trim()} onClick={onOpen}>识别并打开</Button></div>
       </section>

@@ -61,6 +61,37 @@ LABEL='old' # keep quote safely
     });
   });
 
+  it("preserves UTF-8 BOMs and does not drop unknown env escapes", () => {
+    const json = '\uFEFF{\n  "port": 3000\n}\n';
+    const updatedJson = updateConfigText(json, "json", [{ segments: ["port"], value: 8080 }]).output;
+    expect(updatedJson.startsWith("\uFEFF")).toBe(true);
+    expect(parseConfig(updatedJson, "json")).toEqual({ port: 8080 });
+
+    const env = String.raw`WINDOWS_PATH="C:\Program Files\Confui"
+MULTILINE="first\nsecond\tvalue"
+`;
+    expect(parseConfig(env, "env")).toEqual({
+      WINDOWS_PATH: String.raw`C:\Program Files\Confui`,
+      MULTILINE: "first\nsecond\tvalue",
+    });
+  });
+
+  it("rejects duplicate JSON keys without confusing identical nested leaf names", () => {
+    try {
+      parseConfig('{"port": 3000, "port": 8080}', "json");
+      throw new Error("expected duplicate keys to be rejected");
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "PARSE_ERROR",
+        detail: expect.stringContaining("重复"),
+      });
+    }
+    expect(parseConfig('{"http":{"port":80},"https":{"port":443}}', "json")).toEqual({
+      http: { port: 80 },
+      https: { port: 443 },
+    });
+  });
+
   it("updates INI and properties files without dropping nearby comments", () => {
     const ini = `; database
 [database]

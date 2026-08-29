@@ -112,6 +112,41 @@ describe("settings store", () => {
     await expect(store.load()).resolves.toMatchObject({ ai: { apiKey: "sk-fresh" } });
   });
 
+  it("repairs a corrupt settings file while remembering a project", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-corrupt-recent-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "settings.json");
+    const store = new SettingsStore(path, keychainCodec({ unlocked: true }));
+    await writeFile(path, "{ not json", "utf8");
+
+    await store.rememberProject({ path: root, name: "demo", openedAt: 1 });
+
+    await expect(store.load()).resolves.toMatchObject({
+      recentProjects: [{ path: root, name: "demo", openedAt: 1 }],
+    });
+  });
+
+  it("serializes concurrent settings writes instead of losing one update", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-concurrent-settings-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "settings.json");
+    const store = new SettingsStore(path, keychainCodec({ unlocked: true }));
+    const input = structuredClone(DEFAULT_SETTINGS);
+    input.theme = "dark";
+
+    // Queue the project update first and then save an intentionally stale
+    // settings snapshot. The second write must preserve the first one's list.
+    await Promise.all([
+      store.rememberProject({ path: root, name: "demo", openedAt: 1 }),
+      store.save(input),
+    ]);
+
+    await expect(store.load()).resolves.toMatchObject({
+      theme: "dark",
+      recentProjects: [{ path: root, name: "demo", openedAt: 1 }],
+    });
+  });
+
   it("still lets a readable credential be cleared on purpose", async () => {
     const root = await mkdtemp(join(tmpdir(), "confui-clear-"));
     temporaryDirectories.push(root);
@@ -144,5 +179,34 @@ describe("settings store", () => {
 
     expect(saved.lockedSecrets).toBeUndefined();
     expect(await readFile(path, "utf8")).not.toContain("lockedSecrets");
+  });
+
+  it("normalizes valid JSON values that are not settings objects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-non-object-settings-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "settings.json");
+    const store = new SettingsStore(path, keychainCodec({ unlocked: true }));
+
+    for (const value of ["null", "[]", "42", '"text"']) {
+      await writeFile(path, value, "utf8");
+      await expect(store.load()).resolves.toMatchObject(DEFAULT_SETTINGS);
+    }
+  });
+
+  it("does not truncate a long encrypted credential while loading settings", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-settings-ciphertext-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "settings.json");
+    const longCiphertext = `enc:v1:${"x".repeat(10_000)}`;
+    await writeFile(path, JSON.stringify({
+      ...DEFAULT_SETTINGS,
+      ai: { ...DEFAULT_SETTINGS.ai, apiKey: longCiphertext },
+    }), "utf8");
+    const store = new SettingsStore(path, {
+      encode: (value) => value,
+      decode: (value) => value === longCiphertext ? "restored-secret" : value,
+    });
+
+    await expect(store.load()).resolves.toMatchObject({ ai: { apiKey: "restored-secret" } });
   });
 });

@@ -15,7 +15,7 @@ import { OpenAICompatibleProvider, testAIConnection } from "../core/ai/provider.
 import { toAppError, ConfuiError } from "../core/errors.ts";
 import { currentVersion } from "../core/files.ts";
 import { inferConfig } from "../core/inference/index.ts";
-import { safeJoin } from "../core/paths.ts";
+import { resolveExistingProjectPath } from "../core/paths.ts";
 import { commitSave, previewSave } from "../core/save.ts";
 import { scanProject } from "../core/scanner.ts";
 import { SettingsStore, type SecretCodec } from "../core/settings.ts";
@@ -37,6 +37,7 @@ let watchedFile: { watcher: FSWatcher; absolutePath: string; relativePath: strin
 let suppressChange: { absolutePath: string; until: number; hash?: string } | undefined;
 let watcherTimer: NodeJS.Timeout | undefined;
 let hasUnsavedChanges = false;
+let lastVerifiedReleasePage = "https://github.com/1Beyond1/confui/releases/latest";
 
 app.setName("Confui");
 if (process.platform === "win32") app.setAppUserModelId("com.1beyond1.confui");
@@ -175,7 +176,8 @@ function registerIpcHandlers(): void {
       githubToken: settings.github.token,
       ai,
     });
-    watchConfigFile(root, file);
+    const resolved = await resolveExistingProjectPath(root, file);
+    watchConfigFile(resolved.path, file);
     return schema;
   });
 
@@ -194,7 +196,7 @@ function registerIpcHandlers(): void {
   handle("confui:saveConfig", async (_event, root: unknown, preview: unknown) => {
     assertString(root, "项目路径");
     if (!isSavePreview(preview)) throw new ConfuiError("INVALID_INPUT", "保存预览无效");
-    const absolutePath = safeJoin(root, preview.file);
+    const absolutePath = (await resolveExistingProjectPath(root, preview.file)).path;
     suppressChange = { absolutePath, until: Date.now() + 2_000 };
     try {
       const result = await commitSave(root, preview);
@@ -211,8 +213,7 @@ function registerIpcHandlers(): void {
 
   handle("confui:setSettings", async (_event, settings: unknown) => {
     if (!isAppSettings(settings)) throw new ConfuiError("INVALID_INPUT", "设置内容无效");
-    const current = await settingsStore.load();
-    return settingsStore.save({ ...settings, recentProjects: current.recentProjects });
+    return settingsStore.save(settings);
   });
 
   handle("confui:testAI", async (_event, settings: unknown) => {
@@ -222,10 +223,14 @@ function registerIpcHandlers(): void {
 
   handle("confui:getAppInfo", async () => ({ version: app.getVersion() }));
 
-  handle("confui:checkForUpdates", async () => checkForUpdates(app.getVersion()));
+  handle("confui:checkForUpdates", async () => {
+    const result = await checkForUpdates(app.getVersion());
+    lastVerifiedReleasePage = result.releaseUrl;
+    return result;
+  });
 
   handle("confui:openReleasePage", async () => {
-    await shell.openExternal("https://github.com/1Beyond1/confui/releases/latest");
+    await shell.openExternal(lastVerifiedReleasePage);
     return null;
   });
 }
@@ -244,8 +249,7 @@ function handle<T>(
   });
 }
 
-function watchConfigFile(root: string, relativeFile: string): void {
-  const absolutePath = safeJoin(root, relativeFile);
+function watchConfigFile(absolutePath: string, relativeFile: string): void {
   if (watchedFile?.absolutePath === absolutePath) return;
   closeWatcher();
   try {
@@ -257,6 +261,14 @@ function watchConfigFile(root: string, relativeFile: string): void {
       if (filename && filename.toString().toLowerCase() !== targetName) return;
       if (watcherTimer) clearTimeout(watcherTimer);
       watcherTimer = setTimeout(() => void emitFileChange(absolutePath, relativeFile), 140);
+    });
+    watcher.on("error", () => {
+      if (watchedFile?.watcher !== watcher) return;
+      closeWatcher();
+      // Treat a broken watcher as an external change. The user can then
+      // reload after restoring the directory or file instead of losing the
+      // notification silently (or crashing the main process).
+      mainWindow?.webContents.send("confui:fileChanged", { file: relativeFile });
     });
     watchedFile = { watcher, absolutePath, relativePath: relativeFile };
   } catch {
@@ -323,6 +335,7 @@ function isFileVersion(value: unknown): value is FileVersion {
 
 function isSavePreview(value: unknown): value is SavePreview {
   return value !== null && typeof value === "object"
+    && typeof (value as SavePreview).projectRoot === "string"
     && typeof (value as SavePreview).file === "string"
     && typeof (value as SavePreview).output === "string"
     && Array.isArray((value as SavePreview).operations)

@@ -1,6 +1,6 @@
 # Confui
 
-Confui 是一个 Windows 桌面配置编辑器。选择本地项目后，它会发现配置文件、组合项目中的 Schema / 示例 / README 信息，并把字段转换成可校验的表单。用户确认差异后，Confui 才会写回原文件。设置页支持手动检查 GitHub Release 更新。
+Confui 是一个 Windows x64 桌面配置编辑器。选择本地项目后，它会发现配置文件、组合项目中的 Schema / 示例 / README 信息，并把字段转换成可校验的表单。用户确认差异后，Confui 才会写回原文件。设置页支持手动检查 GitHub Release 更新。
 
 ![Confui 配置编辑器界面](assets/confui-preview.png)
 
@@ -49,7 +49,7 @@ JavaScript / TypeScript 配置文件不会被伪装成 JSON 打开。范例文�
 要求 Node.js 20.19+，在 Windows PowerShell 中运行：
 
 ```powershell
-npm install
+npm ci
 npm run dev
 ```
 
@@ -65,7 +65,7 @@ npm run check
 npm run package
 ```
 
-输出位于 `release/Confui-win32-x64/Confui.exe`。发布时需要保留同目录的 DLL、`locales` 与 `resources`，它不是单文件程序。
+输出位于 `release/Confui-win32-x64/Confui.exe`。发布时请把整个 `Confui-win32-x64` 目录压缩成 ZIP，不要只上传 EXE；需要保留同目录的 DLL、`locales` 与 `resources`，它不是单文件程序。当前发布目标是 Windows x64，设置页的更新检查会打开 Release 下载页，下载后仍需手动替换旧目录。
 
 ## 目录
 

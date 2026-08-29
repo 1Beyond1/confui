@@ -1,9 +1,11 @@
 import type { UpdateCheckResult } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
+import { readLimitedUtf8Response } from "./inference/limited-text.ts";
 
 const RELEASE_API_URL = "https://api.github.com/repos/1Beyond1/confui/releases/latest";
 const RELEASES_URL = "https://github.com/1Beyond1/confui/releases/latest";
 const UPDATE_TIMEOUT_MS = 12_000;
+const MAX_UPDATE_RESPONSE_BYTES = 1 * 1024 * 1024;
 
 export async function checkForUpdates(
   currentVersion: string,
@@ -18,9 +20,13 @@ export async function checkForUpdates(
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": `Confui/${currentVersion}`,
       },
+      redirect: "error",
       signal: controller.signal,
     });
-    const responseText = await response.text();
+    const responseText = await readLimitedUtf8Response(response, {
+      maxBytes: MAX_UPDATE_RESPONSE_BYTES,
+      overflow: "truncate",
+    });
     if (!response.ok) {
       throw new ConfuiError("NETWORK_ERROR", `GitHub 更新检查失败（${response.status}）`, responseText.slice(0, 300));
     }

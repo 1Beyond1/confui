@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import type { FieldSpec } from "../../shared/schema.ts";
 import {
   fieldKey,
@@ -14,15 +14,17 @@ export function FieldEditor({
   values,
   errors,
   onChange,
+  disabled = false,
 }: {
   fields: FieldSpec[];
   values: EditorValues;
   errors: Map<string, string>;
   onChange: (field: FieldSpec, value: unknown) => void;
+  disabled?: boolean;
 }) {
   const groups = groupFields(fields);
   return (
-    <div class="field-groups">
+    <div class="field-groups" aria-busy={disabled}>
       {groups.map(([name, groupFields]) => (
         <section class="form-card" key={name}>
           <header class="form-card__header">
@@ -41,6 +43,7 @@ export function FieldEditor({
                   value={values[key]}
                   error={errors.get(key)}
                   controlId={`field-${name}-${index}`.replace(/[^\w-]/g, "-")}
+                  disabled={disabled}
                   onChange={(value) => onChange(field, value)}
                 />
               );
@@ -57,12 +60,14 @@ function FieldRow({
   value,
   error,
   controlId,
+  disabled,
   onChange,
 }: {
   field: FieldSpec;
   value: unknown;
   error?: string;
   controlId: string;
+  disabled: boolean;
   onChange: (value: unknown) => void;
 }) {
   const evidenceTitle = field.evidence
@@ -79,8 +84,16 @@ function FieldRow({
         <div title={evidenceTitle}><SourceBadge source={field.source} confidence={field.confidence}/></div>
       </div>
       <div class="field-row__content">
-        {field.description && <p class="field-description">{field.description}</p>}
-        <FieldControl id={controlId} field={field} value={value} error={error} onChange={onChange}/>
+        {field.description && <p id={`${controlId}-description`} class="field-description">{field.description}</p>}
+        <FieldControl
+          id={controlId}
+          field={field}
+          value={value}
+          error={error}
+          descriptionId={field.description ? `${controlId}-description` : undefined}
+          disabled={disabled}
+          onChange={onChange}
+        />
         {error && <p class="field-error" id={`${controlId}-error`}><Icon name="warning" size={14}/>{error}</p>}
         {!error && field.default !== undefined && (
           <p class="field-hint">默认值：<code>{field.secret || field.type === "secret" ? "••••••••" : formatCompact(field.default)}</code></p>
@@ -95,51 +108,86 @@ function FieldControl({
   field,
   value,
   error,
+  descriptionId,
+  disabled,
   onChange,
 }: {
   id: string;
   field: FieldSpec;
   value: unknown;
   error?: string;
+  descriptionId?: string;
+  disabled: boolean;
   onChange: (value: unknown) => void;
 }) {
   const [revealed, setRevealed] = useState(false);
-  const describedBy = error ? `${id}-error` : undefined;
+  const [numberText, setNumberText] = useState(() => formatNumberInput(value));
+  const lastNumberValue = useRef<unknown>(value);
+  useEffect(() => {
+    if (Object.is(value, lastNumberValue.current)) return;
+    lastNumberValue.current = value;
+    setNumberText(formatNumberInput(value));
+  }, [value, field.type]);
+  const describedBy = [descriptionId, error ? `${id}-error` : undefined].filter(Boolean).join(" ") || undefined;
 
   if (field.type === "boolean") {
     const checked = value === true;
+    const state = value === undefined ? "未设置" : checked ? "已启用" : "已关闭";
     return (
-      <button
-        id={id}
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        class={`switch-control ${checked ? "switch-control--on" : ""}`}
-        onClick={() => onChange(!checked)}
-      >
-        <span class="switch-control__track"><i/></span>
-        <span>{checked ? "已启用" : "未启用"}</span>
-      </button>
+      <div class="boolean-control">
+        <button
+          id={id}
+          type="button"
+          role="switch"
+          aria-checked={checked}
+          aria-describedby={describedBy}
+          aria-label={`${field.label}：${state}`}
+          class={`switch-control ${checked ? "switch-control--on" : ""} ${value === undefined ? "switch-control--unset" : ""}`}
+          disabled={disabled}
+          onClick={() => onChange(value === undefined ? true : !checked)}
+        >
+          <span class="switch-control__track"><i/></span>
+          <span>{state}</span>
+        </button>
+        <button
+          type="button"
+          class="boolean-control__reset"
+          disabled={disabled || value === undefined}
+          onClick={() => onChange(undefined)}
+          aria-label={`${field.label}设为未设置`}
+        >重置</button>
+      </div>
     );
   }
 
   if (field.type === "enum") {
+    const options = field.enum ?? [];
+    const selectedIndex = options.findIndex((option) => Object.is(option, value));
     return (
       <div class="select-wrap">
         <select
           id={id}
           class={`control ${error ? "control--error" : ""}`}
-          value={value === undefined || value === null ? "" : String(value)}
+          value={selectedIndex >= 0 ? String(selectedIndex) : ""}
           aria-describedby={describedBy}
           aria-invalid={Boolean(error)}
           aria-required={field.required}
+          disabled={disabled}
           onChange={(event) => {
-            const selected = field.enum?.find((item) => String(item) === event.currentTarget.value);
-            onChange(event.currentTarget.value === "" ? undefined : selected ?? event.currentTarget.value);
+            if (event.currentTarget.value === "") {
+              onChange(undefined);
+              return;
+            }
+            const index = Number(event.currentTarget.value);
+            onChange(Number.isSafeInteger(index) && index >= 0 ? options[index] : undefined);
           }}
         >
           <option value="">请选择</option>
-          {field.enum?.map((option) => <option value={String(option)} key={String(option)}>{String(option)}</option>)}
+          {options.map((option, index) => (
+            <option value={String(index)} key={`${typeof option}:${String(option)}:${index}`}>
+              {option === "" ? "（空字符串）" : String(option)}
+            </option>
+          ))}
         </select>
         <Icon name="chevron-down" size={16}/>
       </div>
@@ -160,6 +208,7 @@ function FieldControl({
           aria-describedby={describedBy}
           aria-invalid={Boolean(error)}
           aria-required={field.required}
+          disabled={disabled}
           onInput={(event) => onChange(parseJsonDraft(event.currentTarget.value))}
         />
       </div>
@@ -170,8 +219,8 @@ function FieldControl({
     const color = typeof value === "string" && /^#[\da-f]{6}$/i.test(value) ? value : "#2563eb";
     return (
       <div class="color-control">
-        <input id={`${id}-picker`} type="color" value={color} onInput={(event) => onChange(event.currentTarget.value)}/>
-        <input id={id} class="control" value={String(value ?? "")} aria-invalid={Boolean(error)} aria-required={field.required} onInput={(event) => onChange(event.currentTarget.value)} placeholder="#2563eb"/>
+        <input id={`${id}-picker`} type="color" value={color} aria-label={`${field.label}颜色选择器`} aria-describedby={describedBy} disabled={disabled} onInput={(event) => onChange(event.currentTarget.value)}/>
+        <input id={id} class={`control ${error ? "control--error" : ""}`} value={String(value ?? "")} aria-describedby={describedBy} aria-invalid={Boolean(error)} aria-required={field.required} disabled={disabled} onInput={(event) => onChange(event.currentTarget.value)} placeholder="#2563eb"/>
       </div>
     );
   }
@@ -189,9 +238,10 @@ function FieldControl({
           aria-describedby={describedBy}
           aria-invalid={Boolean(error)}
           aria-required={field.required}
+          disabled={disabled}
           onInput={(event) => onChange(event.currentTarget.value)}
         />
-        <button type="button" class="icon-button" onClick={() => setRevealed(!revealed)} aria-label={revealed ? "隐藏内容" : "显示内容"}>
+        <button type="button" class="icon-button" disabled={disabled} onClick={() => setRevealed(!revealed)} aria-label={revealed ? "隐藏内容" : "显示内容"}>
           <Icon name={revealed ? "eye-off" : "eye"}/>
         </button>
       </div>
@@ -220,6 +270,7 @@ function FieldControl({
             aria-invalid={Boolean(error)}
             aria-required={field.required}
             aria-valuetext={current === undefined ? "未设置" : String(current)}
+            disabled={disabled}
             onInput={(event) => onChange(event.currentTarget.valueAsNumber)}
           />
           <b class="range-control__value">{current ?? "—"}</b>
@@ -230,16 +281,33 @@ function FieldControl({
       <input
         id={id}
         class={`control ${error ? "control--error" : ""}`}
-        type="number"
-        step={field.type === "integer" ? 1 : "any"}
-        min={field.minimum}
-        max={field.maximum}
-        value={current ?? ""}
+        type="text"
+        inputMode={field.type === "integer" ? "numeric" : "decimal"}
+        value={numberText}
         placeholder={field.placeholder}
         aria-describedby={describedBy}
         aria-invalid={Boolean(error)}
         aria-required={field.required}
-        onInput={(event) => onChange(event.currentTarget.value === "" ? undefined : event.currentTarget.valueAsNumber)}
+        disabled={disabled}
+        onInput={(event) => {
+          const raw = event.currentTarget.value;
+          setNumberText(raw);
+          if (!raw.trim()) {
+            lastNumberValue.current = undefined;
+            onChange(undefined);
+            return;
+          }
+          const parsed = Number(raw);
+          const valid = Number.isFinite(parsed) && (field.type !== "integer" || Number.isInteger(parsed));
+          lastNumberValue.current = valid ? parsed : raw;
+          onChange(valid ? parsed : raw);
+        }}
+        onBlur={() => {
+          const parsed = Number(numberText);
+          if (numberText.trim() && Number.isFinite(parsed) && (field.type !== "integer" || Number.isInteger(parsed))) {
+            setNumberText(String(parsed));
+          }
+        }}
       />
     );
   }
@@ -256,6 +324,7 @@ function FieldControl({
       aria-describedby={describedBy}
       aria-invalid={Boolean(error)}
       aria-required={field.required}
+      disabled={disabled}
       onInput={(event) => onChange(event.currentTarget.value)}
     />
   );
@@ -276,4 +345,8 @@ function formatCompact(value: unknown): string {
   if (typeof value === "string") return value;
   const text = JSON.stringify(value);
   return text && text.length > 80 ? `${text.slice(0, 77)}…` : text ?? String(value);
+}
+
+function formatNumberInput(value: unknown): string {
+  return typeof value === "number" || typeof value === "string" ? String(value) : "";
 }

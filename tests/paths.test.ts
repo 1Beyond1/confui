@@ -1,6 +1,8 @@
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { safeJoin } from "../core/paths.ts";
+import { resolveExistingProjectPath, safeJoin } from "../core/paths.ts";
 
 const ROOT = resolve("C:", "projects", "demo");
 
@@ -25,5 +27,27 @@ describe("safeJoin", () => {
   it("does not let a sibling directory pass as a prefix match", () => {
     // `C:\projects\demo-evil` shares a string prefix with the root but is outside it.
     expect(() => safeJoin(ROOT, join("..", "demo-evil", "config.json"))).toThrow(/项目目录之外/);
+  });
+
+  it("rejects an existing symlink whose target leaves the project", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "confui-paths-"));
+    const project = join(parent, "project");
+    const outside = join(parent, "outside");
+    try {
+      await mkdir(project);
+      await mkdir(outside);
+      await writeFile(join(outside, "secret.json"), "{}", "utf8");
+      try {
+        await symlink(outside, join(project, "linked"), "junction");
+      } catch {
+        // Some locked-down Windows environments do not allow test junctions.
+        return;
+      }
+
+      await expect(resolveExistingProjectPath(project, "linked/secret.json"))
+        .rejects.toMatchObject({ code: "INVALID_INPUT" });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 });

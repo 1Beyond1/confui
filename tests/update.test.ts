@@ -18,6 +18,10 @@ describe("update checker", () => {
       updateAvailable: true,
       releaseName: "Confui v0.3.0",
     });
+    expect(fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/1Beyond1/confui/releases/latest",
+      expect.objectContaining({ redirect: "error" }),
+    );
   });
 
   it("reports the current version when the release is not newer", async () => {

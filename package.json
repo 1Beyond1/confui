@@ -19,7 +19,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run test && npm run build",
-    "package": "npm run build && node scripts/package.mjs"
+    "package": "npm run typecheck && npm test && npm run build && node scripts/package.mjs"
   },
   "devDependencies": {
     "@preact/preset-vite": "^2.10.5",

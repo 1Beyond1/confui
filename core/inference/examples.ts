@@ -1,12 +1,14 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import type { ConfigFormat, PathSegment } from "../../shared/schema.ts";
 import { parseConfig } from "../formats.ts";
+import { readLimitedUtf8File } from "./limited-text.ts";
 import { groupForPath, humanize, inferFieldType, isSecretPath } from "./common.ts";
 import { maskSecrets } from "./heuristic.ts";
 import type { FieldCandidate } from "./types.ts";
 
 const MARKERS = ["example", "sample", "template", "dist", "default"];
+const EXAMPLE_MAX_BYTES = 512 * 1024;
 
 export interface ExampleResult {
   fields: FieldCandidate[];
@@ -26,8 +28,10 @@ export async function inferExampleFields(
 
   for (const examplePath of examplePaths) {
     try {
-      const text = await readFile(examplePath, "utf8");
-      if (text.length > 512 * 1024) continue;
+      const text = await readLimitedUtf8File(examplePath, {
+        maxBytes: EXAMPLE_MAX_BYTES,
+        overflow: "reject",
+      });
       const parsed = parseConfig(text, format);
       const comments = extractComments(text);
       fields.push(...flattenExample(parsed, comments, () => order++));
@@ -61,7 +65,7 @@ export async function findExampleFiles(configPath: string): Promise<string[]> {
   try {
     const entries = await readdir(directory, { withFileTypes: true });
     return entries
-      .filter((entry) => entry.isFile() && candidates.has(entry.name.toLowerCase()))
+      .filter((entry) => !entry.isSymbolicLink() && entry.isFile() && candidates.has(entry.name.toLowerCase()))
       .map((entry) => join(directory, entry.name))
       .sort((left, right) => left.localeCompare(right));
   } catch {

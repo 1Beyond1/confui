@@ -61,4 +61,13 @@ describe("editor state", () => {
     expect(errors.get(fieldKey(mode))).toBe("请选择列表中的有效选项");
     expect(errors.get(fieldKey(color))).toBe("请输入有效的十六进制颜色");
   });
+
+  it("keeps enum types distinct and allows an empty-string option", () => {
+    const mixed = field({ path: "mode", segments: ["mode"], type: "enum", enum: [1, "1", ""] });
+
+    expect(validationErrors([mixed], { [fieldKey(mixed)]: 1 }).size).toBe(0);
+    expect(validationErrors([mixed], { [fieldKey(mixed)]: "1" }).size).toBe(0);
+    expect(validationErrors([mixed], { [fieldKey(mixed)]: "" }).size).toBe(0);
+    expect(validationErrors([mixed], { [fieldKey(mixed)]: true }).get(fieldKey(mixed))).toBe("请选择列表中的有效选项");
+  });
 });
