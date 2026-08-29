@@ -17,7 +17,7 @@ import { currentVersion } from "../core/files.ts";
 import { inferConfig } from "../core/inference/index.ts";
 import { resolveExistingProjectPath } from "../core/paths.ts";
 import { commitSave, previewSave } from "../core/save.ts";
-import { scanProject } from "../core/scanner.ts";
+import { normalizeGithubUrl, scanProject } from "../core/scanner.ts";
 import { SettingsStore, type SecretCodec } from "../core/settings.ts";
 import { checkForUpdates } from "../core/update.ts";
 import type {
@@ -153,15 +153,17 @@ function registerIpcHandlers(): void {
   handle("confui:scanProject", async (_event, root: unknown, githubUrl?: unknown) => {
     assertString(root, "项目路径");
     const result = await scanProject(root);
+    const requestedGithubUrl = typeof githubUrl === "string" ? normalizeGithubUrl(githubUrl) : undefined;
+    const effectiveGithubUrl = requestedGithubUrl ?? result.detectedGithubUrl;
     await settingsStore.rememberProject({
       path: result.root,
       name: result.name,
-      githubUrl: typeof githubUrl === "string" && githubUrl.trim()
-        ? githubUrl.trim()
-        : result.detectedGithubUrl,
+      githubUrl: effectiveGithubUrl,
       openedAt: Date.now(),
     });
-    return result;
+    return effectiveGithubUrl === result.detectedGithubUrl
+      ? result
+      : { ...result, detectedGithubUrl: effectiveGithubUrl };
   });
 
   handle("confui:inferSchema", async (_event, root: unknown, file: unknown, options?: InferOptions) => {

@@ -6,6 +6,7 @@ import { inferConfig } from "../core/inference/index.ts";
 import { findExampleFiles } from "../core/inference/examples.ts";
 import { maskDocumentSecrets, maskSecrets } from "../core/inference/heuristic.ts";
 import { parseReadme } from "../core/inference/readme.ts";
+import { MAX_FORM_FIELDS } from "../core/inference/merge.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -91,6 +92,11 @@ describe("inference pipeline", () => {
       "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
       "GEMINI_KEY=AIzaSyA12345678901234567890",
       "SLACK_WEBHOOK=https://hooks.slack.com/services/T000/B000/FAKE_SECRET",
+      "GROK_KEY=g2a_abcdefghijklmnopqrstuv",
+      "DOUBAO_KEY=ark-12345678-1234-1234-1234-123456789012",
+      "GROQ_KEY=gsk_abcdefghijklmnopqrstuv",
+      "XAI_KEY=xai-abcdefghijklmnopqrstuv",
+      "provider examples: g2a_abcdefghijklmnopqrstuv / ark-12345678-1234-1234-1234-123456789012",
       "rawJwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123",
       "-----BEGIN ENCRYPTED PRIVATE KEY-----\nprivate-material\n-----END ENCRYPTED PRIVATE KEY-----",
     ].join("\n"))).toBe([
@@ -101,6 +107,11 @@ describe("inference pipeline", () => {
       "AWS_ACCESS_KEY_ID=***",
       "GEMINI_KEY=***",
       "SLACK_WEBHOOK=https://hooks.slack.com/services/***",
+      "GROK_KEY=***",
+      "DOUBAO_KEY=***",
+      "GROQ_KEY=***",
+      "XAI_KEY=***",
+      "provider examples: *** / ***",
       "rawJwt=***",
       "-----BEGIN ENCRYPTED PRIVATE KEY-----\n***\n-----END ENCRYPTED PRIVATE KEY-----",
     ].join("\n"));
@@ -152,5 +163,27 @@ describe("inference pipeline", () => {
     expect(schema.fields.find((field) => field.path === "unknown")?.description).toBe("由 AI 补充的说明。");
     expect(schema.fields.find((field) => field.path === "apiToken")).toMatchObject({ type: "secret", secret: true });
     expect(schema.fields.find((field) => field.path === "sessionKey")).toMatchObject({ type: "secret", secret: true });
+  });
+
+  it("limits pathological field counts before rendering the form", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-infer-large-form-"));
+    temporaryDirectories.push(root);
+    const value = Object.fromEntries(
+      Array.from({ length: MAX_FORM_FIELDS + 25 }, (_, index) => [`option${index}`, index]),
+    );
+    await Promise.all([
+      writeFile(join(root, "config.json"), JSON.stringify(value)),
+      writeFile(join(root, "config.schema.json"), JSON.stringify({
+        type: "object",
+        properties: { [`option${MAX_FORM_FIELDS + 24}`]: { type: "integer", minimum: 0 } },
+      })),
+    ]);
+
+    const schema = await inferConfig(root, "config.json");
+
+    expect(schema.fields).toHaveLength(MAX_FORM_FIELDS);
+    expect(schema.fields.some((field) => field.path === "option0")).toBe(true);
+    expect(schema.fields.some((field) => field.path === `option${MAX_FORM_FIELDS + 24}`)).toBe(true);
+    expect(schema.warnings.some((warning) => warning.includes("仅展示优先级最高"))).toBe(true);
   });
 });

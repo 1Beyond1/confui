@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { scanProject } from "../core/scanner.ts";
+import { normalizeGithubUrl, scanProject } from "../core/scanner.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -53,5 +53,12 @@ describe("project scanner", () => {
     expect(byPath.get("nginx.conf")?.warning).toContain("nginx");
     expect(byPath.get("app.cfg")?.status).toBe("ready");
     expect(byPath.get("plain.ini")?.status).toBe("ready");
+  });
+
+  it("normalizes only credential-free GitHub repository URLs", () => {
+    expect(normalizeGithubUrl("https://www.github.com/owner/repo.git/issues")).toBe("https://github.com/owner/repo");
+    expect(normalizeGithubUrl("git@github.com:owner/repo.git")).toBe("https://github.com/owner/repo");
+    expect(normalizeGithubUrl("https://user:password@github.com/owner/repo")).toBeUndefined();
+    expect(normalizeGithubUrl("https://github.com.attacker.example/owner/repo")).toBeUndefined();
   });
 });

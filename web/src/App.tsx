@@ -73,6 +73,7 @@ export function App() {
   const [settingsPageRevision, setSettingsPageRevision] = useState(0);
   const [pendingSettingsAction, setPendingSettingsAction] = useState<PendingAction>();
   const [afterSaveAction, setAfterSaveAction] = useState<PendingAction>();
+  const [fieldEditorRevision, setFieldEditorRevision] = useState(0);
   const [appVersion, setAppVersion] = useState("");
   const toastTimer = useRef<number>();
   const openSequence = useRef(0);
@@ -181,7 +182,10 @@ export function App() {
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       if (sequence !== openSequence.current) return;
       const scanned = result.data;
-      const resolvedGithub = githubUrl.trim() || scanned.detectedGithubUrl || "";
+      // The main process normalizes and validates this value before returning
+      // it, so credentials accidentally pasted into a GitHub URL never stay in
+      // the renderer or recent-project settings.
+      const resolvedGithub = scanned.detectedGithubUrl || "";
       setProject(scanned);
       setExternalChange(false);
       setRootInput(scanned.root);
@@ -282,6 +286,10 @@ export function App() {
     if (errors.size) {
       notify(`有 ${errors.size} 个字段需要修正`, "error");
       setEditorTab("form");
+      // Re-mounting clears a field search that may have hidden the invalid
+      // row, then the next tick focuses the first actual control with an error.
+      setFieldEditorRevision((current) => current + 1);
+      window.setTimeout(() => document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus(), 0);
       return;
     }
     setBusy("preview");
@@ -381,6 +389,24 @@ export function App() {
     setValues((current) => ({ ...current, [fieldKey(field)]: value }));
   }
 
+  function selectEditorTab(tab: EditorTab): void {
+    setEditorTab(tab);
+    window.setTimeout(() => document.getElementById(`editor-tab-${tab}`)?.focus(), 0);
+  }
+
+  function handleEditorTabKey(event: KeyboardEvent): void {
+    if (!(["ArrowLeft", "ArrowRight", "Home", "End"] as string[]).includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === "Home"
+      ? "form"
+      : event.key === "End"
+        ? "raw"
+        : event.key === "ArrowLeft"
+          ? "form"
+          : "raw";
+    selectEditorTab(next);
+  }
+
   function forwardMainWheel(event: WheelEvent): void {
     const scroller = mainContentRef.current;
     const target = event.target;
@@ -473,9 +499,9 @@ export function App() {
           <div class="topbar__actions">
             {view === "editor" && schema && (
               <>
-                <div class="view-tabs" role="tablist">
-                  <button id="editor-tab-form" role="tab" aria-selected={editorTab === "form"} aria-controls="editor-panel-form" class={editorTab === "form" ? "active" : ""} onClick={() => setEditorTab("form")}><Icon name="layers" size={15}/>表单</button>
-                  <button id="editor-tab-raw" role="tab" aria-selected={editorTab === "raw"} aria-controls="editor-panel-raw" class={editorTab === "raw" ? "active" : ""} onClick={() => setEditorTab("raw")}><Icon name="code" size={15}/>原始内容</button>
+                <div class="view-tabs" role="tablist" aria-orientation="horizontal">
+                  <button id="editor-tab-form" role="tab" tabIndex={editorTab === "form" ? 0 : -1} aria-selected={editorTab === "form"} aria-controls="editor-panel-form" class={editorTab === "form" ? "active" : ""} onKeyDown={handleEditorTabKey} onClick={() => selectEditorTab("form")}><Icon name="layers" size={15}/>表单</button>
+                  <button id="editor-tab-raw" role="tab" tabIndex={editorTab === "raw" ? 0 : -1} aria-selected={editorTab === "raw"} aria-controls="editor-panel-raw" class={editorTab === "raw" ? "active" : ""} onKeyDown={handleEditorTabKey} onClick={() => selectEditorTab("raw")}><Icon name="code" size={15}/>原始内容</button>
                 </div>
                 <Button variant="primary" icon="save" disabled={!dirty || errors.size > 0 || busy !== null} busy={busy === "preview" || busy === "save"} onClick={() => void beginSave()}>
                   {dirty ? `保存 ${changes.length} 项` : "已保存"}
@@ -536,7 +562,7 @@ export function App() {
             <div id="editor-panel-form" class="editor-page page-wide" role="tabpanel" aria-labelledby="editor-tab-form">
               <EditorSummary schema={schema}/>
               {schema.fields.length ? (
-                <FieldEditor fields={schema.fields} values={values} errors={errors} disabled={busy !== null} onChange={updateField}/>
+                <FieldEditor key={fieldEditorRevision} fields={schema.fields} values={values} errors={errors} disabled={busy !== null} onChange={updateField}/>
               ) : (
                 <div class="empty-card"><Icon name="info"/><div><h2>暂时无法生成表单</h2><p>这个文件没有可识别的键值字段。你仍然可以在“原始内容”中查看它。</p></div></div>
               )}

@@ -52,6 +52,14 @@ describe("GitHub README loading", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it("does not accept credentials embedded in a GitHub URL", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+
+    await expect(fetchGithubReadme("https://user:password@github.com/owner/repo", undefined, fetcher))
+      .rejects.toThrow("GitHub 仓库链接格式不正确");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("reads only a 512 KiB UTF-8-safe prefix from an oversized local README", async () => {
     const root = await mkdtemp(join(tmpdir(), "confui-readme-"));
     temporaryDirectories.push(root);

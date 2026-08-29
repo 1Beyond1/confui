@@ -302,6 +302,7 @@ function parseGithubRepository(url: string): { owner: string; repo: string } | u
     return undefined;
   }
   if (!/^https?:$/i.test(parsed.protocol) || !/^(?:www\.)?github\.com$/i.test(parsed.hostname)) return undefined;
+  if (parsed.username || parsed.password) return undefined;
   const parts = parsed.pathname.split("/").filter(Boolean);
   if (parts.length < 2) return undefined;
   const owner = parts[0];

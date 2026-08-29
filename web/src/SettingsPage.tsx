@@ -32,8 +32,12 @@ export function SettingsPage({
   const [appInfo, setAppInfo] = useState<AppInfo>();
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult>();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [apiKeysByProvider, setApiKeysByProvider] = useState<Record<string, string>>(() => ({
+    [settings.ai.provider]: settings.ai.apiKey,
+  }));
 
   useEffect(() => setDraft(structuredClone(settings)), [settings]);
+  useEffect(() => setApiKeysByProvider({ [settings.ai.provider]: settings.ai.apiKey }), [settings]);
   useEffect(() => {
     void window.confui.getAppInfo().then((result) => {
       if (result.ok) setAppInfo(result.data);
@@ -99,8 +103,12 @@ export function SettingsPage({
 
   function chooseProvider(id: string): void {
     const provider = PROVIDERS.find((item) => item.id === id) ?? PROVIDERS.at(-1)!;
+    setApiKeysByProvider((current) => ({ ...current, [draft.ai.provider]: draft.ai.apiKey }));
     setAi({
       provider: provider.id,
+      // API keys belong to a provider. Never carry a key entered for one
+      // vendor into a request sent to another vendor.
+      apiKey: apiKeysByProvider[provider.id] ?? "",
       ...(provider.id !== "custom" ? { baseUrl: provider.baseUrl, model: provider.model } : {}),
     });
   }
@@ -182,7 +190,7 @@ export function SettingsPage({
               </div>
               {locked?.apiKey
                 ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>已保存的 API Key 无法解密（Windows 安全存储不可用），密文已保留。留空保存不会清除它；填入新值会覆盖。</small>
-                : <small class="secure-note"><Icon name="shield" size={14}/>使用 Windows 安全存储加密，不会写入项目文件。</small>}
+                : <small class="secure-note"><Icon name="shield" size={14}/>使用 Windows 安全存储加密，不会写入项目文件；切换供应商时不会复用其他供应商的 Key。</small>}
             </div>
           </div>
           <div class="settings-inline-action">

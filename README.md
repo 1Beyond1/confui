@@ -41,6 +41,7 @@ JavaScript / TypeScript 配置文件不会被伪装成 JSON 打开。范例文�
 - 保存前展示逐字段差异。
 - 保存时校验文件 hash，拒绝覆盖外部修改。
 - 写入前生成 `.bak`，再通过同目录临时文件原子替换。
+- 表单支持按字段名、路径和说明搜索；异常大的配置最多展示 2,000 个优先级最高的字段，避免桌面界面卡死。
 - API Key 与 GitHub Token 使用 Electron `safeStorage` 加密；系统安全存储不可用时保留原密文、不会被空值覆盖，并在设置页明确标注"已保存但无法解密"。
 - 发给 AI 的配置会先按字段名屏蔽 Token、密码、密钥等敏感值。
 
@@ -88,7 +89,7 @@ Confui 只在下面三种情况下联网，其余功能完全本地：
 | 拉取远程 JSON Schema | 仅 `json.schemastore.org`、`schemastore.org`、`raw.githubusercontent.com`、`unpkg.com`、`cdn.jsdelivr.net` | 配置文件声明了指向以上域名的 `https` `$schema` |
 | 检查更新 | GitHub Release API | 在设置页手动点击检查 |
 
-远程 `$schema` 只接受 `https` 与上述域名，其他地址会被跳过并在界面给出提示；拉取结果在内存中缓存 10 分钟。AI 请求只发往用户自己配置的 Base URL（必须是 `http` 或 `https`）。
+远程 `$schema` 只接受 `https` 与上述域名，其他地址会被跳过并在界面给出提示；拉取结果在内存中缓存 10 分钟。AI 请求只发往用户自己配置的 Base URL（必须是 `http` 或 `https`，且不允许把用户名或密码写进 URL）。
 
 ## 已知边界
 

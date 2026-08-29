@@ -272,9 +272,22 @@ async function detectGithubRemote(root: string): Promise<string | undefined> {
 
 export function normalizeGithubUrl(value: string): string | undefined {
   const trimmed = value.trim();
-  const ssh = trimmed.match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i);
-  if (ssh?.[1] && ssh[2]) return `https://github.com/${ssh[1]}/${ssh[2].replace(/\.git$/i, "")}`;
-  const web = trimmed.match(/^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/#?]+?)(?:\.git)?(?:[/?#]|$)/i);
-  if (web?.[1] && web[2]) return `https://github.com/${web[1]}/${web[2].replace(/\.git$/i, "")}`;
-  return undefined;
+  const ssh = trimmed.match(/^git@github\.com:([^/]+)\/([^/?#]+?)(?:\.git)?$/i);
+  const candidate = ssh?.[1] && ssh[2]
+    ? `https://github.com/${ssh[1]}/${ssh[2]}`
+    : trimmed;
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return undefined;
+  }
+  if (!/^https?:$/i.test(parsed.protocol) || !/^(?:www\.)?github\.com$/i.test(parsed.hostname)) return undefined;
+  if (parsed.username || parsed.password) return undefined;
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  if (parts.length < 2) return undefined;
+  const owner = parts[0];
+  const repo = parts[1]?.replace(/\.git$/i, "");
+  if (!owner || !repo || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(owner) || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repo)) return undefined;
+  return `https://github.com/${owner}/${repo}`;
 }

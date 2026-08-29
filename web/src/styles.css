@@ -402,6 +402,16 @@ code, pre { font-family: var(--font-mono); }
 .required-mark { padding: 1px 6px; border: 1px solid var(--danger-soft); border-radius: 4px; color: var(--danger); background: var(--danger-soft); font-size: 8px; font-weight: 700; }
 .field-row__content { min-width: 0; }
 .field-description { margin: 0 0 8px; color: var(--text-secondary); font-size: 10.5px; line-height: 1.55; user-select: text; }
+.field-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.field-search { min-width: 0; width: min(100%, 460px); position: relative; display: flex; align-items: center; color: var(--text-muted); }
+.field-search > svg { position: absolute; left: 10px; pointer-events: none; }
+.field-search input { width: 100%; height: 34px; padding: 0 35px 0 32px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-subtle); outline: none; font-size: 11px; }
+.field-search input:focus { border-color: var(--primary-line); background: var(--surface); box-shadow: 0 0 0 3px var(--focus); }
+.field-search .icon-button { width: 25px; height: 25px; position: absolute; right: 4px; }
+.field-toolbar__count { flex: 0 0 auto; color: var(--text-muted); font-size: 10px; }
+.field-filter-empty { min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; border: 1px dashed var(--line-strong); border-radius: var(--radius); color: var(--text-muted); font-size: 11px; }
+.field-filter-empty button { padding: 4px 9px; border: 1px solid var(--line); border-radius: 6px; color: var(--text-secondary); background: var(--surface-subtle); font-size: 10px; }
+.field-filter-empty button:hover:not(:disabled) { border-color: var(--line-strong); color: var(--text); background: var(--surface-hover); }
 .control {
   width: 100%; min-height: 36px; padding: 8px 11px; border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: var(--surface-subtle); outline: none; font-size: 11.5px; transition: border-color .15s, background .15s, box-shadow .15s;
@@ -596,6 +606,8 @@ code, pre { font-family: var(--font-mono); }
 @media (max-width: 1120px) {
   .app-shell { grid-template-columns: 258px minmax(0, 1fr); }
   .field-row { grid-template-columns: 190px minmax(0, 1fr); gap: 20px; }
+  .field-toolbar { align-items: stretch; flex-direction: column; }
+  .field-search { width: 100%; }
   .editor-savebar { width: min(calc(100% - 290px), 700px); }
   .settings-savebar { left: calc(258px + (100vw - 258px) / 2); }
 }

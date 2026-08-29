@@ -37,6 +37,7 @@ describe("OpenAI-compatible provider", () => {
       expect(() => endpointFor(bad)).toThrow(/只支持 http 或 https/);
     }
     expect(() => endpointFor("provider.example/v1")).toThrow(/不是有效地址/);
+    expect(() => endpointFor("https://user:password@provider.example/v1")).toThrow(/不能包含用户名或密码/);
   });
 
   it("reports an unusable Base URL without sending a request", async () => {

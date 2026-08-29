@@ -113,6 +113,9 @@ export function endpointFor(baseUrl: string): string {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new ConfuiError("AI_ERROR", `AI Base URL 只支持 http 或 https，当前是 ${url.protocol}`);
   }
+  if (url.username || url.password) {
+    throw new ConfuiError("AI_ERROR", "AI Base URL 不能包含用户名或密码，请单独填写 API Key");
+  }
   const pathname = url.pathname.replace(/\/+$/, "");
   url.pathname = /\/chat\/completions$/i.test(pathname)
     ? pathname

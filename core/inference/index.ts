@@ -9,7 +9,7 @@ import { inferExampleFields } from "./examples.ts";
 import { inferHeuristicFields, maskDocumentSecrets, maskSecrets } from "./heuristic.ts";
 import { inferJsonSchemaFields } from "./json-schema.ts";
 import { inferKnownFields } from "./known.ts";
-import { mergeCandidates } from "./merge.ts";
+import { MAX_FORM_FIELDS, mergeCandidates } from "./merge.ts";
 import { inferReadmeFields } from "./readme.ts";
 import type { FieldCandidate } from "./types.ts";
 
@@ -88,6 +88,9 @@ export async function inferConfig(
   }
 
   const merged = mergeCandidates(candidates);
+  if (merged.truncated) {
+    warnings.push(`字段数量较多（共 ${merged.totalFieldCount} 项），仅展示优先级最高的前 ${MAX_FORM_FIELDS} 项；其余内容仍保留在原始文件中。`);
+  }
   if (!merged.fields.length) warnings.push("没有发现可转换为表单的字段，可在原始内容中检查文件");
   return {
     file: relativeFile.replace(/\\/g, "/"),

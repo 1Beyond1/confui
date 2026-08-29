@@ -12,6 +12,9 @@ const PRIORITY: Record<FieldSource, number> = {
   heuristic: 100,
 };
 
+/** Keep pathological but valid config files from freezing the renderer. */
+export const MAX_FORM_FIELDS = 2_000;
+
 const PROPERTIES: FieldProperty[] = [
   "label",
   "description",
@@ -32,6 +35,8 @@ const PROPERTIES: FieldProperty[] = [
 export function mergeCandidates(candidates: readonly FieldCandidate[]): {
   fields: FieldSpec[];
   sources: SourceSummary[];
+  truncated: boolean;
+  totalFieldCount: number;
 } {
   const groups = new Map<string, FieldCandidate[]>();
   for (const candidate of candidates) {
@@ -41,8 +46,7 @@ export function mergeCandidates(candidates: readonly FieldCandidate[]): {
     else groups.set(key, [candidate]);
   }
 
-  const sourcePaths = new Map<FieldSource, Set<string>>();
-  const fields = [...groups.entries()].map(([key, group]) => {
+  const fields = [...groups.entries()].map(([, group]) => {
     const ranked = [...group].sort(compareCandidates);
     const segments = ranked[0]?.segments ?? [];
     const leaf = String(segments.at(-1) ?? "字段");
@@ -59,9 +63,6 @@ export function mergeCandidates(candidates: readonly FieldCandidate[]): {
         confidence: winner.confidence,
         detail: winner.detail,
       });
-      const paths = sourcePaths.get(winner.source) ?? new Set<string>();
-      paths.add(key);
-      sourcePaths.set(winner.source, paths);
     }
 
     const valueCandidate = group.find((candidate) => candidate.source === "heuristic" && "value" in candidate)
@@ -94,11 +95,37 @@ export function mergeCandidates(candidates: readonly FieldCandidate[]): {
   });
 
   fields.sort((left, right) => left.order - right.order || left.path.localeCompare(right.path));
-  const cleanFields = fields.map(({ order: _order, ...field }) => field);
+  const limitedOrderedFields = limitFields(fields);
+  const limitedFields = limitedOrderedFields.map(({ order: _order, ...field }) => field);
   const sources = (["json-schema", "known-template", "example", "readme", "ai", "heuristic"] as FieldSource[])
-    .map((source) => ({ source, fieldCount: sourcePaths.get(source)?.size ?? 0 }))
+    .map((source) => ({
+      source,
+      fieldCount: limitedFields.filter((field) => field.evidence.some((item) => item.source === source)).length,
+    }))
     .filter((summary) => summary.fieldCount > 0);
-  return { fields: cleanFields, sources };
+  return {
+    fields: limitedFields,
+    sources,
+    truncated: fields.length > limitedFields.length,
+    totalFieldCount: fields.length,
+  };
+}
+
+function limitFields(fields: Array<FieldSpec & { order: number }>): Array<FieldSpec & { order: number }> {
+  if (fields.length <= MAX_FORM_FIELDS) return fields;
+  // Prefer fields whose metadata comes from a stronger source, but restore
+  // their original discovery order for display so the form still feels familiar.
+  return [...fields]
+    .sort((left, right) => strongestPriority(right) - strongestPriority(left) || left.order - right.order)
+    .slice(0, MAX_FORM_FIELDS)
+    .sort((left, right) => left.order - right.order || left.path.localeCompare(right.path));
+}
+
+function strongestPriority(field: FieldSpec): number {
+  return Math.max(
+    PRIORITY[field.source],
+    ...field.evidence.map((item) => PRIORITY[item.source]),
+  );
 }
 
 function compareCandidates(left: FieldCandidate, right: FieldCandidate): number {

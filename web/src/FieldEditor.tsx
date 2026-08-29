@@ -22,35 +22,71 @@ export function FieldEditor({
   onChange: (field: FieldSpec, value: unknown) => void;
   disabled?: boolean;
 }) {
-  const groups = groupFields(fields);
+  const [query, setQuery] = useState("");
+  useEffect(() => setQuery(""), [fields]);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleFields = normalizedQuery
+    ? fields.filter((field) => [field.label, field.path, field.description, field.group]
+      .filter(Boolean)
+      .join(" ")
+      .toLocaleLowerCase()
+      .includes(normalizedQuery))
+    : fields;
+  const groups = groupFields(visibleFields);
+  const controlIds = new Map(fields.map((field, index) => [fieldKey(field), `field-${index}`]));
   return (
-    <div class="field-groups" aria-busy={disabled}>
-      {groups.map(([name, groupFields]) => (
-        <section class="form-card" key={name}>
-          <header class="form-card__header">
-            <div>
-              <h2>{name}</h2>
-              <p>{groupFields.length} 个配置项</p>
+    <div class="field-editor" aria-busy={disabled}>
+      <div class="field-toolbar">
+        <label class="field-search">
+          <Icon name="search" size={15}/>
+          <input
+            value={query}
+            disabled={disabled}
+            placeholder="搜索字段名称、路径或说明"
+            aria-label="搜索字段名称、路径或说明"
+            onInput={(event) => setQuery(event.currentTarget.value)}
+          />
+          {query && <button type="button" class="icon-button" disabled={disabled} onClick={() => setQuery("")} aria-label="清空字段筛选"><Icon name="x" size={14}/></button>}
+        </label>
+        <span class="field-toolbar__count">
+          {visibleFields.length === fields.length ? `${fields.length} 个配置项` : `${visibleFields.length} / ${fields.length} 个配置项`}
+        </span>
+      </div>
+
+      {groups.length ? <div class="field-groups">
+        {groups.map(([name, groupedFields]) => (
+          <section class="form-card" key={name}>
+            <header class="form-card__header">
+              <div>
+                <h2>{name}</h2>
+                <p>{groupedFields.length} 个配置项</p>
+              </div>
+            </header>
+            <div class="form-card__body">
+              {groupedFields.map((field) => {
+                const key = fieldKey(field);
+                return (
+                  <FieldRow
+                    key={key}
+                    field={field}
+                    value={values[key]}
+                    error={errors.get(key)}
+                    controlId={controlIds.get(key) ?? `field-${key}`.replace(/[^\w-]/g, "-")}
+                    disabled={disabled}
+                    onChange={(value) => onChange(field, value)}
+                  />
+                );
+              })}
             </div>
-          </header>
-          <div class="form-card__body">
-            {groupFields.map((field, index) => {
-              const key = fieldKey(field);
-              return (
-                <FieldRow
-                  key={key}
-                  field={field}
-                  value={values[key]}
-                  error={errors.get(key)}
-                  controlId={`field-${name}-${index}`.replace(/[^\w-]/g, "-")}
-                  disabled={disabled}
-                  onChange={(value) => onChange(field, value)}
-                />
-              );
-            })}
-          </div>
-        </section>
-      ))}
+          </section>
+        ))}
+      </div> : (
+        <div class="field-filter-empty">
+          <Icon name="search"/>
+          <span>没有匹配的字段</span>
+          <button type="button" disabled={disabled} onClick={() => setQuery("")}>清空筛选</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -141,6 +177,7 @@ function FieldControl({
           role="switch"
           aria-checked={checked}
           aria-describedby={describedBy}
+          aria-invalid={Boolean(error)}
           aria-label={`${field.label}：${state}`}
           class={`switch-control ${checked ? "switch-control--on" : ""} ${value === undefined ? "switch-control--unset" : ""}`}
           disabled={disabled}

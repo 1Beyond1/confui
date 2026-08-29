@@ -24,6 +24,11 @@ jobs:
       # typecheck + vitest + electron-vite build, per PROJECT_SPEC §7.
       - run: npm run check
 
+      # Also exercise the Windows portable bundle; npm run check alone does
+      # not catch missing Electron runtime files or locale trimming mistakes.
+      - name: Verify portable package
+        run: node scripts/package.mjs
+
       # The release gate requires a clean tree: tests must not touch fixtures.
       - name: Verify the working tree is clean
         shell: bash
