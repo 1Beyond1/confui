@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { FieldAssistResult, FieldSpec } from "../../shared/schema.ts";
 import {
+  effectiveValue,
   fieldKey,
   isJsonDraft,
   parseJsonDraft,
@@ -177,7 +178,12 @@ function FieldRow({
         />
         {error && <p class="field-error" id={`${controlId}-error`}><Icon name="warning" size={14}/>{error}</p>}
         {!error && field.default !== undefined && (
-          <p class="field-hint">默认值：<code>{field.secret || field.type === "secret" ? "••••••••" : formatCompact(field.default)}</code></p>
+          <div class="field-hint">
+            <span>默认值：<code>{field.secret || field.type === "secret" ? "••••••••" : formatCompact(field.default)}</code></span>
+            {effectiveValue(value) === undefined && !field.secret && field.type !== "secret" && (
+              <button type="button" class="field-default-button" disabled={disabled} onClick={() => handleChange(cloneDefault(field.default))}>使用默认值</button>
+            )}
+          </div>
         )}
         {assist.status === "success" && (
           <div class="field-ai-result" role="status" aria-live="polite">
@@ -446,6 +452,14 @@ function formatCompact(value: unknown): string {
   if (typeof value === "string") return value;
   const text = JSON.stringify(value);
   return text && text.length > 80 ? `${text.slice(0, 77)}…` : text ?? String(value);
+}
+
+function cloneDefault(value: unknown): unknown {
+  try {
+    return structuredClone(value);
+  } catch {
+    return value;
+  }
 }
 
 function formatNumberInput(value: unknown): string {

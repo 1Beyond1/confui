@@ -474,8 +474,11 @@ code, pre { font-family: var(--font-mono); }
 .color-control { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; }
 .color-control input[type="color"] { width: 42px; height: 36px; padding: 3px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-subtle); }
 .field-error { display: flex; align-items: center; gap: 5px; margin: 7px 0 0; color: var(--danger); font-size: 9.5px; }
-.field-hint { margin: 7px 0 0; color: var(--text-muted); font-size: 9.5px; }
+.field-hint { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 7px 0 0; color: var(--text-muted); font-size: 9.5px; }
 .field-hint code { padding: 1px 5px; border-radius: 4px; color: var(--text-secondary); background: var(--surface-hover); font-size: 9px; user-select: text; }
+.field-default-button { padding: 2px 6px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--text-secondary); background: var(--surface); font-size: 9px; }
+.field-default-button:hover:not(:disabled) { border-color: var(--primary-line); color: var(--primary); background: var(--primary-soft); }
+.field-default-button:disabled { opacity: .55; cursor: not-allowed; }
 .editor-bottom-space { height: 58px; }
 .empty-card { display: flex; gap: 12px; padding: 20px; border: 1px solid var(--line); border-radius: var(--radius); color: var(--text-muted); background: var(--surface); }
 .empty-card h2 { margin: 0 0 5px; color: var(--text); font-size: 13px; }
