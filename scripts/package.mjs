@@ -29,11 +29,7 @@ const appPackage = {
 try {
   await rm(stagingTarget, { recursive: true, force: true });
   await mkdir(stagingTarget, { recursive: true });
-  await cp(electronDist, stagingTarget, {
-    recursive: true,
-    force: true,
-    filter: shouldCopyElectronPath,
-  });
+  await copyElectronRuntime(stagingTarget);
   const executable = join(stagingTarget, "Confui.exe");
   await rename(join(stagingTarget, "electron.exe"), executable);
   await rcedit(executable, {
@@ -84,16 +80,25 @@ function windowsVersion(version) {
   return [...numeric, 0, 0, 0, 0].slice(0, 4).join(".");
 }
 
-function shouldCopyElectronPath(source) {
-  const path = relative(electronDist, source).split(sep).join("/");
-  if (path === "") return true;
-  if (path === "resources/default_app.asar") return false;
+async function copyElectronRuntime(destination) {
+  // Do not rely on fs.cp's recursive filter here. Its callback behavior has
+  // differed between Node versions on the Windows runner, which could leave
+  // every Electron locale in the portable bundle. Copy top-level entries
+  // explicitly and copy only the locales that Confui actually supports.
+  const entries = await readdir(electronDist, { withFileTypes: true });
+  for (const entry of entries) {
+    const source = join(electronDist, entry.name);
+    const targetPath = join(destination, entry.name);
+    if (entry.name !== "locales") {
+      await cp(source, targetPath, { recursive: true, force: true });
+      continue;
+    }
 
-  const localePrefix = "locales/";
-  if (path.startsWith(localePrefix) && path.endsWith(".pak")) {
-    return retainedLocales.has(path.slice(localePrefix.length));
+    await mkdir(targetPath, { recursive: true });
+    for (const locale of retainedLocales) {
+      await cp(join(source, locale), join(targetPath, locale), { force: true });
+    }
   }
-  return true;
 }
 
 async function assertPackagedRuntime(root) {

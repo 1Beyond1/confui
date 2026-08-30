@@ -17,7 +17,8 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: "20.19"
+          # Electron 41 and its packaging helpers require Node >= 22.12.
+          node-version: "22.12"
           cache: npm
 
       - run: npm ci
