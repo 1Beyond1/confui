@@ -4,6 +4,7 @@ import type {
   ConfigChange,
   ConfuiAPI,
   FileChangedEvent,
+  FieldAssistField,
   FileVersion,
   InferOptions,
   SavePreview,
@@ -14,6 +15,8 @@ const api: ConfuiAPI = {
   scanProject: (root: string, githubUrl?: string) => ipcRenderer.invoke("confui:scanProject", root, githubUrl),
   inferSchema: (root: string, file: string, options?: InferOptions) =>
     ipcRenderer.invoke("confui:inferSchema", root, file, options),
+  explainField: (root: string, file: string, field: FieldAssistField, githubUrl?: string) =>
+    ipcRenderer.invoke("confui:explainField", root, file, field, githubUrl),
   previewSave: (root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion) =>
     ipcRenderer.invoke("confui:previewSave", root, file, changes, expectedVersion),
   saveConfig: (root: string, preview: SavePreview) =>

@@ -1,10 +1,10 @@
-import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { ConfigFormat, PathSegment } from "../../shared/schema.ts";
 import { parseConfig } from "../formats.ts";
 import { ensurePathInsideProject, formatPath, pathKey } from "../paths.ts";
 import { groupForPath, humanize, inferFieldType, isSecretPath } from "./common.ts";
 import { readLimitedUtf8File, readLimitedUtf8Response } from "./limited-text.ts";
+import { readLimitedDirectory } from "./limited-directory.ts";
 import type { FieldCandidate } from "./types.ts";
 
 const GITHUB_README_CACHE_TTL_MS = 10 * 60 * 1_000;
@@ -13,6 +13,7 @@ const README_MAX_BYTES = 512 * 1024;
 const MAX_README_FIELDS = 6_000;
 const MAX_README_TEXT_CHARS = 500;
 const MAX_README_DEFAULT_CHARS = 4_000;
+const MAX_LOOKUP_ENTRIES = 10_000;
 
 // Opening several config files in one project should not spend one GitHub API
 // request per file. Public README responses are safe to reuse for a short
@@ -66,7 +67,7 @@ export async function readLocalReadme(projectRoot: string): Promise<string | und
   for (const directory of roots) {
     try {
       const safeDirectory = await ensurePathInsideProject(projectRoot, directory);
-      const entries = await readdir(safeDirectory, { withFileTypes: true });
+      const { entries } = await readLimitedDirectory(safeDirectory, MAX_LOOKUP_ENTRIES);
       const readmes = entries
         .filter((entry) => !entry.isSymbolicLink() && entry.isFile() && /^readme(?:\.[a-z0-9_-]+)?\.(?:md|mdx|rst|txt)$/i.test(entry.name))
         .sort((left, right) => scoreReadme(left.name) - scoreReadme(right.name));

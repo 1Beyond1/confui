@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import type { FieldSpec } from "../../shared/schema.ts";
+import type { FieldAssistResult, FieldSpec } from "../../shared/schema.ts";
 import {
   fieldKey,
   isJsonDraft,
@@ -14,12 +14,16 @@ export function FieldEditor({
   values,
   errors,
   onChange,
+  aiAvailable = false,
+  onExplain,
   disabled = false,
 }: {
   fields: FieldSpec[];
   values: EditorValues;
   errors: Map<string, string>;
   onChange: (field: FieldSpec, value: unknown) => void;
+  aiAvailable?: boolean;
+  onExplain?: (field: FieldSpec) => Promise<FieldAssistResult>;
   disabled?: boolean;
 }) {
   const [query, setQuery] = useState("");
@@ -73,6 +77,8 @@ export function FieldEditor({
                     error={errors.get(key)}
                     controlId={controlIds.get(key) ?? `field-${key}`.replace(/[^\w-]/g, "-")}
                     disabled={disabled}
+                    aiAvailable={aiAvailable}
+                    onExplain={onExplain ? () => onExplain(field) : undefined}
                     onChange={(value) => onChange(field, value)}
                   />
                 );
@@ -97,6 +103,8 @@ function FieldRow({
   error,
   controlId,
   disabled,
+  aiAvailable,
+  onExplain,
   onChange,
 }: {
   field: FieldSpec;
@@ -104,11 +112,34 @@ function FieldRow({
   error?: string;
   controlId: string;
   disabled: boolean;
+  aiAvailable: boolean;
+  onExplain?: () => Promise<FieldAssistResult>;
   onChange: (value: unknown) => void;
 }) {
+  const [assist, setAssist] = useState<
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "success"; result: FieldAssistResult }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
   const evidenceTitle = field.evidence
     .map((item) => `${item.property}: ${item.source} (${Math.round(item.confidence * 100)}%)`)
     .join("\n");
+  async function requestAssist(): Promise<void> {
+    if (!onExplain || assist.status === "loading") return;
+    setAssist({ status: "loading" });
+    try {
+      setAssist({ status: "success", result: await onExplain() });
+    } catch (error) {
+      setAssist({ status: "error", message: error instanceof Error ? error.message : "AI 字段解释失败" });
+    }
+  }
+
+  function handleChange(value: unknown): void {
+    if (assist.status !== "idle") setAssist({ status: "idle" });
+    onChange(value);
+  }
+
   return (
     <div class={`field-row ${field.confidence < 0.7 ? "field-row--suggested" : ""} ${error ? "field-row--error" : ""}`}>
       <div class="field-row__meta">
@@ -120,7 +151,21 @@ function FieldRow({
         <div title={evidenceTitle}><SourceBadge source={field.source} confidence={field.confidence}/></div>
       </div>
       <div class="field-row__content">
-        {field.description && <p id={`${controlId}-description`} class="field-description">{field.description}</p>}
+        <div class="field-description-line">
+          {field.description && <p id={`${controlId}-description`} class="field-description">{field.description}</p>}
+          {aiAvailable && onExplain && (
+            <button
+              type="button"
+              class="field-ai-button"
+              disabled={disabled || assist.status === "loading"}
+              onClick={() => void requestAssist()}
+              title="让已配置的 AI 解释这个字段并给出填写建议"
+            >
+              <Icon name={assist.status === "loading" ? "loader" : "sparkles"} class={assist.status === "loading" ? "spin" : undefined} size={13}/>
+              <span>{assist.status === "loading" ? "分析中" : assist.status === "success" ? "再次询问" : "AI 解读"}</span>
+            </button>
+          )}
+        </div>
         <FieldControl
           id={controlId}
           field={field}
@@ -128,11 +173,25 @@ function FieldRow({
           error={error}
           descriptionId={field.description ? `${controlId}-description` : undefined}
           disabled={disabled}
-          onChange={onChange}
+          onChange={handleChange}
         />
         {error && <p class="field-error" id={`${controlId}-error`}><Icon name="warning" size={14}/>{error}</p>}
         {!error && field.default !== undefined && (
           <p class="field-hint">默认值：<code>{field.secret || field.type === "secret" ? "••••••••" : formatCompact(field.default)}</code></p>
+        )}
+        {assist.status === "success" && (
+          <div class="field-ai-result" role="status" aria-live="polite">
+            <div class="field-ai-result__heading"><Icon name="sparkles" size={14}/><strong>AI 字段解读</strong></div>
+            <p>{assist.result.explanation}</p>
+            {assist.result.recommendation && <p><b>填写建议：</b>{assist.result.recommendation}</p>}
+            {assist.result.caution && <p class="field-ai-result__caution"><b>注意：</b>{assist.result.caution}</p>}
+          </div>
+        )}
+        {assist.status === "error" && (
+          <div class="field-ai-result field-ai-result--error" role="alert">
+            <span>{assist.message}</span>
+            {onExplain && <button type="button" onClick={() => void requestAssist()} disabled={disabled}>重试</button>}
+          </div>
         )}
       </div>
     </div>

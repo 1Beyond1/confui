@@ -38,6 +38,8 @@ describe("OpenAI-compatible provider", () => {
     }
     expect(() => endpointFor("provider.example/v1")).toThrow(/不是有效地址/);
     expect(() => endpointFor("https://user:password@provider.example/v1")).toThrow(/不能包含用户名或密码/);
+    expect(() => endpointFor("https://provider.example/v1?api_key=secret")).toThrow(/查询参数或片段/);
+    expect(() => endpointFor("https://provider.example/v1#secret")).toThrow(/查询参数或片段/);
   });
 
   it("reports an unusable Base URL without sending a request", async () => {

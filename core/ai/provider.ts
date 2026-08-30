@@ -116,6 +116,9 @@ export function endpointFor(baseUrl: string): string {
   if (url.username || url.password) {
     throw new ConfuiError("AI_ERROR", "AI Base URL 不能包含用户名或密码，请单独填写 API Key");
   }
+  if (url.search || url.hash) {
+    throw new ConfuiError("AI_ERROR", "AI Base URL 不能包含查询参数或片段，请把密钥填写到 API Key");
+  }
   const pathname = url.pathname.replace(/\/+$/, "");
   url.pathname = /\/chat\/completions$/i.test(pathname)
     ? pathname

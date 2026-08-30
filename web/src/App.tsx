@@ -4,6 +4,8 @@ import type {
   ConfigFile,
   ConfigFormat,
   ConfigFormSchema,
+  FieldAssistField,
+  FieldAssistResult,
   FieldSpec,
   ProjectScanResult,
   RecentProject,
@@ -408,6 +410,28 @@ export function App() {
     setValues((current) => ({ ...current, [fieldKey(field)]: value }));
   }
 
+  async function askAiAboutField(field: FieldSpec): Promise<FieldAssistResult> {
+    if (!project || !schema) throw new Error("当前没有打开的配置文件");
+    const request: FieldAssistField = {
+      segments: [...field.segments],
+      label: field.label,
+      type: field.type,
+      description: field.description,
+      required: field.required,
+      enum: field.enum,
+      minimum: field.minimum,
+      maximum: field.maximum,
+      minLength: field.minLength,
+      maxLength: field.maxLength,
+      placeholder: field.placeholder,
+      secret: field.secret,
+      group: field.group,
+    };
+    const result = await window.confui.explainField(project.root, schema.file, request, githubInput || undefined);
+    if (!result.ok) throw new Error(result.error.detail || result.error.message);
+    return result.data;
+  }
+
   function selectEditorTab(tab: EditorTab): void {
     setEditorTab(tab);
     window.setTimeout(() => document.getElementById(`editor-tab-${tab}`)?.focus(), 0);
@@ -589,7 +613,16 @@ export function App() {
             <div id="editor-panel-form" class="editor-page page-wide" role="tabpanel" aria-labelledby="editor-tab-form">
               <EditorSummary schema={schema}/>
               {schema.fields.length ? (
-                <FieldEditor key={fieldEditorRevision} fields={schema.fields} values={values} errors={errors} disabled={busy !== null} onChange={updateField}/>
+                <FieldEditor
+                  key={fieldEditorRevision}
+                  fields={schema.fields}
+                  values={values}
+                  errors={errors}
+                  disabled={busy !== null}
+                  aiAvailable={settings.ai.enabled && Boolean(settings.ai.baseUrl.trim() && settings.ai.model.trim())}
+                  onExplain={askAiAboutField}
+                  onChange={updateField}
+                />
               ) : (
                 <div class="empty-card"><Icon name="info"/><div><h2>暂时无法生成表单</h2><p>这个文件没有可识别的键值字段。你仍然可以在“原始内容”中查看它。</p></div></div>
               )}

@@ -13,9 +13,15 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OpenAICompatibleProvider, testAIConnection } from "../core/ai/provider.ts";
 import { toAppError, ConfuiError } from "../core/errors.ts";
-import { currentVersion } from "../core/files.ts";
+import { AI_FILE_LIMIT, currentVersion, readTextSnapshot } from "../core/files.ts";
+import { explainField as explainFieldWithAI } from "../core/inference/ai.ts";
+import { inferExampleFields } from "../core/inference/examples.ts";
 import { inferConfig } from "../core/inference/index.ts";
-import { resolveExistingProjectPath } from "../core/paths.ts";
+import { inferReadmeFields } from "../core/inference/readme.ts";
+import { maskDocumentSecrets, maskSecrets } from "../core/inference/heuristic.ts";
+import { isSecretPath } from "../core/inference/common.ts";
+import { assertEditableSyntax, detectFormat, parseConfig } from "../core/formats.ts";
+import { getAtPath, resolveExistingProjectPath } from "../core/paths.ts";
 import { commitSave, previewSave } from "../core/save.ts";
 import { normalizeGithubUrl, scanProject } from "../core/scanner.ts";
 import { SettingsStore, type SecretCodec } from "../core/settings.ts";
@@ -25,12 +31,18 @@ import type {
   ConfigChange,
   FileChangedEvent,
   FileVersion,
+  FieldAssistField,
+  FieldType,
   InferOptions,
   Result,
   SavePreview,
 } from "../shared/schema.ts";
 
 const currentDirectory = fileURLToPath(new URL(".", import.meta.url));
+const MAX_PROJECT_PATH_CHARS = 32_768;
+const MAX_CONFIG_PATH_CHARS = 4_096;
+const MAX_GITHUB_URL_CHARS = 2_000;
+const MAX_RECENT_PROJECTS = 100;
 let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore;
 let watchedFile: { watcher: FSWatcher; absolutePath: string; relativePath: string } | undefined;
@@ -151,7 +163,8 @@ function registerIpcHandlers(): void {
   });
 
   handle("confui:scanProject", async (_event, root: unknown, githubUrl?: unknown) => {
-    assertString(root, "项目路径");
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertOptionalString(githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
     const result = await scanProject(root);
     const requestedGithubUrl = typeof githubUrl === "string" ? normalizeGithubUrl(githubUrl) : undefined;
     const effectiveGithubUrl = requestedGithubUrl ?? result.detectedGithubUrl;
@@ -167,8 +180,9 @@ function registerIpcHandlers(): void {
   });
 
   handle("confui:inferSchema", async (_event, root: unknown, file: unknown, options?: InferOptions) => {
-    assertString(root, "项目路径");
-    assertString(file, "配置文件路径");
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
+    assertOptionalString(options?.githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
     const settings = await settingsStore.load();
     const ai = settings.ai.enabled && settings.ai.baseUrl && settings.ai.model
       ? new OpenAICompatibleProvider(settings.ai)
@@ -183,11 +197,57 @@ function registerIpcHandlers(): void {
     return schema;
   });
 
+  handle("confui:explainField", async (_event, root: unknown, file: unknown, field: unknown, githubUrl?: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
+    assertOptionalString(githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
+    if (!isFieldAssistField(field)) throw new ConfuiError("INVALID_INPUT", "字段助手参数无效");
+
+    const settings = await settingsStore.load();
+    if (!settings.ai.enabled || !settings.ai.baseUrl.trim() || !settings.ai.model.trim()) {
+      throw new ConfuiError("AI_ERROR", "请先在设置中启用并配置 AI 服务");
+    }
+    const resolved = await resolveExistingProjectPath(root, file);
+    const format = detectFormat(file);
+    if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
+    const snapshot = await readTextSnapshot(resolved.path);
+    if (snapshot.version.size > AI_FILE_LIMIT) {
+      throw new ConfuiError("AI_ERROR", "文件超过 1 MB，暂不提供 AI 字段解释");
+    }
+    assertEditableSyntax(file, snapshot.text);
+    const parsed = parseConfig(snapshot.text, format);
+    const isSecret = field.secret === true || field.type === "secret" || isSecretPath(field.segments);
+    const maskedValue = isSecret
+      ? "***"
+      : maskSecrets(getAtPath(parsed, field.segments), field.segments);
+    const safeField: FieldAssistField = {
+      ...field,
+      label: maskDocumentSecrets(field.label),
+      description: field.description ? maskDocumentSecrets(field.description) : undefined,
+      placeholder: field.placeholder ? maskDocumentSecrets(field.placeholder) : undefined,
+      group: field.group ? maskDocumentSecrets(field.group) : undefined,
+    };
+    const normalizedGithub = typeof githubUrl === "string" ? normalizeGithubUrl(githubUrl) : undefined;
+    const [readme, examples] = await Promise.all([
+      inferReadmeFields(resolved.root, normalizedGithub, settings.github.token, [field.segments], format),
+      inferExampleFields(resolved.path, resolved.root, format),
+    ]);
+    return explainFieldWithAI({
+      provider: new OpenAICompatibleProvider(settings.ai),
+      file: file.replace(/\\/g, "/"),
+      format,
+      field: safeField,
+      maskedValue,
+      readmeContext: maskDocumentSecrets(readme.text),
+      exampleContext: examples.context,
+    });
+  });
+
   handle(
     "confui:previewSave",
     async (_event, root: unknown, file: unknown, changes: unknown, expectedVersion: unknown) => {
-      assertString(root, "项目路径");
-      assertString(file, "配置文件路径");
+      assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+      assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
       if (!Array.isArray(changes) || !isFileVersion(expectedVersion)) {
         throw new ConfuiError("INVALID_INPUT", "保存参数无效");
       }
@@ -196,7 +256,7 @@ function registerIpcHandlers(): void {
   );
 
   handle("confui:saveConfig", async (_event, root: unknown, preview: unknown) => {
-    assertString(root, "项目路径");
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     if (!isSavePreview(preview)) throw new ConfuiError("INVALID_INPUT", "保存预览无效");
     const absolutePath = (await resolveExistingProjectPath(root, preview.file)).path;
     suppressChange = { absolutePath, until: Date.now() + 2_000 };
@@ -324,8 +384,15 @@ function createSecretCodec(): SecretCodec {
   };
 }
 
-function assertString(value: unknown, label: string): asserts value is string {
+function assertString(value: unknown, label: string, maxLength = MAX_PROJECT_PATH_CHARS): asserts value is string {
   if (typeof value !== "string" || !value.trim()) throw new ConfuiError("INVALID_INPUT", `${label}不能为空`);
+  if (value.length > maxLength || value.includes("\0")) throw new ConfuiError("INVALID_INPUT", `${label}无效`);
+}
+
+function assertOptionalString(value: unknown, label: string, maxLength: number): asserts value is string | undefined {
+  if (value !== undefined && (typeof value !== "string" || value.length > maxLength || value.includes("\0"))) {
+    throw new ConfuiError("INVALID_INPUT", `${label}无效`);
+  }
 }
 
 function isFileVersion(value: unknown): value is FileVersion {
@@ -366,10 +433,44 @@ function isAppSettings(value: unknown): value is AppSettings {
     && isAiSettings((value as AppSettings).ai)
     && (value as AppSettings).github !== null
     && typeof (value as AppSettings).github === "object"
-    && typeof (value as AppSettings).github.token === "string"
-    && Array.isArray((value as AppSettings).recentProjects);
+    && boundedString((value as AppSettings).github.token, 24_000)
+    && Array.isArray((value as AppSettings).recentProjects)
+    && (value as AppSettings).recentProjects.length <= MAX_RECENT_PROJECTS;
 }
 
 function boundedString(value: unknown, maxLength: number): value is string {
   return typeof value === "string" && value.length <= maxLength;
+}
+
+function isFieldAssistField(value: unknown): value is FieldAssistField {
+  if (value === null || typeof value !== "object" || !Array.isArray((value as FieldAssistField).segments)) return false;
+  const field = value as FieldAssistField;
+  if (field.segments.length < 1 || field.segments.length > 32) return false;
+  if (!field.segments.every(isSafeAssistSegment)) return false;
+  if (!boundedString(field.label, 300) || !FIELD_TYPES.has(field.type)) return false;
+  if (field.description !== undefined && !boundedString(field.description, 1_200)) return false;
+  if (field.placeholder !== undefined && !boundedString(field.placeholder, 500)) return false;
+  if (field.group !== undefined && !boundedString(field.group, 300)) return false;
+  if (field.required !== undefined && typeof field.required !== "boolean") return false;
+  if (field.secret !== undefined && typeof field.secret !== "boolean") return false;
+  if (field.enum !== undefined && (!Array.isArray(field.enum) || field.enum.length > 100
+    || !field.enum.every((item) => typeof item === "string" && item.length <= 500 && !item.includes("\0")
+      || typeof item === "number" && Number.isFinite(item)))) return false;
+  return [field.minimum, field.maximum, field.minLength, field.maxLength]
+    .every((item) => item === undefined || typeof item === "number" && Number.isFinite(item));
+}
+
+const FIELD_TYPES = new Set<FieldType>([
+  "string", "number", "integer", "boolean", "enum", "secret", "color", "array", "json",
+]);
+
+function isSafeAssistSegment(segment: unknown): segment is string | number {
+  return typeof segment === "number"
+    ? Number.isSafeInteger(segment) && segment >= 0
+    : typeof segment === "string"
+      && segment.length <= 512
+      && !segment.includes("\0")
+      && segment !== "__proto__"
+      && segment !== "prototype"
+      && segment !== "constructor";
 }

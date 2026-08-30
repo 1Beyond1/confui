@@ -65,8 +65,12 @@ export function mergeCandidates(candidates: readonly FieldCandidate[]): {
       });
     }
 
+    // Only the actual-file heuristic (or a known built-in template reading the
+    // actual file) may populate the editor value. Example files are guidance;
+    // using their `value` here would silently prefill fields that do not exist
+    // in the user's config and could turn placeholders into edits.
     const valueCandidate = group.find((candidate) => candidate.source === "heuristic" && "value" in candidate)
-      ?? group.find((candidate) => "value" in candidate);
+      ?? group.find((candidate) => candidate.source === "known-template" && "value" in candidate);
     const strongest = evidence.find((item) => item.property === "description") ?? evidence[0];
     const source = strongest?.source ?? "heuristic";
     return {

@@ -1,15 +1,16 @@
-import { readdir } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import type { ConfigFormat, PathSegment } from "../../shared/schema.ts";
 import { parseConfig } from "../formats.ts";
 import { readLimitedUtf8File } from "./limited-text.ts";
 import { groupForPath, humanize, inferFieldType, isSecretPath } from "./common.ts";
 import { maskSecrets } from "./heuristic.ts";
+import { readLimitedDirectory } from "./limited-directory.ts";
 import type { FieldCandidate } from "./types.ts";
 
 const MARKERS = ["example", "sample", "template", "dist", "default"];
 const EXAMPLE_MAX_BYTES = 512 * 1024;
 const MAX_EXAMPLE_FIELDS = 6_000;
+const MAX_LOOKUP_ENTRIES = 10_000;
 
 export interface ExampleResult {
   fields: FieldCandidate[];
@@ -75,7 +76,7 @@ export async function findExampleFiles(configPath: string): Promise<string[]> {
     if (target === ".env" || target.startsWith(".env.")) candidates.add(`.env.${marker}`);
   }
   try {
-    const entries = await readdir(directory, { withFileTypes: true });
+    const { entries } = await readLimitedDirectory(directory, MAX_LOOKUP_ENTRIES);
     return entries
       .filter((entry) => !entry.isSymbolicLink() && entry.isFile() && candidates.has(entry.name.toLowerCase()))
       .map((entry) => join(directory, entry.name))

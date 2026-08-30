@@ -75,6 +75,29 @@ export interface FieldSpec {
   evidence: FieldEvidence[];
 }
 
+/** Metadata sent when the user explicitly asks the configured AI to explain a field. */
+export interface FieldAssistField {
+  segments: PathSegment[];
+  label: string;
+  type: FieldType;
+  description?: string;
+  required?: boolean;
+  enum?: Array<string | number>;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  placeholder?: string;
+  secret?: boolean;
+  group?: string;
+}
+
+export interface FieldAssistResult {
+  explanation: string;
+  recommendation?: string;
+  caution?: string;
+}
+
 export interface FileVersion {
   mtimeMs: number;
   size: number;
@@ -259,6 +282,7 @@ export interface ConfuiAPI {
   selectFolder(): Promise<Result<string | null>>;
   scanProject(root: string, githubUrl?: string): Promise<Result<ProjectScanResult>>;
   inferSchema(root: string, file: string, options?: InferOptions): Promise<Result<ConfigFormSchema>>;
+  explainField(root: string, file: string, field: FieldAssistField, githubUrl?: string): Promise<Result<FieldAssistResult>>;
   previewSave(root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion): Promise<Result<SavePreview>>;
   saveConfig(root: string, preview: SavePreview): Promise<Result<SaveResult>>;
   getSettings(): Promise<Result<AppSettings>>;

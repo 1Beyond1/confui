@@ -3,8 +3,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { inferConfig } from "../core/inference/index.ts";
+import { explainField } from "../core/inference/ai.ts";
 import { findExampleFiles } from "../core/inference/examples.ts";
 import { maskDocumentSecrets, maskSecrets } from "../core/inference/heuristic.ts";
+import { readLimitedDirectory } from "../core/inference/limited-directory.ts";
 import { parseReadme } from "../core/inference/readme.ts";
 import { MAX_FORM_FIELDS } from "../core/inference/merge.ts";
 
@@ -72,6 +74,20 @@ describe("inference pipeline", () => {
     expect(schema.fields.find((field) => field.path === "apiKey")?.type).toBe("secret");
     expect(schema.readmeSource).toBe("local");
     expect(schema.exampleFiles).toHaveLength(2);
+  });
+
+  it("does not prefill fields that exist only in an example file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-infer-example-only-"));
+    temporaryDirectories.push(root);
+    await Promise.all([
+      writeFile(join(root, "config.json"), JSON.stringify({ existing: true })),
+      writeFile(join(root, "config.example.json"), JSON.stringify({ existing: false, newOption: "recommended-value" })),
+    ]);
+
+    const schema = await inferConfig(root, "config.json");
+    const exampleOnly = schema.fields.find((field) => field.path === "newOption");
+
+    expect(exampleOnly).toMatchObject({ default: "recommended-value", value: undefined });
   });
 
   it("masks secrets recursively before AI context is created", () => {
@@ -165,6 +181,44 @@ describe("inference pipeline", () => {
     expect(schema.fields.find((field) => field.path === "sessionKey")).toMatchObject({ type: "secret", secret: true });
   });
 
+  it("supports an explicit field explanation without sending an unmasked value", async () => {
+    const prompts: string[] = [];
+    const result = await explainField({
+      provider: {
+        async chat(messages) {
+          prompts.push(messages.at(-1)?.content ?? "");
+          return JSON.stringify({
+            explanation: "这个字段控制服务监听的端口。",
+            recommendation: "通常填写未被其他程序占用的端口，例如 3000。",
+          });
+        },
+      },
+      file: "config.json",
+      format: "json",
+      field: {
+        segments: ["server", "port"],
+        label: "端口",
+        type: "integer",
+        description: "服务监听端口",
+        minimum: 1,
+        maximum: 65535,
+      },
+      maskedValue: 3000,
+      readmeContext: "server.port 表示监听端口。",
+      exampleContext: "--- config.example.json ---\n{\"server\":{\"port\":8080}}",
+    });
+
+    expect(result).toEqual({
+      explanation: "这个字段控制服务监听的端口。",
+      recommendation: "通常填写未被其他程序占用的端口，例如 3000。",
+      caution: undefined,
+    });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("不要替用户修改文件");
+    expect(prompts[0]).toContain('"path":"server.port"');
+    expect(prompts[0]).toContain("3000");
+  });
+
   it("limits pathological field counts before rendering the form", async () => {
     const root = await mkdtemp(join(tmpdir(), "confui-infer-large-form-"));
     temporaryDirectories.push(root);
@@ -200,5 +254,16 @@ describe("inference pipeline", () => {
 
     expect(schema.fields.find((field) => field.path === "value")?.description).toBe("repeated explanation");
     expect(schema.warnings).toContain("README 中可识别字段过多，已停止继续解析其余内容。");
+  });
+
+  it("bounds directory discovery instead of loading every entry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-directory-limit-"));
+    temporaryDirectories.push(root);
+    await Promise.all(Array.from({ length: 4 }, (_, index) => writeFile(join(root, `entry-${index}.txt`), "")));
+
+    const result = await readLimitedDirectory(root, 3);
+
+    expect(result.entries).toHaveLength(3);
+    expect(result.truncated).toBe(true);
   });
 });

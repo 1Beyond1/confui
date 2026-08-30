@@ -405,7 +405,20 @@ code, pre { font-family: var(--font-mono); }
 .field-row__meta > code { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 9.5px; user-select: text; }
 .required-mark { padding: 1px 6px; border: 1px solid var(--danger-soft); border-radius: 4px; color: var(--danger); background: var(--danger-soft); font-size: 8px; font-weight: 700; }
 .field-row__content { min-width: 0; }
-.field-description { margin: 0 0 8px; color: var(--text-secondary); font-size: 10.5px; line-height: 1.55; user-select: text; }
+.field-description-line { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
+.field-description { min-width: 0; flex: 1; margin: 0; color: var(--text-secondary); font-size: 10.5px; line-height: 1.55; user-select: text; }
+.field-ai-button { min-height: 25px; display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid var(--primary-line); border-radius: 6px; color: var(--primary); background: var(--primary-soft); font-size: 9.5px; font-weight: 650; white-space: nowrap; transition: border-color .15s, background .15s, color .15s; }
+.field-ai-button:hover:not(:disabled) { border-color: var(--primary); background: var(--surface-hover); }
+.field-ai-button:disabled { opacity: .55; cursor: not-allowed; }
+.field-ai-result { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--primary-line); border-radius: var(--radius-sm); color: var(--text-secondary); background: var(--primary-soft); font-size: 10px; line-height: 1.6; }
+.field-ai-result__heading { display: flex; align-items: center; gap: 6px; color: var(--primary); font-size: 10px; }
+.field-ai-result p { margin: 6px 0 0; }
+.field-ai-result p + p { margin-top: 4px; }
+.field-ai-result b { color: var(--text); }
+.field-ai-result__caution { color: var(--warning); }
+.field-ai-result--error { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-color: var(--danger-soft); color: var(--danger); background: var(--danger-soft); }
+.field-ai-result--error button { padding: 3px 8px; border: 1px solid currentColor; border-radius: 5px; color: inherit; background: transparent; font-size: 9px; white-space: nowrap; }
+.field-ai-result--error button:hover:not(:disabled) { background: var(--surface); }
 .field-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .field-search { min-width: 0; width: min(100%, 460px); position: relative; display: flex; align-items: center; color: var(--text-muted); }
 .field-search > svg { position: absolute; left: 10px; pointer-events: none; }

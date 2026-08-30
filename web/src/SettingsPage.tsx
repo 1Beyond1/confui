@@ -308,6 +308,8 @@ function validateAiDraft(ai: AppSettings["ai"]): AiDraftErrors {
         errors.baseUrl = "Base URL 只支持 http 或 https";
       } else if (url.username || url.password) {
         errors.baseUrl = "请把用户名或密码移到 API Key，不要写进 URL";
+      } else if (url.search || url.hash) {
+        errors.baseUrl = "Base URL 不要包含查询参数或片段，请把密钥填写到 API Key";
       }
     } catch {
       errors.baseUrl = "请输入有效的 Base URL，例如 https://api.example.com/v1";
