@@ -22,6 +22,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+
       # typecheck + vitest + electron-vite build, per PROJECT_SPEC §7.
       - run: npm run check
 
@@ -44,6 +47,12 @@ jobs:
       - name: Verify the working tree is clean
         shell: bash
         run: |
+          unexpected=$(find . -path './.git' -prune -o -path './node_modules' -prune -o -path './out' -prune -o -path './release' -prune -o -path './output' -prune -o -type f \( -name '*.bak' -o -name '*.tmp' \) -print)
+          if [ -n "$unexpected" ]; then
+            echo "Unexpected generated files remain in the repository:"
+            echo "$unexpected"
+            exit 1
+          fi
           if [ -n "$(git status --porcelain)" ]; then
             echo "Working tree is dirty after npm run check:"
             git status --porcelain

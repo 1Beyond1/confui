@@ -100,6 +100,10 @@ describe("inference pipeline", () => {
     expect(maskDocumentSecrets("API_KEY=sk-abcdefghijklmnop\ntoken: ghp_abcdefghijklmnop")).toBe(
       "API_KEY=***\ntoken: ***",
     );
+    expect(maskDocumentSecrets("Authorization: Basic dXNlcjpwYXNz\n| API_KEY | sk-abcdefghijklmnop |"))
+      .toBe("Authorization: Basic ***\n| API_KEY | *** |");
+    expect(maskDocumentSecrets("apiKey: |\n  arbitrary-secret\n  another-line\nsafe: keep\n"))
+      .toBe("apiKey: |\n  ***\n  ***\nsafe: keep\n");
     expect(maskDocumentSecrets([
       '{"apiKey": "live-secret", "safe": "keep"}',
       "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",

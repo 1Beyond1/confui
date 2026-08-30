@@ -96,17 +96,27 @@ export function maskSecrets(value: unknown, segments: PathSegment[] = [], state:
 }
 
 export function maskDocumentSecrets(text: string): string {
-  return text
+  return maskYamlSecretBlocks(text)
     .replace(
     /-----BEGIN ((?:(?:RSA|EC|OPENSSH|DSA) )?(?:ENCRYPTED )?PRIVATE KEY)-----[\s\S]*?-----END \1-----/g,
       "-----BEGIN $1-----\n***\n-----END $1-----",
     )
     .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^@\s/]+)@/gi, "$1***:***@")
-    .replace(/(\bBearer\s+)[^\s"',;]+/gi, "$1***")
+    // Authorization headers are often written in README examples rather than
+    // as `token: value` pairs. Mask the whole credential for the common HTTP
+    // schemes before the generic key/value pass below.
+    .replace(/(\b(?:Bearer|Basic|Digest)\s+)[^\s"',;]+/gi, "$1***")
+    // Markdown tables do not use `:` or `=` between a sensitive key and its
+    // value, so the key/value expression below would otherwise miss them.
+    .replace(
+      /(\|\s*(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|credential|auth(?:orization)?|cookie|jwt|session[_-]?key|signing[_-]?key|client[_-]?secret|access[_-]?key|database[_-]?url|connection[_-]?string|dsn|webhook[_-]?(?:url|secret))[\w.-]*\s*\|\s*)([^|\r\n]*?)(\s*\|)/gi,
+      "$1***$3",
+    )
     .replace(
       /(["']?(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|credential|auth(?:orization)?|cookie|jwt|session[_-]?key|signing[_-]?key|client[_-]?secret|access[_-]?key|database[_-]?url|connection[_-]?string|dsn|webhook[_-]?(?:url|secret))[\w.-]*["']?\s*[=:]\s*)("[^"]*"|'[^']*'|`[^`]*`|[^\s,;]+)/gi,
       (_match, prefix: string, value: string) => {
-        if (/auth(?:orization)?/i.test(prefix) && /^Bearer$/i.test(value)) return `${prefix}${value}`;
+        if (/auth(?:orization)?/i.test(prefix) && /^(?:Bearer|Basic|Digest)$/i.test(value)) return `${prefix}${value}`;
+        if (/^(?:[|>])(?:[-+]\d*|\d*[-+]?)?$/.test(value.trim())) return `${prefix}${value}`;
         const quote = value.at(0);
         return `${prefix}${quote === '"' || quote === "'" || quote === "`" ? `${quote}***${quote}` : "***"}`;
       },
@@ -114,4 +124,25 @@ export function maskDocumentSecrets(text: string): string {
     .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]{12,}|sk_(?:live|test)_[A-Za-z0-9]{12,}|gsk_[A-Za-z0-9_-]{12,}|g2a_[A-Za-z0-9_-]{12,}|ark-[A-Za-z0-9-]{16,}|xai-[A-Za-z0-9_-]{12,}|pplx-[A-Za-z0-9_-]{12,}|gh[opsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|hf_[A-Za-z0-9]{12,}|r8_[A-Za-z0-9]{12,}|npm_[A-Za-z0-9]{20,})\b/g, "***")
     .replace(/\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/gi, "https://hooks.slack.com/services/***")
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "***");
+}
+
+/** Mask YAML literal/folded block values whose key is clearly sensitive. */
+function maskYamlSecretBlocks(text: string): string {
+  const lines = text.split(/\r?\n/);
+  let blockKeyIndent: number | undefined;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const indent = line.match(/^\s*/)?.[0].length ?? 0;
+    if (blockKeyIndent !== undefined && line.trim()) {
+      if (indent > blockKeyIndent) {
+        lines[index] = `${line.slice(0, indent)}***`;
+        continue;
+      }
+      blockKeyIndent = undefined;
+    }
+    if (/^\s*["']?(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|credential|auth(?:orization)?|cookie|jwt|session[_-]?key|signing[_-]?key|client[_-]?secret|access[_-]?key|database[_-]?url|connection[_-]?string|dsn|webhook[_-]?(?:url|secret))[\w.-]*["']?\s*:\s*[|>](?:[-+]?\d*|\d*[-+])?(?:\s+#.*)?$/i.test(line)) {
+      blockKeyIndent = indent;
+    }
+  }
+  return lines.join("\n");
 }

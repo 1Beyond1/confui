@@ -186,4 +186,11 @@ app.name=Confui
     expect(parseConfig(tomlResult.output, "toml")).toMatchObject({ server: { port: 8080 } });
     expect(tomlResult.warnings[0]).toContain("TOML");
   });
+
+  it("accepts shared YAML aliases but refuses cyclic aliases", () => {
+    expect(parseConfig("defaults: &defaults\n  enabled: true\none: *defaults\ntwo: *defaults\n", "yaml"))
+      .toMatchObject({ one: { enabled: true }, two: { enabled: true } });
+    expect(() => parseConfig("self: &self\n  child: *self\n", "yaml"))
+      .toThrow(/循环引用/);
+  });
 });

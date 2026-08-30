@@ -87,8 +87,11 @@ export function parseConfig(text: string, format: ConfigFormat): unknown {
         assertNoDuplicateJsonKeys(source);
         return value;
       }
-      case "yaml":
-        return yaml.load(source) ?? {};
+      case "yaml": {
+        const value = yaml.load(source) ?? {};
+        assertNoCircularReferences(value);
+        return value;
+      }
       case "toml":
         return parseToml(source);
       case "env":
@@ -99,6 +102,7 @@ export function parseConfig(text: string, format: ConfigFormat): unknown {
         return parseProperties(source);
     }
   } catch (error) {
+    if (error instanceof ConfuiError) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     throw new ConfuiError("PARSE_ERROR", "无法解析这个配置文件", detail);
   }
@@ -188,6 +192,33 @@ function assertNoDuplicateJsonKeys(text: string): void {
     },
   }, { allowTrailingComma: true, disallowComments: false });
   if (duplicate) throw new Error(`存在重复的 JSON 键：${formatPath(duplicate)}`);
+}
+
+/**
+ * YAML aliases can describe a cyclic object graph even though the source is
+ * valid YAML. The form editor and the serializers operate on JSON-like trees;
+ * rejecting only cycles keeps shared (but acyclic) aliases usable and avoids a
+ * later renderer crash or an opaque "circular structure" save error.
+ */
+function assertNoCircularReferences(value: unknown): void {
+  if (value === null || typeof value !== "object") return;
+  const active = new WeakSet<object>();
+  const stack: Array<{ value: unknown; exit: boolean }> = [{ value, exit: false }];
+  while (stack.length) {
+    const item = stack.pop()!;
+    if (item.value === null || typeof item.value !== "object") continue;
+    if (item.exit) {
+      active.delete(item.value);
+      continue;
+    }
+    if (active.has(item.value)) throw new ConfuiError("PARSE_ERROR", "YAML 配置包含循环引用，当前无法安全编辑");
+    active.add(item.value);
+    stack.push({ value: item.value, exit: true });
+    const children = Array.isArray(item.value)
+      ? item.value
+      : Object.values(item.value as Record<string, unknown>);
+    for (const child of children) stack.push({ value: child, exit: false });
+  }
 }
 
 function updateJsonc(originalText: string, changes: readonly ConfigChange[]): string {

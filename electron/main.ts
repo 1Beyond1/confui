@@ -13,7 +13,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OpenAICompatibleProvider, testAIConnection } from "../core/ai/provider.ts";
 import { toAppError, ConfuiError } from "../core/errors.ts";
-import { AI_FILE_LIMIT, currentVersion, readTextSnapshot } from "../core/files.ts";
+import { AI_FILE_LIMIT, currentVersion, HARD_FILE_LIMIT, readTextSnapshot } from "../core/files.ts";
 import { explainField as explainFieldWithAI } from "../core/inference/ai.ts";
 import { inferExampleFields } from "../core/inference/examples.ts";
 import { inferConfig } from "../core/inference/index.ts";
@@ -43,6 +43,9 @@ const MAX_PROJECT_PATH_CHARS = 32_768;
 const MAX_CONFIG_PATH_CHARS = 4_096;
 const MAX_GITHUB_URL_CHARS = 2_000;
 const MAX_RECENT_PROJECTS = 100;
+const MAX_SAVE_OPERATIONS = 2_000;
+const MAX_FIELD_ASSIST_CONCURRENCY = 3;
+const SUPPORTED_FORMATS = new Set(["json", "jsonc", "yaml", "toml", "env", "ini", "properties"]);
 let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore;
 let watchedFile: { watcher: FSWatcher; absolutePath: string; relativePath: string } | undefined;
@@ -50,6 +53,7 @@ let suppressChange: { absolutePath: string; until: number; hash?: string } | und
 let watcherTimer: NodeJS.Timeout | undefined;
 let hasUnsavedChanges = false;
 let lastVerifiedReleasePage = "https://github.com/1Beyond1/confui/releases/latest";
+let fieldAssistInFlight = 0;
 
 app.setName("Confui");
 if (process.platform === "win32") app.setAppUserModelId("com.1beyond1.confui");
@@ -203,43 +207,46 @@ function registerIpcHandlers(): void {
     assertOptionalString(githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
     if (!isFieldAssistField(field)) throw new ConfuiError("INVALID_INPUT", "字段助手参数无效");
 
-    const settings = await settingsStore.load();
-    if (!settings.ai.enabled || !settings.ai.baseUrl.trim() || !settings.ai.model.trim()) {
-      throw new ConfuiError("AI_ERROR", "请先在设置中启用并配置 AI 服务");
-    }
-    const resolved = await resolveExistingProjectPath(root, file);
-    const format = detectFormat(file);
-    if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
-    const snapshot = await readTextSnapshot(resolved.path);
-    if (snapshot.version.size > AI_FILE_LIMIT) {
-      throw new ConfuiError("AI_ERROR", "文件超过 1 MB，暂不提供 AI 字段解释");
-    }
-    assertEditableSyntax(file, snapshot.text);
-    const parsed = parseConfig(snapshot.text, format);
-    const isSecret = field.secret === true || field.type === "secret" || isSecretPath(field.segments);
-    const maskedValue = isSecret
-      ? "***"
-      : maskSecrets(getAtPath(parsed, field.segments), field.segments);
-    const safeField: FieldAssistField = {
-      ...field,
-      label: maskDocumentSecrets(field.label),
-      description: field.description ? maskDocumentSecrets(field.description) : undefined,
-      placeholder: field.placeholder ? maskDocumentSecrets(field.placeholder) : undefined,
-      group: field.group ? maskDocumentSecrets(field.group) : undefined,
-    };
-    const normalizedGithub = typeof githubUrl === "string" ? normalizeGithubUrl(githubUrl) : undefined;
-    const [readme, examples] = await Promise.all([
-      inferReadmeFields(resolved.root, normalizedGithub, settings.github.token, [field.segments], format),
-      inferExampleFields(resolved.path, resolved.root, format),
-    ]);
-    return explainFieldWithAI({
-      provider: new OpenAICompatibleProvider(settings.ai),
-      file: file.replace(/\\/g, "/"),
-      format,
-      field: safeField,
-      maskedValue,
-      readmeContext: maskDocumentSecrets(readme.text),
-      exampleContext: examples.context,
+    return withFieldAssistSlot(async () => {
+      const settings = await settingsStore.load();
+      if (!settings.ai.enabled || !settings.ai.baseUrl.trim() || !settings.ai.model.trim()) {
+        throw new ConfuiError("AI_ERROR", "请先在设置中启用并配置 AI 服务");
+      }
+      const resolved = await resolveExistingProjectPath(root, file);
+      const format = detectFormat(file);
+      if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
+      const snapshot = await readTextSnapshot(resolved.path);
+      if (snapshot.version.size > AI_FILE_LIMIT) {
+        throw new ConfuiError("AI_ERROR", "文件超过 1 MB，暂不提供 AI 字段解释");
+      }
+      assertEditableSyntax(file, snapshot.text);
+      const parsed = parseConfig(snapshot.text, format);
+      const isSecret = field.secret === true || field.type === "secret" || isSecretPath(field.segments);
+      const maskedValue = isSecret
+        ? "***"
+        : maskSecrets(getAtPath(parsed, field.segments), field.segments);
+      const safeField: FieldAssistField = {
+        ...field,
+        label: maskDocumentSecrets(field.label),
+        description: field.description ? maskDocumentSecrets(field.description) : undefined,
+        placeholder: field.placeholder ? maskDocumentSecrets(field.placeholder) : undefined,
+        group: field.group ? maskDocumentSecrets(field.group) : undefined,
+        enum: field.enum?.map((item) => typeof item === "string" ? maskDocumentSecrets(item) : item),
+      };
+      const normalizedGithub = typeof githubUrl === "string" ? normalizeGithubUrl(githubUrl) : undefined;
+      const [readme, examples] = await Promise.all([
+        inferReadmeFields(resolved.root, normalizedGithub, settings.github.token, [field.segments], format),
+        inferExampleFields(resolved.path, resolved.root, format),
+      ]);
+      return explainFieldWithAI({
+        provider: new OpenAICompatibleProvider(settings.ai),
+        file: file.replace(/\\/g, "/"),
+        format,
+        field: safeField,
+        maskedValue,
+        readmeContext: maskDocumentSecrets(readme.text),
+        exampleContext: examples.context,
+      });
     });
   });
 
@@ -309,6 +316,18 @@ function handle<T>(
       return { ok: false, error: toAppError(error) };
     }
   });
+}
+
+async function withFieldAssistSlot<T>(operation: () => Promise<T>): Promise<T> {
+  if (fieldAssistInFlight >= MAX_FIELD_ASSIST_CONCURRENCY) {
+    throw new ConfuiError("AI_ERROR", "当前正在处理其他字段的 AI 解读，请稍后再试");
+  }
+  fieldAssistInFlight += 1;
+  try {
+    return await operation();
+  } finally {
+    fieldAssistInFlight -= 1;
+  }
 }
 
 function watchConfigFile(absolutePath: string, relativeFile: string): void {
@@ -408,13 +427,18 @@ function isFileVersion(value: unknown): value is FileVersion {
 }
 
 function isSavePreview(value: unknown): value is SavePreview {
-  return value !== null && typeof value === "object"
-    && typeof (value as SavePreview).projectRoot === "string"
-    && typeof (value as SavePreview).file === "string"
-    && typeof (value as SavePreview).format === "string"
-    && typeof (value as SavePreview).output === "string"
-    && Array.isArray((value as SavePreview).operations)
-    && isFileVersion((value as SavePreview).expectedVersion);
+  if (value === null || typeof value !== "object") return false;
+  const preview = value as SavePreview;
+  return boundedString(preview.projectRoot, MAX_PROJECT_PATH_CHARS)
+    && boundedString(preview.file, MAX_CONFIG_PATH_CHARS)
+    && typeof preview.format === "string"
+    && SUPPORTED_FORMATS.has(preview.format)
+    && boundedString(preview.output, HARD_FILE_LIMIT)
+    && Array.isArray(preview.changes)
+    && preview.changes.length <= MAX_SAVE_OPERATIONS
+    && Array.isArray(preview.operations)
+    && preview.operations.length <= MAX_SAVE_OPERATIONS
+    && isFileVersion(preview.expectedVersion);
 }
 
 function isAiSettings(value: unknown): value is AppSettings["ai"] {
@@ -439,7 +463,7 @@ function isAppSettings(value: unknown): value is AppSettings {
 }
 
 function boundedString(value: unknown, maxLength: number): value is string {
-  return typeof value === "string" && value.length <= maxLength;
+  return typeof value === "string" && value.length <= maxLength && !value.includes("\0");
 }
 
 function isFieldAssistField(value: unknown): value is FieldAssistField {
