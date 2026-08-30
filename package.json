@@ -8,7 +8,7 @@
   "license": "MIT",
   "repository": "https://github.com/1Beyond1/confui",
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=22.12.0"
   },
   "main": "out/main/main.js",
   "scripts": {
