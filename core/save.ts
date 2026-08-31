@@ -6,13 +6,14 @@ import type {
   ConfigChange,
   ConfigFormat,
   FileVersion,
+  PathSegment,
   SavePreview,
   SaveResult,
 } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
 import { HARD_FILE_LIMIT, currentVersion, readTextSnapshot } from "./files.ts";
 import { assertEditableSyntax, detectFormat, parseConfig, updateConfigText } from "./formats.ts";
-import { formatPath, getAtPath, pathKey, resolveExistingProjectPath } from "./paths.ts";
+import { ensurePathInsideProject, formatPath, getAtPath, pathKey, resolveExistingProjectPath } from "./paths.ts";
 
 const FORBIDDEN_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
 const activeSavePaths = new Set<string>();
@@ -67,17 +68,19 @@ export async function commitSave(root: string, preview: SavePreview): Promise<Sa
   }
   activeSavePaths.add(absolutePath);
   try {
-    return await commitSaveExclusive(absolutePath, preview, format);
+    return await commitSaveExclusive(resolved.root, absolutePath, preview, format);
   } finally {
     activeSavePaths.delete(absolutePath);
   }
 }
 
 async function commitSaveExclusive(
+  projectRoot: string,
   absolutePath: string,
   preview: SavePreview,
   format: ConfigFormat,
 ): Promise<SaveResult> {
+  await assertStableTarget(projectRoot, absolutePath);
   const snapshot = await readTextSnapshot(absolutePath);
   assertSameVersion(snapshot.version, preview.expectedVersion);
   assertEditableSyntax(preview.file, snapshot.text);
@@ -105,12 +108,22 @@ async function commitSaveExclusive(
     // Generating and flushing the temporary file can take time on a slow or
     // busy disk. Re-check immediately before backup/replacement so an edit
     // made during that window is not silently overwritten.
+    await assertStableTarget(projectRoot, absolutePath);
     assertSameVersion(await currentVersion(absolutePath), preview.expectedVersion);
     // Build the backup beside the target first, then rename it into place.
     // Unlike copyFile(destination), rename replaces the directory entry and
     // never follows a pre-existing `.bak` symlink to an outside path.
     await copyFile(absolutePath, backupTemporaryPath);
+    // The source can change while copyFile is running. A second boundary and
+    // version check prevents the common race from turning the newer external
+    // file into a backup and then overwriting it with this stale preview.
+    await assertStableTarget(projectRoot, absolutePath);
+    assertSameVersion(await currentVersion(absolutePath), preview.expectedVersion);
     await replaceBackup(backupTemporaryPath, backupPath);
+    // Keep the final rename bound to the same physical target. This is not an
+    // OS-level compare-and-swap, but it closes the checks-after-copy window and
+    // rejects parent junction/symlink replacement whenever it remains visible.
+    await assertStableTarget(projectRoot, absolutePath);
     await rename(temporaryPath, absolutePath);
   } catch (error) {
     await unlink(temporaryPath).catch(() => undefined);
@@ -134,11 +147,33 @@ function validateChanges(changes: readonly ConfigChange[]): void {
     throw new ConfuiError("INVALID_INPUT", `一次最多只能保存 ${MAX_SAVE_CHANGES} 项更改`);
   }
   const seen = new Set<string>();
+  const paths: PathSegment[][] = [];
   for (const change of changes) {
     validateChange(change);
     const key = pathKey(change.segments);
     if (seen.has(key)) throw new ConfuiError("INVALID_INPUT", "同一配置项不能重复修改");
+    if (paths.some((path) => isStrictPrefix(path, change.segments) || isStrictPrefix(change.segments, path))) {
+      throw new ConfuiError("INVALID_INPUT", "不能同时修改父级对象和子字段，请只保留其中一项");
+    }
     seen.add(key);
+    paths.push([...change.segments]);
+  }
+}
+
+function isStrictPrefix(prefix: readonly PathSegment[], path: readonly PathSegment[]): boolean {
+  return prefix.length < path.length && prefix.every((segment, index) => segment === path[index]);
+}
+
+async function assertStableTarget(projectRoot: string, absolutePath: string): Promise<void> {
+  try {
+    const resolvedPath = await ensurePathInsideProject(projectRoot, absolutePath);
+    const info = await lstat(absolutePath);
+    if (!samePath(resolvedPath, absolutePath) || info.isSymbolicLink() || !info.isFile()) {
+      throw new ConfuiError("FILE_CONFLICT", "配置文件路径在保存过程中发生变化，请重新加载后再试");
+    }
+  } catch (error) {
+    if (error instanceof ConfuiError) throw error;
+    throw new ConfuiError("FILE_CONFLICT", "配置文件路径在保存过程中发生变化，请重新加载后再试");
   }
 }
 

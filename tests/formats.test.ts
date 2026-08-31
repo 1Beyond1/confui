@@ -61,6 +61,36 @@ LABEL='old' # keep quote safely
     });
   });
 
+  it("removes flat assignments when a field is reset to unset", () => {
+    const env = "# keep\nFLAG=true\nOTHER=value\n";
+    const envOutput = updateConfigText(env, "env", [{ segments: ["FLAG"], value: undefined }]).output;
+    expect(envOutput).toBe("# keep\nOTHER=value\n");
+    expect(parseConfig(envOutput, "env")).toEqual({ OTHER: "value" });
+
+    const ini = "[app]\n; keep\nflag=true\nother=value\n";
+    const iniOutput = updateConfigText(ini, "ini", [{ segments: ["app", "flag"], value: undefined }]).output;
+    expect(iniOutput).toBe("[app]\n; keep\nother=value\n");
+    expect(parseConfig(iniOutput, "ini")).toEqual({ app: { other: "value" } });
+
+    const properties = String.raw`app.path=/first \
+  /second
+app.name=Confui
+`;
+    const propertiesOutput = updateConfigText(properties, "properties", [{ segments: ["app.path"], value: undefined }]).output;
+    expect(propertiesOutput).toBe("app.name=Confui\n");
+    expect(parseConfig(propertiesOutput, "properties")).toEqual({ "app.name": "Confui" });
+  });
+
+  it("removes YAML and TOML properties when a field is reset to unset", () => {
+    const yaml = "server:\n  enabled: true\n  port: 3000\n";
+    const yamlOutput = updateConfigText(yaml, "yaml", [{ segments: ["server", "enabled"], value: undefined }]).output;
+    expect(parseConfig(yamlOutput, "yaml")).toEqual({ server: { port: 3000 } });
+
+    const toml = "[server]\nenabled = true\nport = 3000\n";
+    const tomlOutput = updateConfigText(toml, "toml", [{ segments: ["server", "enabled"], value: undefined }]).output;
+    expect(parseConfig(tomlOutput, "toml")).toMatchObject({ server: { port: 3000 } });
+  });
+
   it("preserves UTF-8 BOMs and does not drop unknown env escapes", () => {
     const json = '\uFEFF{\n  "port": 3000\n}\n';
     const updatedJson = updateConfigText(json, "json", [{ segments: ["port"], value: 8080 }]).output;

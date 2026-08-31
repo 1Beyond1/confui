@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { AppInfo, AppSettings, ThemePreference, UpdateCheckResult } from "../../shared/schema.ts";
 import { Icon } from "./icons.tsx";
 import { Button } from "./ui.tsx";
@@ -32,6 +32,7 @@ export function SettingsPage({
   const [appInfo, setAppInfo] = useState<AppInfo>();
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult>();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const testRun = useRef(0);
   const [apiKeysByProvider, setApiKeysByProvider] = useState<Record<string, string>>(() => ({
     [settings.ai.provider]: settings.ai.apiKey,
   }));
@@ -62,13 +63,18 @@ export function SettingsPage({
     return () => window.removeEventListener("keydown", listener);
   }, [dirty, saving]);
 
-  const setAi = (patch: Partial<AppSettings["ai"]>) => setDraft((current) => ({
-    ...current,
-    ai: { ...current.ai, ...patch },
-  }));
+  const setAi = (patch: Partial<AppSettings["ai"]>) => {
+    // A connection test may still be in flight when an input changes. Mark
+    // that result stale so it cannot report success for a different draft.
+    testRun.current += 1;
+    setDraft((current) => ({
+      ...current,
+      ai: { ...current.ai, ...patch },
+    }));
+  };
 
   async function save(): Promise<void> {
-    if (saving) return;
+    if (saving || testing) return;
     if (Object.keys(aiErrors).length) {
       onToast("请先修正 AI 设置中的错误", "error");
       focusFirstAiError(aiErrors);
@@ -92,12 +98,16 @@ export function SettingsPage({
       focusFirstAiError(aiErrors);
       return;
     }
+    const run = ++testRun.current;
+    const testedAi = structuredClone(draft.ai);
     setTesting(true);
     try {
-      const result = await window.confui.testAI(draft.ai);
+      const result = await window.confui.testAI(testedAi);
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
+      if (run !== testRun.current) return;
       onToast(`连接成功 · ${result.data.latencyMs} ms`, "success");
     } catch (error) {
+      if (run !== testRun.current) return;
       onToast(error instanceof Error ? error.message : "连接测试失败", "error");
     } finally {
       setTesting(false);
@@ -161,7 +171,7 @@ export function SettingsPage({
             role="switch"
             aria-label="启用 AI 字段分析"
             aria-checked={draft.ai.enabled}
-            disabled={saving}
+            disabled={saving || testing}
             onClick={() => setAi({ enabled: !draft.ai.enabled })}
           ><i/></button>
         </header>
@@ -170,7 +180,7 @@ export function SettingsPage({
             <label class="setting-field">
               <span>供应商</span>
               <div class="select-wrap">
-                <select class="control" value={draft.ai.provider} disabled={!draft.ai.enabled || saving} onChange={(event) => chooseProvider(event.currentTarget.value)}>
+                <select class="control" value={draft.ai.provider} disabled={!draft.ai.enabled || saving || testing} onChange={(event) => chooseProvider(event.currentTarget.value)}>
                   {PROVIDERS.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
                 </select>
                 <Icon name="chevron-down" size={16}/>
@@ -178,20 +188,20 @@ export function SettingsPage({
             </label>
             <label class="setting-field">
               <span>模型名称</span>
-              <input id="settings-ai-model" class="control" value={draft.ai.model} disabled={!draft.ai.enabled || saving} aria-invalid={Boolean(aiErrors.model)} aria-describedby={aiErrors.model ? "settings-ai-model-error" : undefined} placeholder="例如 gpt-4.1-mini" onInput={(event) => setAi({ model: event.currentTarget.value })}/>
+              <input id="settings-ai-model" class="control" value={draft.ai.model} disabled={!draft.ai.enabled || saving || testing} aria-invalid={Boolean(aiErrors.model)} aria-describedby={aiErrors.model ? "settings-ai-model-error" : undefined} placeholder="例如 gpt-4.1-mini" onInput={(event) => setAi({ model: event.currentTarget.value })}/>
               {aiErrors.model && <small id="settings-ai-model-error" class="field-error"><Icon name="warning" size={14}/>{aiErrors.model}</small>}
             </label>
             <label class="setting-field setting-field--wide">
               <span>Base URL</span>
-              <input id="settings-ai-base-url" class="control" value={draft.ai.baseUrl} disabled={!draft.ai.enabled || saving} aria-invalid={Boolean(aiErrors.baseUrl)} aria-describedby={aiErrors.baseUrl ? "settings-ai-base-url-error" : undefined} placeholder="https://api.example.com/v1" onInput={(event) => setAi({ baseUrl: event.currentTarget.value })}/>
+              <input id="settings-ai-base-url" class="control" value={draft.ai.baseUrl} disabled={!draft.ai.enabled || saving || testing} aria-invalid={Boolean(aiErrors.baseUrl)} aria-describedby={aiErrors.baseUrl ? "settings-ai-base-url-error" : undefined} placeholder="https://api.example.com/v1" onInput={(event) => setAi({ baseUrl: event.currentTarget.value })}/>
               {aiErrors.baseUrl && <small id="settings-ai-base-url-error" class="field-error"><Icon name="warning" size={14}/>{aiErrors.baseUrl}</small>}
               <small>兼容 OpenAI 的 /chat/completions 接口；也可以填写本地 Ollama。</small>
             </label>
             <div class="setting-field setting-field--wide">
               <label for="settings-ai-api-key">API Key</label>
               <div class="input-with-action">
-                <input id="settings-ai-api-key" class="control" type={showApiKey ? "text" : "password"} value={draft.ai.apiKey} maxlength={8_000} disabled={!draft.ai.enabled || saving} autocomplete="off" placeholder="本地模型可留空" onInput={(event) => setAi({ apiKey: event.currentTarget.value })}/>
-                <button class="icon-button" type="button" disabled={!draft.ai.enabled || saving} onClick={() => setShowApiKey(!showApiKey)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}><Icon name={showApiKey ? "eye-off" : "eye"}/></button>
+                <input id="settings-ai-api-key" class="control" type={showApiKey ? "text" : "password"} value={draft.ai.apiKey} maxlength={8_000} disabled={!draft.ai.enabled || saving || testing} autocomplete="off" placeholder="本地模型可留空" onInput={(event) => setAi({ apiKey: event.currentTarget.value })}/>
+                <button class="icon-button" type="button" disabled={!draft.ai.enabled || saving || testing} onClick={() => setShowApiKey(!showApiKey)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}><Icon name={showApiKey ? "eye-off" : "eye"}/></button>
               </div>
               {locked?.apiKey
                 ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>已保存的 API Key 无法解密（Windows 安全存储不可用），密文已保留。留空保存不会清除它；填入新值会覆盖。</small>
@@ -281,8 +291,8 @@ export function SettingsPage({
       <div class={`settings-savebar ${dirty ? "settings-savebar--visible" : ""}`}>
         <span>{dirty ? "设置有未保存的更改" : "设置已保存"}</span>
         <div>
-          {dirty && <Button variant="ghost" disabled={saving} onClick={() => { setDraft(structuredClone(settings)); onThemePreview(settings.theme); }}>撤销</Button>}
-          <Button variant="primary" icon="save" disabled={!dirty || saving} busy={saving} onClick={() => void save()}>保存设置</Button>
+          {dirty && <Button variant="ghost" disabled={saving || testing} onClick={() => { setDraft(structuredClone(settings)); onThemePreview(settings.theme); }}>撤销</Button>}
+          <Button variant="primary" icon="save" disabled={!dirty || saving || testing} busy={saving} onClick={() => void save()}>保存设置</Button>
         </div>
       </div>
     </div>

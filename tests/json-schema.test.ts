@@ -39,6 +39,11 @@ describe("remote JSON Schema gating", () => {
     // A lookalike host must not pass by suffix match.
     expect(allowedSchemaUrl("https://unpkg.com.attacker.example/x.json")).toBeUndefined();
     expect(allowedSchemaUrl("https://user:secret@json.schemastore.org/tsconfig.json")).toBeUndefined();
+    // A project-controlled schema reference must not smuggle credentials or
+    // redirect-like metadata through an otherwise trusted host.
+    expect(allowedSchemaUrl("https://json.schemastore.org/tsconfig.json?token=secret")).toBeUndefined();
+    expect(allowedSchemaUrl("https://json.schemastore.org/tsconfig.json#secret")).toBeUndefined();
+    expect(allowedSchemaUrl("https://json.schemastore.org:8443/tsconfig.json")).toBeUndefined();
     expect(allowedSchemaUrl("not a url")).toBeUndefined();
   });
 

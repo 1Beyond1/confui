@@ -101,7 +101,10 @@ export function maskDocumentSecrets(text: string): string {
     /-----BEGIN ((?:(?:RSA|EC|OPENSSH|DSA) )?(?:ENCRYPTED )?PRIVATE KEY)-----[\s\S]*?-----END \1-----/g,
       "-----BEGIN $1-----\n***\n-----END $1-----",
     )
-    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^@\s/]+)@/gi, "$1***:***@")
+    // `@` is legal inside a userinfo password in several DSN spellings. Make
+    // the password part greedy up to the last `@` before the URL path, so a
+    // raw `@` cannot leave the tail of a password in AI context.
+    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^/\s]+)@/gi, "$1***:***@")
     // Authorization headers are often written in README examples rather than
     // as `token: value` pairs. Mask the whole credential for the common HTTP
     // schemes before the generic key/value pass below.

@@ -74,10 +74,14 @@ export async function readLocalReadme(projectRoot: string): Promise<string | und
       const first = readmes[0];
       if (first) {
         const safeReadme = await ensurePathInsideProject(projectRoot, join(safeDirectory, first.name));
-        return await readLimitedUtf8File(safeReadme, {
+        const text = await readLimitedUtf8File(safeReadme, {
           maxBytes: README_MAX_BYTES,
           overflow: "truncate",
         });
+        // A project can be edited while it is being opened. Do not return
+        // content read through a path that became an outside link midway.
+        await ensurePathInsideProject(projectRoot, join(safeDirectory, first.name));
+        return text;
       }
     } catch {
       // Try the next conventional location.
@@ -260,7 +264,14 @@ function parseReadmeDetailed(
 }
 
 function createPathMatcher(paths: readonly PathSegment[][]): (raw: string) => PathSegment[] | undefined {
-  const exact = new Map<string, PathSegment[]>();
+  // Normalization intentionally accepts common spellings such as
+  // `server.port`, `server_port` and `Server Port`. It is not injective,
+  // though: `foo-bar` and `foobar` (or a literal dotted key and a nested path)
+  // can collapse to the same lookup key. Keep all matches and refuse an
+  // ambiguous normalized match instead of attaching README text to the wrong
+  // field.
+  const literal = new Map<string, PathSegment[][]>();
+  const exact = new Map<string, PathSegment[][]>();
   const leaves = new Map<string, PathSegment[][]>();
   for (const segments of paths) {
     const variants = [
@@ -269,21 +280,36 @@ function createPathMatcher(paths: readonly PathSegment[][]): (raw: string) => Pa
       segments.join("_"),
     ];
     for (const variant of variants) {
+      addPathMatch(literal, variant.trim().toLowerCase(), segments);
       const normalized = normalizeKey(variant);
-      exact.set(normalized, [...segments]);
+      addPathMatch(exact, normalized, segments);
     }
     const leaf = normalizeKey(String(segments.at(-1) ?? ""));
-    const list = leaves.get(leaf) ?? [];
-    list.push([...segments]);
-    leaves.set(leaf, list);
+    addPathMatch(leaves, leaf, segments);
   }
   return (raw) => {
-    const normalized = normalizeKey(stripMarkdown(raw));
+    const cleaned = stripMarkdown(raw);
+    const directLiteral = literal.get(cleaned.toLowerCase());
+    if (directLiteral?.length === 1) return [...(directLiteral[0] ?? [])];
+    const normalized = normalizeKey(cleaned);
     const direct = exact.get(normalized);
-    if (direct) return [...direct];
+    if (direct?.length === 1) return [...(direct[0] ?? [])];
+    if (direct && direct.length > 1) return undefined;
     const leafMatches = leaves.get(normalized);
     return leafMatches?.length === 1 ? [...(leafMatches[0] ?? [])] : undefined;
   };
+}
+
+function addPathMatch(
+  map: Map<string, PathSegment[][]>,
+  key: string,
+  segments: readonly PathSegment[],
+): void {
+  if (!key) return;
+  const list = map.get(key) ?? [];
+  const serialized = pathKey(segments);
+  if (!list.some((candidate) => pathKey(candidate) === serialized)) list.push([...segments]);
+  map.set(key, list);
 }
 
 function parseTableRow(line: string): string[] {
@@ -356,7 +382,10 @@ function normalizeKey(value: string): string {
 }
 
 function stripMarkdown(value: string): string {
-  return value.replace(/[`*_~]/g, "").replace(/<br\s*\/?>/gi, " ").trim();
+  // `_` is also a valid and common configuration-key character. Removing it
+  // as generic Markdown decoration turns `foo_bar` into `foobar` before path
+  // matching and can attach documentation to the wrong field.
+  return value.replace(/[`*~]/g, "").replace(/<br\s*\/?>/gi, " ").trim();
 }
 
 function limitText(value: string, limit: number): string | undefined {

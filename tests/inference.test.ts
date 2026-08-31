@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { inferConfig } from "../core/inference/index.ts";
-import { explainField } from "../core/inference/ai.ts";
+import { explainField, inferAIFields } from "../core/inference/ai.ts";
 import { findExampleFiles } from "../core/inference/examples.ts";
 import { maskDocumentSecrets, maskSecrets } from "../core/inference/heuristic.ts";
 import { readLimitedDirectory } from "../core/inference/limited-directory.ts";
@@ -109,6 +109,7 @@ describe("inference pipeline", () => {
       "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
       'curl -H "Authorization: Bearer abcDEF_123-xyz"',
       "DATABASE_URL=postgres://admin:super-secret@example.com/app",
+      "ordinaryUrl=postgres://admin:pa@ss@example.com/app",
       "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
       "GEMINI_KEY=AIzaSyA12345678901234567890",
       "SLACK_WEBHOOK=https://hooks.slack.com/services/T000/B000/FAKE_SECRET",
@@ -124,6 +125,7 @@ describe("inference pipeline", () => {
       "Authorization: Bearer ***",
       'curl -H "Authorization: Bearer ***"',
       "DATABASE_URL=***",
+      "ordinaryUrl=postgres://***:***@example.com/app",
       "AWS_ACCESS_KEY_ID=***",
       "GEMINI_KEY=***",
       "SLACK_WEBHOOK=https://hooks.slack.com/services/***",
@@ -145,6 +147,22 @@ describe("inference pipeline", () => {
     );
     expect(fields).toHaveLength(1);
     expect(fields[0]?.segments).toEqual(["server", "port"]);
+  });
+
+  it("does not attach normalized README keys to the wrong field", () => {
+    const ambiguous = parseReadme(
+      "- `foo_bar`: ambiguous spelling",
+      [["foo-bar"], ["foobar"]],
+      "json",
+    );
+    expect(ambiguous).toEqual([]);
+
+    const literal = parseReadme(
+      "- `foo-bar`: exact spelling",
+      [["foo-bar"], ["foobar"]],
+      "json",
+    );
+    expect(literal[0]?.segments).toEqual(["foo-bar"]);
   });
 
   it("asks AI only about fields that stronger sources still do not describe", async () => {
@@ -183,6 +201,43 @@ describe("inference pipeline", () => {
     expect(schema.fields.find((field) => field.path === "unknown")?.description).toBe("由 AI 补充的说明。");
     expect(schema.fields.find((field) => field.path === "apiToken")).toMatchObject({ type: "secret", secret: true });
     expect(schema.fields.find((field) => field.path === "sessionKey")).toMatchObject({ type: "secret", secret: true });
+  });
+
+  it("ignores an AI path alias when it matches multiple real fields", async () => {
+    const fields = await inferAIFields({
+      provider: {
+        async chat() {
+          return JSON.stringify({ fields: [{ path: "a.b", description: "ambiguous" }] });
+        },
+      },
+      file: "config.json",
+      format: "json",
+      maskedValue: { "a.b": "literal", a: { b: "nested" } },
+      availablePaths: [["a.b"], ["a", "b"]],
+      readmeContext: "",
+      exampleContext: "",
+    });
+
+    expect(fields).toEqual([]);
+  });
+
+  it("does not let AI turn an invalid color value into a validation error", async () => {
+    const fields = await inferAIFields({
+      provider: {
+        async chat() {
+          return JSON.stringify({ fields: [{ path: "accent", type: "color", description: "主题色" }] });
+        },
+      },
+      file: "config.json",
+      format: "json",
+      maskedValue: { accent: "#12345" },
+      availablePaths: [["accent"]],
+      readmeContext: "",
+      exampleContext: "",
+    });
+
+    expect(fields[0]?.type).toBeUndefined();
+    expect(fields[0]?.description).toBe("主题色");
   });
 
   it("supports an explicit field explanation without sending an unmasked value", async () => {

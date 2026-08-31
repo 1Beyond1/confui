@@ -12,7 +12,7 @@ import {
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { ConfigChange, ConfigFormat, PathSegment } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
-import { cloneValue, formatPath, getAtPath, setAtPath } from "./paths.ts";
+import { cloneValue, deleteAtPath, formatPath, getAtPath, setAtPath } from "./paths.ts";
 
 /** Share of meaningful lines that must look like `[section]` or `key=value`. */
 const INI_ASSIGNMENT_RATIO = 0.8;
@@ -167,7 +167,10 @@ export function updateConfigText(
     case "toml": {
       const parsed = parseConfig(source, format);
       const next = cloneValue(parsed);
-      for (const change of changes) setAtPath(next, change.segments, change.value);
+      for (const change of changes) {
+        if (change.value === undefined) deleteAtPath(next, change.segments);
+        else setAtPath(next, change.segments, change.value);
+      }
       result = {
         output: stringifyConfig(next, format, source),
         warnings: [
@@ -301,6 +304,12 @@ function patchFlatAssignments(
       continue;
     }
     seen.add(key);
+    if (updates.get(key) === undefined) {
+      // `undefined` means the user chose “未设置”. Flat formats have no
+      // native undefined value, so remove the whole assignment (including a
+      // Java Properties continuation) instead of turning it into `KEY=`.
+      continue;
+    }
     const oldValue = match?.[4] ?? "";
     const envParts = format === "env" ? splitEnvValueAndComment(oldValue) : undefined;
     const nextValue = format === "env"
@@ -310,6 +319,13 @@ function patchFlatAssignments(
   }
   for (const [key, value] of updates) {
     if (seen.has(key)) continue;
+    if (value === undefined) {
+      // Do not append a new assignment just to represent an unset field. Keep
+      // the same append-safety check used for normal updates in case the
+      // parser saw a value that the line scanner could not safely locate.
+      assertAppendable(parsed, [key], format);
+      continue;
+    }
     assertAppendable(parsed, [key], format);
     // split() represents the existing terminal newline as one empty item.
     // Remove only that sentinel before appending, while preserving real blank
@@ -399,29 +415,45 @@ function patchIni(text: string, changes: readonly ConfigChange[]): string {
   const parsed = ini.parse(text);
   const seen = new Set<string>();
   let section: string[] = [];
-  const next = lines.map((line) => {
+  const next: string[] = [];
+  for (const line of lines) {
     const sectionMatch = line.match(/^\s*\[([^\]]+)]\s*$/);
     if (sectionMatch?.[1]) {
       section = parseIniSection(sectionMatch[1]);
-      return line;
+      next.push(line);
+      continue;
     }
-    if (/^\s*[#;]/.test(line)) return line;
+    if (/^\s*[#;]/.test(line)) {
+      next.push(line);
+      continue;
+    }
     const keyMatch = line.match(/^(\s*)([^=]+?)(\s*=\s*)(.*)$/);
     const key = keyMatch?.[2] ? ini.unsafe(keyMatch[2]) : "";
-    if (!key) return line;
+    if (!key) {
+      next.push(line);
+      continue;
+    }
     const segments = [...section, key];
     const id = JSON.stringify(segments);
     const change = updates.get(id);
-    if (!change) return line;
+    if (!change) {
+      next.push(line);
+      continue;
+    }
     seen.add(id);
+    if (change.value === undefined) continue;
     const comment = splitIniValueAndComment(keyMatch?.[4] ?? "").comment;
-    return `${keyMatch?.[1] ?? ""}${keyMatch?.[2] ?? key}${keyMatch?.[3] ?? "="}${ini.safe(String(change.value ?? ""))}${comment}`;
-  });
+    next.push(`${keyMatch?.[1] ?? ""}${keyMatch?.[2] ?? key}${keyMatch?.[3] ?? "="}${ini.safe(String(change.value ?? ""))}${comment}`);
+  }
   for (const [id, change] of updates) {
     if (seen.has(id)) continue;
     const stringSegments = change.segments as string[];
     const key = stringSegments.at(-1);
     if (!key) continue;
+    if (change.value === undefined) {
+      assertAppendable(parsed, stringSegments, "ini");
+      continue;
+    }
     assertAppendable(parsed, stringSegments, "ini");
     const sectionSegments = stringSegments.slice(0, -1);
     const assignment = `${ini.safe(key)}=${ini.safe(String(change.value ?? ""))}`;

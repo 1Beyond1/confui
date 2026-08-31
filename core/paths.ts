@@ -134,6 +134,26 @@ export function setAtPath(target: unknown, segments: readonly PathSegment[], val
   }
 }
 
+/** Removes one existing property without creating prototype or array holes. */
+export function deleteAtPath(target: unknown, segments: readonly PathSegment[]): void {
+  if (!segments.length || target === null || typeof target !== "object") return;
+  if (segments.some((segment) => !isSafeSegment(segment))) return;
+  let current: unknown = target;
+  for (let index = 0; index < segments.length; index += 1) {
+    if (current === null || typeof current !== "object") return;
+    const segment = segments[index];
+    if (segment === undefined || !Object.prototype.hasOwnProperty.call(current, segment)) return;
+    if (Array.isArray(current) && typeof segment !== "number") return;
+    if (!Array.isArray(current) && typeof segment !== "string") return;
+    if (index === segments.length - 1) {
+      if (Array.isArray(current) && typeof segment === "number") current.splice(segment, 1);
+      else delete (current as Record<PathSegment, unknown>)[segment];
+      return;
+    }
+    current = (current as Record<PathSegment, unknown>)[segment];
+  }
+}
+
 function isSafeSegment(segment: PathSegment): boolean {
   if (typeof segment === "number") return Number.isSafeInteger(segment) && segment >= 0;
   return segment !== "__proto__" && segment !== "prototype" && segment !== "constructor";

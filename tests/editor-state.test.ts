@@ -62,6 +62,17 @@ describe("editor state", () => {
     expect(errors.get(fieldKey(color))).toBe("请输入有效的十六进制颜色");
   });
 
+  it("accepts only standard CSS hex color lengths", () => {
+    const color = field({ path: "color", segments: ["color"], type: "color" });
+
+    expect(validationErrors([color], { [fieldKey(color)]: "#12345" }).get(fieldKey(color)))
+      .toBe("请输入有效的十六进制颜色");
+    expect(validationErrors([color], { [fieldKey(color)]: "#1234567" }).get(fieldKey(color)))
+      .toBe("请输入有效的十六进制颜色");
+    expect(validationErrors([color], { [fieldKey(color)]: "#1234" }).has(fieldKey(color))).toBe(false);
+    expect(validationErrors([color], { [fieldKey(color)]: "#12345678" }).has(fieldKey(color))).toBe(false);
+  });
+
   it("keeps enum types distinct and allows an empty-string option", () => {
     const mixed = field({ path: "mode", segments: ["mode"], type: "enum", enum: [1, "1", ""] });
 

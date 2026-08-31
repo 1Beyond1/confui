@@ -50,7 +50,7 @@ JavaScript / TypeScript 配置文件不会被伪装成 JSON 打开。范例文�
 
 ## 开发
 
-要求 Node.js 20.19+，在 Windows PowerShell 中运行：
+要求 Node.js 22.12+，在 Windows PowerShell 中运行：
 
 ```powershell
 npm ci
@@ -92,7 +92,7 @@ Confui 只在下面三种情况下联网，其余功能完全本地：
 | 拉取远程 JSON Schema | 仅 `json.schemastore.org`、`schemastore.org`、`raw.githubusercontent.com`、`unpkg.com`、`cdn.jsdelivr.net` | 配置文件声明了指向以上域名的 `https` `$schema` |
 | 检查更新 | GitHub Release API | 在设置页手动点击检查 |
 
-远程 `$schema` 只接受 `https` 与上述域名，其他地址会被跳过并在界面给出提示；拉取结果在内存中缓存 10 分钟。AI 请求只发往用户自己配置的 Base URL（必须是 `http` 或 `https`，且不允许把用户名或密码写进 URL）。
+远程 `$schema` 只接受 `https`、默认端口、无查询参数或片段，并且域名必须在上述列表中；其他地址会被跳过并在界面给出提示。拉取结果在内存中缓存 10 分钟。AI 请求只发往用户自己配置的 Base URL（必须是 `http` 或 `https`，且不允许把用户名或密码写进 URL）。
 
 ## 已知边界
 

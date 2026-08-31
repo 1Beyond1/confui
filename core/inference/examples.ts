@@ -1,6 +1,7 @@
 import { basename, dirname, extname, join, relative } from "node:path";
 import type { ConfigFormat, PathSegment } from "../../shared/schema.ts";
 import { parseConfig } from "../formats.ts";
+import { ensurePathInsideProject } from "../paths.ts";
 import { readLimitedUtf8File } from "./limited-text.ts";
 import { groupForPath, humanize, inferFieldType, isSecretPath } from "./common.ts";
 import { maskSecrets } from "./heuristic.ts";
@@ -27,6 +28,7 @@ export async function inferExampleFields(
   const examplePaths = await findExampleFiles(configPath);
   const fields: FieldCandidate[] = [];
   const contextParts: string[] = [];
+  const readableExamplePaths: string[] = [];
   let truncated = false;
   let order = 10_000;
 
@@ -37,17 +39,24 @@ export async function inferExampleFields(
       break;
     }
     try {
-      const text = await readLimitedUtf8File(examplePath, {
+      // Directory discovery and the later read are separate operations. Recheck
+      // the physical target immediately before and after reading so a file
+      // swapped to an outside symlink/junction cannot contribute context to
+      // inference or a user-configured AI service.
+      const safeExamplePath = await ensurePathInsideProject(projectRoot, examplePath);
+      const text = await readLimitedUtf8File(safeExamplePath, {
         maxBytes: EXAMPLE_MAX_BYTES,
         overflow: "reject",
       });
+      await ensurePathInsideProject(projectRoot, examplePath);
+      readableExamplePaths.push(safeExamplePath);
       const parsed = parseConfig(text, format);
       const comments = extractComments(text);
       const flattened = flattenExample(parsed, comments, () => order++, remaining);
       fields.push(...flattened.fields);
       truncated ||= flattened.truncated;
       contextParts.push(
-        `--- ${basename(examplePath)} ---\n${JSON.stringify(maskSecrets(parsed), null, 2).slice(0, 12_000)}`,
+        `--- ${basename(safeExamplePath)} ---\n${JSON.stringify(maskSecrets(parsed), null, 2).slice(0, 12_000)}`,
       );
       if (truncated) break;
     } catch {
@@ -57,7 +66,7 @@ export async function inferExampleFields(
 
   return {
     fields,
-    files: examplePaths.map((path) => relative(projectRoot, path).replace(/\\/g, "/")),
+    files: readableExamplePaths.map((path) => relative(projectRoot, path).replace(/\\/g, "/")),
     context: contextParts.join("\n\n").slice(0, 24_000),
     truncated,
   };

@@ -19,7 +19,7 @@ export function inferFieldType(key: string, value: unknown): FieldType {
   if (typeof value === "number") return Number.isInteger(value) ? "integer" : "number";
   if (Array.isArray(value)) return "array";
   if (value !== null && typeof value === "object") return "json";
-  if (typeof value === "string" && /^#[\da-f]{3,8}$/i.test(value)) return "color";
+  if (typeof value === "string" && /^(?:#[\da-f]{3}|#[\da-f]{4}|#[\da-f]{6}|#[\da-f]{8})$/i.test(value)) return "color";
   return "string";
 }
 

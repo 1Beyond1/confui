@@ -128,7 +128,11 @@ export function allowedSchemaUrl(schemaRef: string): string | undefined {
   if (url.protocol !== "https:") return undefined;
   // Do not allow credentials embedded in a project-controlled URL. Even on an
   // allowlisted host they would be sent as part of the request unexpectedly.
-  if (url.username || url.password) return undefined;
+  // Query strings and fragments are project-controlled data too. Refusing them
+  // prevents a schema reference from smuggling tokens, tracking IDs, or other
+  // unrelated values to an otherwise trusted host. A non-default port would
+  // also turn the host allowlist into an arbitrary service-port allowlist.
+  if (url.username || url.password || url.search || url.hash || (url.port && url.port !== "443")) return undefined;
   return SCHEMA_HOSTS.has(url.hostname.toLowerCase()) ? url.href : undefined;
 }
 

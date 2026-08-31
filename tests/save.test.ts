@@ -90,6 +90,23 @@ describe("safe save", () => {
     expect(await readFile(`${path}.bak`, "utf8")).toBe(original);
   });
 
+  it("rejects parent and child edits instead of silently overwriting one", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-overlapping-save-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "config.json");
+    await writeFile(path, '{"scripts":{"test":"old","build":"keep"}}\n', "utf8");
+    const snapshot = await readTextSnapshot(path);
+
+    await expect(previewSave(root, "config.json", [
+      { segments: ["scripts", "test"], value: "new" },
+      { segments: ["scripts"], value: { test: "old", build: "keep" } },
+    ], snapshot.version)).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "不能同时修改父级对象和子字段，请只保留其中一项",
+    } satisfies Partial<ConfuiError>);
+    expect(await readFile(path, "utf8")).toBe('{"scripts":{"test":"old","build":"keep"}}\n');
+  });
+
   it("rejects a generated file that would exceed the safe size limit before writing", async () => {
     const root = await mkdtemp(join(tmpdir(), "confui-save-too-large-"));
     temporaryDirectories.push(root);
