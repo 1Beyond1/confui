@@ -69,7 +69,7 @@ export async function readLocalReadme(projectRoot: string): Promise<string | und
       const safeDirectory = await ensurePathInsideProject(projectRoot, directory);
       const { entries } = await readLimitedDirectory(safeDirectory, MAX_LOOKUP_ENTRIES);
       const readmes = entries
-        .filter((entry) => !entry.isSymbolicLink() && entry.isFile() && /^readme(?:\.[a-z0-9_-]+)?\.(?:md|mdx|rst|txt)$/i.test(entry.name))
+        .filter((entry) => !entry.isSymbolicLink() && entry.isFile() && /^readme(?:\.[a-z0-9_-]+)?(?:\.(?:md|markdown|mdx|rst|txt))?$/i.test(entry.name))
         .sort((left, right) => scoreReadme(left.name) - scoreReadme(right.name));
       const first = readmes[0];
       if (first) {
@@ -405,6 +405,6 @@ function parseScalar(value: string): unknown {
 function scoreReadme(filename: string): number {
   if (/^readme\.md$/i.test(filename)) return 0;
   if (/^readme\.zh(?:-cn)?\.md$/i.test(filename)) return 1;
-  if (/^readme\.(?:mdx|rst|txt)$/i.test(filename)) return 2;
+  if (/^readme\.(?:markdown|mdx|rst|txt)$/i.test(filename)) return 2;
   return 3;
 }

@@ -208,7 +208,11 @@ function fieldsFromSchema(
     const current = getAtPath(value, segments);
     const type = schemaType(child, key, current);
     const childProperties = isRecord(child.properties) ? child.properties : undefined;
-    if (type === "json" && childProperties && segments.length <= 3) {
+    // An object schema with no declared properties still represents an editable
+    // JSON object (usually via additionalProperties). Only recurse when there
+    // is something to expand; otherwise an empty `properties: {}` would make
+    // the field disappear from the form entirely.
+    if (type === "json" && childProperties && Object.keys(childProperties).length > 0 && segments.length <= 3) {
       fields.push(...fieldsFromSchema(
         child,
         rootSchema,
@@ -295,7 +299,10 @@ function mergeAllOf(
 }
 
 function schemaType(schema: JsonSchema, key: string, value: unknown): FieldType {
-  if (Array.isArray(schema.enum) && schema.enum.length) return "enum";
+  const schemaEnum = Array.isArray(schema.enum) ? schema.enum : [];
+  // The editor's enum control only accepts scalar string/number options. Do
+  // not turn a boolean/object/null enum into an empty, unusable select.
+  if (schemaEnum.length && schemaEnum.every((item) => typeof item === "string" || typeof item === "number")) return "enum";
   const rawType = Array.isArray(schema.type)
     ? schema.type.find((item) => item !== "null")
     : schema.type;
@@ -307,6 +314,13 @@ function schemaType(schema: JsonSchema, key: string, value: unknown): FieldType 
     case "object": return "json";
     case "string": return isSecretPath([key]) ? "secret" : schema.format === "color" ? "color" : "string";
     default:
+      if (schemaEnum.length && schemaEnum.every((item) => typeof item === "boolean")) return "boolean";
+      if (schemaEnum.length && schemaEnum.every((item) => typeof item === "number")) {
+        return schemaEnum.every((item) => Number.isInteger(item)) ? "integer" : "number";
+      }
+      // JSON Schema permits omitting `type` when `properties` is present. The
+      // declared shape is stronger evidence than an absent current value.
+      if (isRecord(schema.properties)) return "json";
       if (typeof value === "boolean") return "boolean";
       if (typeof value === "number") return Number.isInteger(value) ? "integer" : "number";
       if (Array.isArray(value)) return "array";

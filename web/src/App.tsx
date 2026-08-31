@@ -266,6 +266,10 @@ export function App() {
   }
 
   function requestAction(action: PendingAction): void {
+    // Letting navigation through while a scan/inference or save preview is in
+    // flight can leave a completed response free to switch the page back
+    // behind the user's click (or show a save preview after they discarded it).
+    if (busy !== null) return;
     if (view === "settings" && settingsDirty && action.kind !== "settings") {
       setPendingSettingsAction(action);
       return;
@@ -476,7 +480,7 @@ export function App() {
       <aside class="sidebar">
         <div class="sidebar__brand"><Logo/></div>
         <nav class="primary-nav" aria-label="主导航">
-          <button class={view === "home" ? "active" : ""} onClick={() => requestAction({ kind: "home" })}><Icon name="home"/><span>开始</span></button>
+          <button class={view === "home" ? "active" : ""} disabled={busy !== null} onClick={() => requestAction({ kind: "home" })}><Icon name="home"/><span>开始</span></button>
         </nav>
 
         {project ? (
@@ -530,7 +534,7 @@ export function App() {
         )}
 
         <nav class="sidebar-footer" aria-label="设置">
-          <button class={view === "settings" ? "active" : ""} onClick={() => requestAction({ kind: "settings" })}><Icon name="settings"/><span>设置</span></button>
+          <button class={view === "settings" ? "active" : ""} disabled={busy !== null} onClick={() => requestAction({ kind: "settings" })}><Icon name="settings"/><span>设置</span></button>
           <small>{appVersion ? `Confui ${appVersion}` : "Confui"}</small>
         </nav>
       </aside>

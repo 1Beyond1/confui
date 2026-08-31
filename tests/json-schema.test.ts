@@ -144,6 +144,46 @@ describe("remote JSON Schema gating", () => {
     expect(result.truncated).toBe(true);
   });
 
+  it("uses declared object properties when type is omitted and keeps empty objects editable", async () => {
+    const { root, file } = await projectWith({ $schema: "./shape.schema.json", settings: {}, metadata: {} });
+    await writeFile(join(root, "shape.schema.json"), JSON.stringify({
+      properties: {
+        settings: { properties: { enabled: { type: "boolean" } } },
+        metadata: { type: "object", properties: {}, additionalProperties: true },
+      },
+    }));
+
+    const result = await inferJsonSchemaFields(
+      file,
+      root,
+      { $schema: "./shape.schema.json", settings: {}, metadata: {} },
+    );
+
+    expect(result.fields.find((field) => field.segments.join(".") === "settings.enabled")).toMatchObject({
+      type: "boolean",
+    });
+    expect(result.fields.find((field) => field.segments.join(".") === "metadata")).toMatchObject({
+      type: "json",
+    });
+  });
+
+  it("does not render unsupported schema enums as an empty select", async () => {
+    const { root, file } = await projectWith({ $schema: "./enum.schema.json", enabled: true });
+    await writeFile(join(root, "enum.schema.json"), JSON.stringify({
+      type: "object",
+      properties: { enabled: { enum: [true, false] } },
+    }));
+
+    const result = await inferJsonSchemaFields(
+      file,
+      root,
+      { $schema: "./enum.schema.json", enabled: true },
+    );
+
+    expect(result.fields[0]).toMatchObject({ segments: ["enabled"], type: "boolean" });
+    expect(result.fields[0]?.enum).toBeUndefined();
+  });
+
   it("rejects and cancels an oversized remote schema stream", async () => {
     const url = "https://json.schemastore.org/confui-oversized-stream-test.json";
     const { root, file } = await projectWith({ $schema: url });

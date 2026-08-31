@@ -75,6 +75,18 @@ describe("GitHub README loading", () => {
     expect(Buffer.byteLength(text ?? "", "utf8")).toBeLessThanOrEqual(README_MAX_BYTES);
   });
 
+  it("recognizes an extensionless README and common Markdown spelling", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-readme-name-"));
+    temporaryDirectories.push(root);
+    await writeFile(join(root, "README"), "# Extensionless README\n", "utf8");
+    await expect(readLocalReadme(root)).resolves.toBe("# Extensionless README\n");
+
+    const markdownRoot = await mkdtemp(join(tmpdir(), "confui-readme-markdown-"));
+    temporaryDirectories.push(markdownRoot);
+    await writeFile(join(markdownRoot, "README.markdown"), "# Markdown README\n", "utf8");
+    await expect(readLocalReadme(markdownRoot)).resolves.toBe("# Markdown README\n");
+  });
+
   it("cancels an oversized remote README stream after retaining its UTF-8-safe prefix", async () => {
     let canceled = false;
     const stream = new ReadableStream<Uint8Array>({
