@@ -80,5 +80,19 @@ describe("editor state", () => {
     expect(validationErrors([mixed], { [fieldKey(mixed)]: "1" }).size).toBe(0);
     expect(validationErrors([mixed], { [fieldKey(mixed)]: "" }).size).toBe(0);
     expect(validationErrors([mixed], { [fieldKey(mixed)]: true }).get(fieldKey(mixed))).toBe("请选择列表中的有效选项");
+
+    const flatFileEnum = field({ path: "MODE", segments: ["MODE"], type: "enum", enum: [1, 2], value: "1" });
+    const flatValues = initializeEditorValues([flatFileEnum]);
+    expect(validationErrors([flatFileEnum], flatValues)).toEqual(new Map());
+  });
+
+  it("rejects integer-valued numbers outside JavaScript's safe range", () => {
+    const integer = field({ path: "requestId", segments: ["requestId"], type: "integer" });
+    const number = field({ path: "count", segments: ["count"], type: "number" });
+
+    expect(validationErrors([integer], { [fieldKey(integer)]: Number.MAX_SAFE_INTEGER + 1 })
+      .get(fieldKey(integer))).toBe("请输入安全范围内的整数");
+    expect(validationErrors([number], { [fieldKey(number)]: Number.MAX_SAFE_INTEGER + 1 })
+      .get(fieldKey(number))).toBe("整数超过 JavaScript 安全范围，无法安全保存");
   });
 });

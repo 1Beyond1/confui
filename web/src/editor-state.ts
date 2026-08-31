@@ -77,12 +77,18 @@ export function validateField(field: FieldSpec, editorValue: unknown): string | 
   if (field.type === "number" || field.type === "integer") {
     if (typeof value !== "number") return "请输入有效数字";
     if (!Number.isFinite(value)) return "请输入有效数字";
-    if (field.type === "integer" && !Number.isInteger(value)) return "请输入整数";
+    if (field.type === "integer") {
+      if (!Number.isInteger(value)) return "请输入整数";
+      if (!Number.isSafeInteger(value)) return "请输入安全范围内的整数";
+    }
+    if (field.type === "number" && Number.isInteger(value) && !Number.isSafeInteger(value)) {
+      return "整数超过 JavaScript 安全范围，无法安全保存";
+    }
     if (field.minimum !== undefined && value < field.minimum) return `不能小于 ${field.minimum}`;
     if (field.maximum !== undefined && value > field.maximum) return `不能大于 ${field.maximum}`;
   }
   if (field.type === "boolean" && typeof value !== "boolean") return "请使用开关选择布尔值";
-  if (field.type === "enum" && field.enum?.length && !field.enum.some((option) => Object.is(option, value))) {
+  if (field.type === "enum" && field.enum?.length && !field.enum.some((option) => enumValueEqual(option, value))) {
     return "请选择列表中的有效选项";
   }
   if (typeof value === "string") {
@@ -113,7 +119,26 @@ export function needsJsonEditor(field: FieldSpec): boolean {
   return field.type === "array" || field.type === "json";
 }
 
+/** Match numeric enum options with values read as strings by flat formats. */
+export function enumValueEqual(option: string | number, value: unknown): boolean {
+  if (Object.is(option, value)) return true;
+  if (typeof option === "number" && typeof value === "string" && value.trim() !== "") {
+    return Number.isFinite(Number(value)) && Number(value) === option;
+  }
+  if (typeof option === "string" && typeof value === "number") {
+    return Number.isFinite(Number(option)) && Number(option) === value;
+  }
+  return false;
+}
+
 function normalizeEditorValue(field: Pick<FieldSpec, "type">, value: unknown): unknown {
+  if (value instanceof Date) {
+    try {
+      return value.toISOString();
+    } catch {
+      return value;
+    }
+  }
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
   if (field.type === "boolean") {
@@ -122,7 +147,9 @@ function normalizeEditorValue(field: Pick<FieldSpec, "type">, value: unknown): u
   }
   if (field.type === "number" || field.type === "integer") {
     const number = Number(trimmed);
-    if (trimmed && Number.isFinite(number) && (field.type !== "integer" || Number.isInteger(number))) return number;
+    if (trimmed && Number.isFinite(number)
+      && (field.type !== "integer" || Number.isSafeInteger(number))
+      && (field.type === "integer" || !Number.isInteger(number) || Number.isSafeInteger(number))) return number;
   }
   return value;
 }

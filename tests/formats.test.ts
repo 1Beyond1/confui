@@ -59,6 +59,25 @@ LABEL='old' # keep quote safely
       TOKEN: "new#token",
       LABEL: "it's ready",
     });
+
+    const multiline = updateConfigText("LABEL='old'\n", "env", [
+      { segments: ["LABEL"], value: "first\nsecond" },
+    ]).output;
+    expect(multiline).toContain('LABEL="first\\nsecond"');
+    expect(parseConfig(multiline, "env")).toEqual({ LABEL: "first\nsecond" });
+  });
+
+  it("removes JSON and JSONC properties when a field is reset", () => {
+    const json = updateConfigText('{\n  "keep": true,\n  "remove": 1\n}\n', "json", [
+      { segments: ["remove"], value: undefined },
+    ]).output;
+    expect(parseConfig(json, "json")).toEqual({ keep: true });
+
+    const jsonc = updateConfigText('{\n  // keep comment\n  "keep": true,\n  "remove": 1,\n}\n', "jsonc", [
+      { segments: ["remove"], value: undefined },
+    ]).output;
+    expect(jsonc).toContain("// keep comment");
+    expect(parseConfig(jsonc, "jsonc")).toEqual({ keep: true });
   });
 
   it("removes flat assignments when a field is reset to unset", () => {
@@ -171,6 +190,7 @@ app\\:mode=dev
     expect(() => assertEditableSyntax("nginx.conf", NGINX_CONF)).toThrow(/不是 INI 语法/);
     // A real INI keeps working, and the .ini extension is trusted outright.
     expect(() => assertEditableSyntax("app.cfg", "[a]\nb=1\n")).not.toThrow();
+    expect(() => assertEditableSyntax("app.cfg", "[a]\nname: value\n")).not.toThrow();
     expect(() => assertEditableSyntax("odd.ini", NGINX_CONF)).not.toThrow();
   });
 
@@ -215,6 +235,155 @@ app.name=Confui
     const tomlResult = updateConfigText(toml, "toml", [{ segments: ["server", "port"], value: 8080 }]);
     expect(parseConfig(tomlResult.output, "toml")).toMatchObject({ server: { port: 8080 } });
     expect(tomlResult.warnings[0]).toContain("TOML");
+  });
+
+  it("preserves TOML date metadata when an unrelated value changes", () => {
+    const original = "date = 2026-08-31T12:34:56+08:00\nport = 3000\n";
+    const { output } = updateConfigText(original, "toml", [
+      { segments: ["port"], value: 8080 },
+    ]);
+
+    const parsed = parseConfig(output, "toml") as { date: Date; port: number };
+    expect(parsed.date).toBeInstanceOf(Date);
+    expect(parsed.date.toISOString()).toBe("2026-08-31T12:34:56.000+08:00");
+    expect(parsed.port).toBe(8080);
+  });
+
+  it("keeps valid TOML integers beyond JavaScript's safe range editable", () => {
+    const original = "requestId = 9223372036854775807\nport = 3000\n";
+    expect(parseConfig(original, "toml")).toMatchObject({ requestId: 9223372036854775807n });
+
+    const updated = updateConfigText(original, "toml", [
+      { segments: ["requestId"], value: "9223372036854775806" },
+      { segments: ["port"], value: 8080 },
+    ]).output;
+    const parsed = parseConfig(updated, "toml") as { requestId: bigint; port: number };
+    expect(parsed.requestId).toBe(9223372036854775806n);
+    expect(parsed.port).toBe(8080);
+  });
+
+  it("accepts TOML hexadecimal, octal and binary big integers", () => {
+    const binaryLiteral = `0b1_${"0".repeat(63)}`;
+    const original = `hex = 0xFFFF_FFFF_FFFF_FFFF\noctal = 0o1777777777777777777777\nbinary = ${binaryLiteral}\n`;
+    const output = updateConfigText(original, "toml", [
+      { segments: ["hex"], value: "-0x8000_0000_0000_0000" },
+      { segments: ["octal"], value: "+0o1777777777777777777777" },
+      { segments: ["binary"], value: binaryLiteral },
+    ]).output;
+    const parsed = parseConfig(output, "toml") as Record<string, unknown>;
+
+    expect(parsed.hex).toBe(-0x8000000000000000n);
+    expect(parsed.octal).toBe(18446744073709551615n);
+    expect(parsed.binary).toBe(1n << 63n);
+  });
+
+  it("keeps TOML special floating-point values editable", () => {
+    const original = "positive = inf\nnegative = -inf\nunknown = nan\nport = 3000\n";
+    const parsed = parseConfig(original, "toml") as Record<string, unknown>;
+    expect(parsed.positive).toBe(Infinity);
+    expect(parsed.negative).toBe(-Infinity);
+    expect(Number.isNaN(parsed.unknown as number)).toBe(true);
+
+    const { output } = updateConfigText(original, "toml", [
+      { segments: ["positive"], value: "-inf" },
+      { segments: ["port"], value: 8080 },
+    ]);
+    const updated = parseConfig(output, "toml") as Record<string, unknown>;
+    expect(updated.positive).toBe(-Infinity);
+    expect(updated.negative).toBe(-Infinity);
+    expect(Number.isNaN(updated.unknown as number)).toBe(true);
+    expect(updated.port).toBe(8080);
+  });
+
+  it("preserves parser-specific TOML values when editing an array field", () => {
+    const original = "requestIds = [9223372036854775807, 9223372036854775806]\nratios = [inf, -inf]\n";
+    const { output } = updateConfigText(original, "toml", [
+      { segments: ["requestIds"], value: ["9223372036854775805", "9223372036854775804"] },
+      { segments: ["ratios"], value: ["-inf", "inf"] },
+    ]);
+    const parsed = parseConfig(output, "toml") as { requestIds: bigint[]; ratios: number[] };
+    expect(parsed.requestIds).toEqual([9223372036854775805n, 9223372036854775804n]);
+    expect(parsed.ratios).toEqual([-Infinity, Infinity]);
+
+    const appended = updateConfigText("requestIds = [9223372036854775807]\n", "toml", [
+      { segments: ["requestIds"], value: ["9223372036854775807", "9223372036854775806"] },
+    ]).output;
+    expect(parseConfig(appended, "toml")).toMatchObject({
+      requestIds: [9223372036854775807n, 9223372036854775806n],
+    });
+
+    const appendedSpecial = updateConfigText("ratios = [inf]\n", "toml", [
+      { segments: ["ratios"], value: ["inf", "-inf"] },
+    ]).output;
+    expect(parseConfig(appendedSpecial, "toml")).toMatchObject({ ratios: [Infinity, -Infinity] });
+  });
+
+  it("updates and removes bracketed INI arrays without leaving stale entries", () => {
+    const original = "[app]\ntags[]=one\ntags[]=two\n";
+    const updated = updateConfigText(original, "ini", [
+      { segments: ["app", "tags"], value: ["three", "four"] },
+    ]).output;
+
+    expect(updated).toContain("tags[]=three");
+    expect(updated).toContain("tags[]=four");
+    expect(updated).not.toContain("tags[]=one");
+    expect(parseConfig(updated, "ini")).toEqual({ app: { tags: ["three", "four"] } });
+
+    const removed = updateConfigText(updated, "ini", [
+      { segments: ["app", "tags"], value: undefined },
+    ]).output;
+    expect(removed).not.toContain("tags[]=");
+    expect(parseConfig(removed, "ini")).toEqual({ app: {} });
+  });
+
+  it("keeps INI strings that look like parser literals as strings", () => {
+    const original = "name=old\n";
+    const output = updateConfigText(original, "ini", [
+      { segments: ["name"], value: "true" },
+    ]).output;
+
+    expect(output).toContain('name="true"');
+    expect(parseConfig(output, "ini")).toEqual({ name: "true" });
+  });
+
+  it("updates INI files that use the supported colon separator", () => {
+    const original = "[app]\nname: old\nflag: true\ntags[]: one\ntags[]: two\n";
+    const output = updateConfigText(original, "ini", [
+      { segments: ["app", "name"], value: "new" },
+      { segments: ["app", "flag"], value: false },
+      { segments: ["app", "tags"], value: ["three", "four"] },
+    ]).output;
+
+    expect(output).toContain("name: new");
+    expect(output).toContain("flag: false");
+    expect(output).toContain("tags[]: three");
+    expect(output).toContain("tags[]: four");
+    expect(parseConfig(output, "ini")).toEqual({ app: { name: "new", flag: false, tags: ["three", "four"] } });
+  });
+
+  it("does not mistake an escaped colon in an INI key for the separator", () => {
+    const original = "literal\\:key=old\n";
+    const output = updateConfigText(original, "ini", [
+      { segments: ["literal\\:key"], value: "new" },
+    ]).output;
+
+    expect(output).toBe("literal\\:key=new\n");
+    expect(parseConfig(output, "ini")).toEqual({ "literal\\:key": "new" });
+  });
+
+  it("rejects complex values for flat configuration formats", () => {
+    expect(() => updateConfigText("KEY=old\n", "env", [
+      { segments: ["KEY"], value: { nested: true } },
+    ])).toThrow(/只支持标量键值/);
+    expect(() => updateConfigText("key=old\n", "properties", [
+      { segments: ["key"], value: ["one", "two"] },
+    ])).toThrow(/只支持标量键值/);
+  });
+
+  it("does not silently drop an empty INI array", () => {
+    expect(() => updateConfigText("[app]\ntags[]=one\n", "ini", [
+      { segments: ["app", "tags"], value: [] },
+    ])).toThrow(/标量数组/);
   });
 
   it("accepts shared YAML aliases but refuses cyclic aliases", () => {

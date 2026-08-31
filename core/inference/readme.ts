@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { ConfigFormat, PathSegment } from "../../shared/schema.ts";
 import { parseConfig } from "../formats.ts";
 import { ensurePathInsideProject, formatPath, pathKey } from "../paths.ts";
-import { groupForPath, humanize, inferFieldType, isSecretPath } from "./common.ts";
+import { groupForPath, humanize, inferFieldType, isSecretPath, toEditorValue } from "./common.ts";
 import { readLimitedUtf8File, readLimitedUtf8Response } from "./limited-text.ts";
 import { readLimitedDirectory } from "./limited-directory.ts";
 import type { FieldCandidate } from "./types.ts";
@@ -71,17 +71,22 @@ export async function readLocalReadme(projectRoot: string): Promise<string | und
       const readmes = entries
         .filter((entry) => !entry.isSymbolicLink() && entry.isFile() && /^readme(?:\.[a-z0-9_-]+)?(?:\.(?:md|markdown|mdx|rst|txt))?$/i.test(entry.name))
         .sort((left, right) => scoreReadme(left.name) - scoreReadme(right.name));
-      const first = readmes[0];
-      if (first) {
-        const safeReadme = await ensurePathInsideProject(projectRoot, join(safeDirectory, first.name));
-        const text = await readLimitedUtf8File(safeReadme, {
-          maxBytes: README_MAX_BYTES,
-          overflow: "truncate",
-        });
-        // A project can be edited while it is being opened. Do not return
-        // content read through a path that became an outside link midway.
-        await ensurePathInsideProject(projectRoot, join(safeDirectory, first.name));
-        return text;
+      for (const readme of readmes) {
+        try {
+          const safeReadme = await ensurePathInsideProject(projectRoot, join(safeDirectory, readme.name));
+          const text = await readLimitedUtf8File(safeReadme, {
+            maxBytes: README_MAX_BYTES,
+            overflow: "truncate",
+          });
+          // A project can be edited while it is being opened. Do not return
+          // content read through a path that became an outside link midway.
+          await ensurePathInsideProject(projectRoot, join(safeDirectory, readme.name));
+          // Empty or unreadable high-priority variants should not shadow a
+          // useful localized README in the same directory.
+          if (text.trim()) return text;
+        } catch {
+          // Try the next README spelling before moving on to docs/.
+        }
       }
     } catch {
       // Try the next conventional location.
@@ -245,7 +250,7 @@ function parseReadmeDetailed(
         if (!segments) continue;
         if (!addCandidate({
           segments,
-          default: item.value,
+          default: toEditorValue(item.value),
           type: inferFieldType(String(segments.at(-1) ?? ""), item.value),
           secret: isSecretPath(segments),
           group: groupForPath(segments),
@@ -394,11 +399,30 @@ function limitText(value: string, limit: number): string | undefined {
 }
 
 function parseScalar(value: string): unknown {
-  const normalized = value.trim().replace(/^['"]|['"]$/g, "");
+  const raw = value.trim();
+  const doubleQuoted = raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"');
+  const singleQuoted = raw.length >= 2 && raw.startsWith("'") && raw.endsWith("'");
+  if (doubleQuoted) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === "string") return parsed;
+    } catch {
+      // Fall back to the same conservative trimming used for a malformed
+      // Markdown-table scalar rather than throwing while reading a README.
+    }
+  }
+  if (singleQuoted) return raw.slice(1, -1);
+  const normalized = raw;
   if (/^(true|yes|是)$/i.test(normalized)) return true;
   if (/^(false|no|否)$/i.test(normalized)) return false;
-  if (/^-?\d+$/.test(normalized)) return Number.parseInt(normalized, 10);
-  if (/^-?\d+\.\d+$/.test(normalized)) return Number.parseFloat(normalized);
+  if (/^-?\d+$/.test(normalized)) {
+    const parsed = Number.parseInt(normalized, 10);
+    return Number.isSafeInteger(parsed) ? parsed : normalized;
+  }
+  if (/^-?\d+\.\d+$/.test(normalized)) {
+    const parsed = Number.parseFloat(normalized);
+    return Number.isFinite(parsed) && (!Number.isInteger(parsed) || Number.isSafeInteger(parsed)) ? parsed : normalized;
+  }
   return normalized;
 }
 

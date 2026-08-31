@@ -262,7 +262,15 @@ async function readPrefix(absolutePath: string, maxBytes: number): Promise<strin
   const handle = await open(absolutePath, "r");
   try {
     const buffer = Buffer.alloc(maxBytes);
-    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    let bytesRead = 0;
+    // FileHandle.read is allowed to return a short read even before EOF.
+    // Complete the prefix so a transient partial read cannot make a valid
+    // INI look like directive-style syntax (or vice versa).
+    while (bytesRead < maxBytes) {
+      const chunk = await handle.read(buffer, bytesRead, maxBytes - bytesRead, bytesRead);
+      if (chunk.bytesRead === 0) break;
+      bytesRead += chunk.bytesRead;
+    }
     const text = buffer.subarray(0, bytesRead).toString("utf8");
     if (bytesRead < maxBytes) return text;
     const lastBreak = text.lastIndexOf("\n");

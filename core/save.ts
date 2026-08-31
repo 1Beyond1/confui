@@ -243,6 +243,7 @@ function validateChange(change: ConfigChange): void {
     }
   }
   try {
+    validateChangeValue(change.value);
     const serialized = JSON.stringify(change.value);
     if (serialized && Buffer.byteLength(serialized, "utf8") > MAX_CHANGE_VALUE_BYTES) {
       throw new ConfuiError("FILE_TOO_LARGE", "单个配置项的内容超过 1 MB，已拒绝保存");
@@ -251,4 +252,40 @@ function validateChange(change: ConfigChange): void {
     if (error instanceof ConfuiError) throw error;
     throw new ConfuiError("INVALID_INPUT", "配置字段值无法序列化");
   }
+}
+
+function validateChangeValue(value: unknown): void {
+  const seen = new WeakSet<object>();
+  function visit(current: unknown, nested: boolean): void {
+    if (current === undefined) {
+      if (nested) throw new ConfuiError("INVALID_INPUT", "配置字段值无法序列化");
+      return;
+    }
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) throw new ConfuiError("INVALID_INPUT", "配置字段值必须是有限数字");
+      if (Number.isInteger(current) && !Number.isSafeInteger(current)) {
+        throw new ConfuiError("INVALID_INPUT", "整数超过 JavaScript 安全范围，无法安全保存");
+      }
+    }
+    if (typeof current === "string" && current.includes("\0")) {
+      throw new ConfuiError("INVALID_INPUT", "配置字段值包含无效字符");
+    }
+    if (typeof current === "bigint" || typeof current === "function" || typeof current === "symbol") {
+      throw new ConfuiError("INVALID_INPUT", "配置字段值无法序列化");
+    }
+    if (current instanceof Date) {
+      if (!Number.isFinite(current.getTime())) throw new ConfuiError("INVALID_INPUT", "配置字段值无法序列化");
+      return;
+    }
+    if (current === null || typeof current !== "object") return;
+    if (seen.has(current)) throw new ConfuiError("INVALID_INPUT", "配置字段值不能包含循环引用");
+    seen.add(current);
+    if (Array.isArray(current)) {
+      for (const item of current) visit(item, true);
+    } else {
+      for (const item of Object.values(current as Record<string, unknown>)) visit(item, true);
+    }
+    seen.delete(current);
+  }
+  visit(value, false);
 }

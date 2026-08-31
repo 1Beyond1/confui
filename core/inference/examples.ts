@@ -3,7 +3,7 @@ import type { ConfigFormat, PathSegment } from "../../shared/schema.ts";
 import { parseConfig } from "../formats.ts";
 import { ensurePathInsideProject } from "../paths.ts";
 import { readLimitedUtf8File } from "./limited-text.ts";
-import { groupForPath, humanize, inferFieldType, isSecretPath } from "./common.ts";
+import { groupForPath, humanize, inferFieldType, isSecretPath, toEditorValue } from "./common.ts";
 import { maskSecrets } from "./heuristic.ts";
 import { readLimitedDirectory } from "./limited-directory.ts";
 import type { FieldCandidate } from "./types.ts";
@@ -123,13 +123,14 @@ function flattenExample(
     const leaf = String(segments.at(-1) ?? "字段");
     const placeholder = typeof current === "string" && isPlaceholder(current);
     const secret = isSecretPath(segments);
+    const editorValue = toEditorValue(current);
     fields.push({
       segments,
       label: humanize(leaf),
       description: comments.get(leaf.toLowerCase()),
       type: secret ? "secret" : inferFieldType(leaf, current),
       required: placeholder,
-      default: placeholder ? undefined : current,
+      default: placeholder ? undefined : editorValue,
       placeholder: placeholder ? String(current) : undefined,
       secret,
       group: groupForPath(segments),

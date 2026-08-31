@@ -444,7 +444,7 @@ code, pre { font-family: var(--font-mono); }
 .input-with-action .control { padding-right: 42px; }
 .input-with-action .icon-button { position: absolute; right: 3px; }
 /* 有上下界的整数走滑块 + 等宽读数，这是风格 B 的标志性控件。 */
-.range-control { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: 14px; align-items: center; }
+.range-control { display: grid; grid-template-columns: minmax(0, 1fr) 64px auto; gap: 10px; align-items: center; }
 .range-control input[type="range"] { width: 100%; height: 20px; margin: 0; padding: 0; appearance: none; background: transparent; outline: none; }
 .range-control input[type="range"]::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: var(--surface-hover); }
 .range-control input[type="range"]::-webkit-slider-thumb { width: 15px; height: 15px; margin-top: -6px; appearance: none; border-radius: 50%; background: var(--thumb); box-shadow: 0 0 0 1px var(--thumb-ring); cursor: grab; }

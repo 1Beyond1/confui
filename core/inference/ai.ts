@@ -272,10 +272,10 @@ function isCompatibleType(type: FieldSpec["type"], value: unknown, enumValues?: 
   if (value === undefined || value === null) return true;
   switch (type) {
     case "number":
-      return typeof value === "number" || typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value));
+      return typeof value === "number" || typeof value === "string" && isSafeNumericString(value, false);
     case "integer":
-      return typeof value === "number" && Number.isInteger(value)
-        || typeof value === "string" && value.trim() !== "" && Number.isInteger(Number(value));
+      return typeof value === "number" && Number.isSafeInteger(value)
+        || typeof value === "string" && isSafeNumericString(value, true);
     case "boolean":
       return typeof value === "boolean" || typeof value === "string" && /^(?:true|false|1|0|yes|no|on|off)$/i.test(value.trim());
     case "enum":
@@ -290,4 +290,15 @@ function isCompatibleType(type: FieldSpec["type"], value: unknown, enumValues?: 
     case "string":
       return typeof value === "string" || value === undefined || value === null;
   }
+}
+
+/** Avoid routing a parser-preserved large integer through the JS number UI. */
+function isSafeNumericString(value: string, integer: boolean): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  const number = Number(trimmed);
+  if (!Number.isFinite(number)) return false;
+  if (integer && !Number.isInteger(number)) return false;
+  // Even a `number` field must not silently round an integer-sized value.
+  return !Number.isInteger(number) || Number.isSafeInteger(number);
 }

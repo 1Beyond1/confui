@@ -8,7 +8,7 @@ import { findExampleFiles } from "../core/inference/examples.ts";
 import { maskDocumentSecrets, maskSecrets } from "../core/inference/heuristic.ts";
 import { readLimitedDirectory } from "../core/inference/limited-directory.ts";
 import { parseReadme } from "../core/inference/readme.ts";
-import { MAX_FORM_FIELDS } from "../core/inference/merge.ts";
+import { MAX_FORM_FIELDS, mergeCandidates } from "../core/inference/merge.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -76,6 +76,35 @@ describe("inference pipeline", () => {
     expect(schema.exampleFiles).toHaveLength(2);
   });
 
+  it("keeps README defaults compatible with the winning field type", () => {
+    const readme = parseReadme(`| Field | Description | Default |
+| --- | --- | --- |
+| name | display name | true |
+| code | string code | "001" |
+| requestId | numeric identifier | 9223372036854775807 |
+`, [["name"], ["code"], ["requestId"]], "json");
+    const merged = mergeCandidates([
+      { segments: ["name"], type: "string", value: "old", source: "heuristic", confidence: 0.5 },
+      { segments: ["code"], type: "string", value: "old", source: "heuristic", confidence: 0.5 },
+      { segments: ["requestId"], type: "integer", value: 1, source: "heuristic", confidence: 0.5 },
+      ...readme,
+    ]);
+
+    expect(merged.fields.find((field) => field.path === "name")?.default).toBe("true");
+    expect(merged.fields.find((field) => field.path === "code")?.default).toBe("001");
+    // Never put an imprecise JavaScript number behind the "use default" button.
+    expect(merged.fields.find((field) => field.path === "requestId")?.default).toBeUndefined();
+
+    const malformed = mergeCandidates([
+      { segments: ["name"], type: "string", value: "old", source: "heuristic", confidence: 0.5 },
+      { segments: ["name"], default: { unexpected: true }, source: "ai", confidence: 0.7 },
+      { segments: ["count"], type: "integer", value: 1, source: "heuristic", confidence: 0.5 },
+      { segments: ["count"], default: "", source: "ai", confidence: 0.7 },
+    ]);
+    expect(malformed.fields.find((field) => field.path === "name")?.default).toBeUndefined();
+    expect(malformed.fields.find((field) => field.path === "count")?.default).toBeUndefined();
+  });
+
   it("does not prefill fields that exist only in an example file", async () => {
     const root = await mkdtemp(join(tmpdir(), "confui-infer-example-only-"));
     temporaryDirectories.push(root);
@@ -91,10 +120,10 @@ describe("inference pipeline", () => {
   });
 
   it("masks secrets recursively before AI context is created", () => {
-    expect(maskSecrets({ token: "abc", authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.payload", nested: { password: "def", safe: "ok" }, items: [{ apiKey: "ghi" }] })).toEqual({
+    expect(maskSecrets({ token: "abc", authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.payload", nested: { password: "def", safe: "ok", "API Key": "arbitrary" }, items: [{ apiKey: "ghi" }] })).toEqual({
       token: "***",
       authorization: "***",
-      nested: { password: "***", safe: "ok" },
+      nested: { password: "***", safe: "ok", "API Key": "***" },
       items: [{ apiKey: "***" }],
     });
     expect(maskDocumentSecrets("API_KEY=sk-abcdefghijklmnop\ntoken: ghp_abcdefghijklmnop")).toBe(
@@ -102,6 +131,8 @@ describe("inference pipeline", () => {
     );
     expect(maskDocumentSecrets("Authorization: Basic dXNlcjpwYXNz\n| API_KEY | sk-abcdefghijklmnop |"))
       .toBe("Authorization: Basic ***\n| API_KEY | *** |");
+    expect(maskDocumentSecrets("| API Key | arbitrary-secret |\n| private key | another-secret |\nAPI Key: arbitrary-value"))
+      .toBe("| API Key | *** |\n| private key | *** |\nAPI Key: ***");
     expect(maskDocumentSecrets("apiKey: |\n  arbitrary-secret\n  another-line\nsafe: keep\n"))
       .toBe("apiKey: |\n  ***\n  ***\nsafe: keep\n");
     expect(maskDocumentSecrets([
@@ -137,6 +168,11 @@ describe("inference pipeline", () => {
       "rawJwt=***",
       "-----BEGIN ENCRYPTED PRIVATE KEY-----\n***\n-----END ENCRYPTED PRIVATE KEY-----",
     ].join("\n"));
+
+    const prototypeKey = JSON.parse('{"__proto__":{"token":"secret"},"safe":"ok"}');
+    const maskedPrototypeKey = maskSecrets(prototypeKey) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(maskedPrototypeKey, "__proto__")).toBe(true);
+    expect((maskedPrototypeKey.__proto__ as Record<string, unknown>).token).toBe("***");
   });
 
   it("does not attach an ambiguous README leaf name to the wrong nested field", () => {
@@ -238,6 +274,83 @@ describe("inference pipeline", () => {
 
     expect(fields[0]?.type).toBeUndefined();
     expect(fields[0]?.description).toBe("主题色");
+  });
+
+  it("does not expose an unusable enum control when AI omits its options", async () => {
+    const fields = await inferAIFields({
+      provider: {
+        async chat() {
+          return JSON.stringify({ fields: [{ path: "mode", type: "enum", description: "运行模式" }] });
+        },
+      },
+      file: "config.json",
+      format: "json",
+      maskedValue: { mode: "safe" },
+      availablePaths: [["mode"]],
+      readmeContext: "",
+      exampleContext: "",
+    });
+
+    expect(fields[0]?.type).toBeUndefined();
+  });
+
+  it("does not route a TOML-sized integer through the lossy number editor", async () => {
+    const fields = await inferAIFields({
+      provider: {
+        async chat() {
+          return JSON.stringify({ fields: [{ path: "requestId", type: "integer", description: "请求编号" }] });
+        },
+      },
+      file: "config.toml",
+      format: "toml",
+      maskedValue: { requestId: "9223372036854775807" },
+      availablePaths: [["requestId"]],
+      readmeContext: "",
+      exampleContext: "",
+    });
+
+    expect(fields[0]?.type).toBeUndefined();
+  });
+
+  it("keeps TOML dates as editable text values during inference", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-infer-toml-date-"));
+    temporaryDirectories.push(root);
+    await writeFile(join(root, "config.toml"), "date = 2026-08-31T12:34:56+08:00\nport = 3000\n");
+
+    const schema = await inferConfig(root, "config.toml");
+    expect(schema.fields.find((field) => field.path === "date")).toMatchObject({
+      type: "string",
+      value: "2026-08-31T12:34:56.000+08:00",
+    });
+  });
+
+  it("keeps TOML big integers as editable text without JSON serialization errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-infer-toml-bigint-"));
+    temporaryDirectories.push(root);
+    await writeFile(join(root, "config.toml"), "requestId = 9223372036854775807\n");
+
+    const schema = await inferConfig(root, "config.toml", {
+      ai: {
+        async chat() {
+          return JSON.stringify({ fields: [{ path: "requestId", description: "请求编号" }] });
+        },
+      },
+    });
+    expect(schema.fields.find((field) => field.path === "requestId")).toMatchObject({
+      type: "string",
+      value: "9223372036854775807",
+    });
+  });
+
+  it("renders TOML special floats as editable text tokens", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-infer-toml-special-float-"));
+    temporaryDirectories.push(root);
+    await writeFile(join(root, "config.toml"), "positive = inf\nnegative = -inf\nunknown = nan\n");
+
+    const schema = await inferConfig(root, "config.toml");
+    expect(schema.fields.find((field) => field.path === "positive")).toMatchObject({ type: "string", value: "inf" });
+    expect(schema.fields.find((field) => field.path === "negative")).toMatchObject({ type: "string", value: "-inf" });
+    expect(schema.fields.find((field) => field.path === "unknown")).toMatchObject({ type: "string", value: "nan" });
   });
 
   it("supports an explicit field explanation without sending an unmasked value", async () => {

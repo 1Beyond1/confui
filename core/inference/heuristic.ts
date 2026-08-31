@@ -1,6 +1,6 @@
 import type { PathSegment } from "../../shared/schema.ts";
 import { formatPath } from "../paths.ts";
-import { groupForPath, humanize, inferFieldType, isSecretPath } from "./common.ts";
+import { groupForPath, humanize, inferFieldType, isSecretPath, toEditorValue } from "./common.ts";
 import type { FieldCandidate } from "./types.ts";
 
 const MAX_OBJECT_DEPTH = 3;
@@ -28,7 +28,7 @@ export function inferHeuristicFields(value: unknown): HeuristicResult {
       truncated = true;
       return;
     }
-    if (current !== null && typeof current === "object" && !Array.isArray(current)) {
+    if (current !== null && typeof current === "object" && !Array.isArray(current) && !(current instanceof Date)) {
       const entries = Object.entries(current as Record<string, unknown>);
       if (segments.length && (depth >= MAX_OBJECT_DEPTH || entries.length > MAX_OBJECT_KEYS || entries.length === 0)) {
         push(current, segments, "json");
@@ -53,7 +53,7 @@ export function inferHeuristicFields(value: unknown): HeuristicResult {
       type: forcedType ?? inferFieldType(leaf, current),
       secret,
       group: groupForPath(segments),
-      value: current,
+      value: toEditorValue(current),
       source: "heuristic",
       confidence: secret ? 0.92 : 0.58,
       detail: "根据当前值的结构推断",
@@ -80,6 +80,7 @@ export function maskSecrets(value: unknown, segments: PathSegment[] = [], state:
     }
     return result;
   }
+  if (value instanceof Date) return toEditorValue(value);
   if (value !== null && typeof value === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
@@ -87,9 +88,22 @@ export function maskSecrets(value: unknown, segments: PathSegment[] = [], state:
         result["…"] = "[内容已省略]";
         break;
       }
-      result[key] = maskSecrets(item, [...segments, key], state);
+      const masked = maskSecrets(item, [...segments, key], state);
+      if (key === "__proto__") {
+        Object.defineProperty(result, key, {
+          configurable: true,
+          enumerable: true,
+          value: masked,
+          writable: true,
+        });
+      } else {
+        result[key] = masked;
+      }
     }
     return result;
+  }
+  if (typeof value === "bigint" || typeof value === "number" && !Number.isFinite(value)) {
+    return toEditorValue(value);
   }
   if (typeof value === "string") return maskDocumentSecrets(value);
   return value;
@@ -112,11 +126,11 @@ export function maskDocumentSecrets(text: string): string {
     // Markdown tables do not use `:` or `=` between a sensitive key and its
     // value, so the key/value expression below would otherwise miss them.
     .replace(
-      /(\|\s*(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|credential|auth(?:orization)?|cookie|jwt|session[_-]?key|signing[_-]?key|client[_-]?secret|access[_-]?key|database[_-]?url|connection[_-]?string|dsn|webhook[_-]?(?:url|secret))[\w.-]*\s*\|\s*)([^|\r\n]*?)(\s*\|)/gi,
+      /(\|\s*(?:password|passwd|secret|token|api[\s_-]?key|private[\s_-]?key|credential|auth(?:orization)?|cookie|jwt|session[\s_-]?key|signing[\s_-]?key|client[\s_-]?secret|access[\s_-]?key|database[\s_-]?url|connection[\s_-]?string|dsn|webhook[\s_-]?(?:url|secret))[\w.-]*\s*\|\s*)([^|\r\n]*?)(\s*\|)/gi,
       "$1***$3",
     )
     .replace(
-      /(["']?(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|credential|auth(?:orization)?|cookie|jwt|session[_-]?key|signing[_-]?key|client[_-]?secret|access[_-]?key|database[_-]?url|connection[_-]?string|dsn|webhook[_-]?(?:url|secret))[\w.-]*["']?\s*[=:]\s*)("[^"]*"|'[^']*'|`[^`]*`|[^\s,;]+)/gi,
+      /(["']?(?:password|passwd|secret|token|api[\s_-]?key|private[\s_-]?key|credential|auth(?:orization)?|cookie|jwt|session[\s_-]?key|signing[\s_-]?key|client[\s_-]?secret|access[\s_-]?key|database[\s_-]?url|connection[\s_-]?string|dsn|webhook[\s_-]?(?:url|secret))[\w.-]*["']?\s*[=:]\s*)("[^"]*"|'[^']*'|`[^`]*`|[^\s,;]+)/gi,
       (_match, prefix: string, value: string) => {
         if (/auth(?:orization)?/i.test(prefix) && /^(?:Bearer|Basic|Digest)$/i.test(value)) return `${prefix}${value}`;
         if (/^(?:[|>])(?:[-+]\d*|\d*[-+]?)?$/.test(value.trim())) return `${prefix}${value}`;
@@ -143,7 +157,7 @@ function maskYamlSecretBlocks(text: string): string {
       }
       blockKeyIndent = undefined;
     }
-    if (/^\s*["']?(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|credential|auth(?:orization)?|cookie|jwt|session[_-]?key|signing[_-]?key|client[_-]?secret|access[_-]?key|database[_-]?url|connection[_-]?string|dsn|webhook[_-]?(?:url|secret))[\w.-]*["']?\s*:\s*[|>](?:[-+]?\d*|\d*[-+])?(?:\s+#.*)?$/i.test(line)) {
+    if (/^\s*["']?(?:password|passwd|secret|token|api[\s_-]?key|private[\s_-]?key|credential|auth(?:orization)?|cookie|jwt|session[\s_-]?key|signing[\s_-]?key|client[\s_-]?secret|access[\s_-]?key|database[\s_-]?url|connection[\s_-]?string|dsn|webhook[\s_-]?(?:url|secret))[\w.-]*["']?\s*:\s*[|>](?:[-+]?\d*|\d*[-+])?(?:\s+#.*)?$/i.test(line)) {
       blockKeyIndent = indent;
     }
   }

@@ -24,6 +24,7 @@ import {
 import { Icon } from "./icons.tsx";
 import { SettingsPage } from "./SettingsPage.tsx";
 import { Button, EmptyIllustration, Logo, Modal, SourceBadge } from "./ui.tsx";
+import { formatDisplayValue } from "./value-display.ts";
 import "./styles.css";
 
 type View = "home" | "editor" | "settings";
@@ -269,7 +270,7 @@ export function App() {
     // Letting navigation through while a scan/inference or save preview is in
     // flight can leave a completed response free to switch the page back
     // behind the user's click (or show a save preview after they discarded it).
-    if (busy !== null) return;
+    if (busy !== null || savePreview || pendingAction || pendingSettingsAction) return;
     if (view === "settings" && settingsDirty && action.kind !== "settings") {
       setPendingSettingsAction(action);
       return;
@@ -680,7 +681,7 @@ export function App() {
               return (
                 <div class="diff-item" key={change.path}>
                   <div><strong>{field?.label || change.path}</strong><code>{change.path}</code></div>
-                  <div class="diff-values"><span>{secret ? "••••••••" : formatValue(change.before)}</span><Icon name="arrow-left" class="diff-arrow"/><strong>{secret ? "••••••••" : formatValue(change.after)}</strong></div>
+                  <div class="diff-values"><span>{secret ? "••••••••" : formatDisplayValue(change.before)}</span><Icon name="arrow-left" class="diff-arrow"/><strong>{secret ? "••••••••" : formatDisplayValue(change.after)}</strong></div>
                 </div>
               );
             })}
@@ -831,16 +832,4 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function formatValue(value: unknown): string {
-  if (value === undefined) return "未设置";
-  if (value === null) return "null";
-  if (typeof value === "string") return value ? truncate(value, 120) : "空字符串";
-  const text = JSON.stringify(value);
-  return text ? truncate(text, 120) : String(value);
-}
-
-function truncate(value: string, limit: number): string {
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
 }

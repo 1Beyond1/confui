@@ -73,16 +73,23 @@ export function mergeCandidates(candidates: readonly FieldCandidate[]): {
       ?? group.find((candidate) => candidate.source === "known-template" && "value" in candidate);
     const strongest = evidence.find((item) => item.property === "description") ?? evidence[0];
     const source = strongest?.source ?? "heuristic";
+    const type = (chosen.type as FieldSpec["type"] | undefined) ?? "string";
+    const enumValues = chosen.enum as FieldSpec["enum"];
     return {
       path: formatPath(segments),
       segments,
       label: String(chosen.label ?? humanize(leaf)),
       description: asOptionalString(chosen.description),
-      type: (chosen.type as FieldSpec["type"] | undefined) ?? "string",
+      type,
       required: asOptionalBoolean(chosen.required),
-      default: chosen.default,
+      // README tables often omit a type and therefore parse a value such as
+      // `true` or `001` as an untyped scalar. Normalize that guidance against
+      // the winning field type before exposing the "use default" action; a
+      // string field must never turn into a JSON boolean/number when the user
+      // clicks that button.
+      default: normalizeDefault(type, chosen.default, enumValues),
       value: valueCandidate?.value,
-      enum: chosen.enum as FieldSpec["enum"],
+      enum: enumValues,
       minimum: asOptionalNumber(chosen.minimum),
       maximum: asOptionalNumber(chosen.maximum),
       minLength: asOptionalNumber(chosen.minLength),
@@ -147,4 +154,59 @@ function asOptionalBoolean(value: unknown): boolean | undefined {
 
 function asOptionalNumber(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
+}
+
+function normalizeDefault(
+  type: FieldSpec["type"],
+  value: unknown,
+  enumValues: FieldSpec["enum"],
+): unknown {
+  if (value === undefined || value === null) return undefined;
+  switch (type) {
+    case "string":
+    case "secret":
+      if (typeof value === "string") return value;
+      return typeof value === "number" || typeof value === "boolean" ? String(value) : undefined;
+    case "color":
+      return typeof value === "string" && /^(?:#[\da-f]{3}|#[\da-f]{4}|#[\da-f]{6}|#[\da-f]{8})$/i.test(value)
+        ? value
+        : undefined;
+    case "boolean":
+      if (typeof value === "boolean") return value;
+      if (typeof value === "string") {
+        if (/^(?:true|yes|是|1|on)$/i.test(value.trim())) return true;
+        if (/^(?:false|no|否|0|off)$/i.test(value.trim())) return false;
+      }
+      return undefined;
+    case "integer": {
+      const text = typeof value === "string" ? value.trim() : undefined;
+      const number = typeof value === "number" ? value : text ? Number(text) : NaN;
+      return Number.isSafeInteger(number) ? number : undefined;
+    }
+    case "number": {
+      const text = typeof value === "string" ? value.trim() : undefined;
+      const number = typeof value === "number" ? value : text ? Number(text) : NaN;
+      return Number.isFinite(number) && (!Number.isInteger(number) || Number.isSafeInteger(number)) ? number : undefined;
+    }
+    case "enum": {
+      if (!enumValues?.length) return undefined;
+      return enumValues.find((option) => enumDefaultEqual(option, value));
+    }
+    case "array":
+      return Array.isArray(value) ? value : undefined;
+    case "json":
+      return value !== null && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+  }
+}
+
+function enumDefaultEqual(option: string | number, value: unknown): boolean {
+  if (Object.is(option, value)) return true;
+  if (typeof option === "number" && typeof value === "string" && value.trim() !== "") {
+    const number = Number(value);
+    return Number.isFinite(number) && number === option;
+  }
+  if (typeof option === "string" && typeof value === "number") {
+    return Number.isFinite(value) && Number(option) === value;
+  }
+  return false;
 }

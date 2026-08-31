@@ -136,4 +136,24 @@ describe("safe save", () => {
       { segments: ["value"], value: "x".repeat(1024 * 1024) },
     ], snapshot.version)).rejects.toMatchObject({ code: "FILE_TOO_LARGE" } satisfies Partial<ConfuiError>);
   });
+  it("rejects non-finite and otherwise non-serializable change values", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-save-invalid-value-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "config.json");
+    await writeFile(path, '{"value":1}\n', "utf8");
+    const snapshot = await readTextSnapshot(path);
+
+    await expect(previewSave(root, "config.json", [
+      { segments: ["value"], value: Number.POSITIVE_INFINITY },
+    ], snapshot.version)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(previewSave(root, "config.json", [
+      { segments: ["value"], value: [undefined] },
+    ], snapshot.version)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(previewSave(root, "config.json", [
+      { segments: ["value"], value: Number.MAX_SAFE_INTEGER + 1 },
+    ], snapshot.version)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(previewSave(root, "config.json", [
+      { segments: ["value"], value: "before\0after" },
+    ], snapshot.version)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
 });

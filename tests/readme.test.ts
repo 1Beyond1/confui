@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -85,6 +85,25 @@ describe("GitHub README loading", () => {
     temporaryDirectories.push(markdownRoot);
     await writeFile(join(markdownRoot, "README.markdown"), "# Markdown README\n", "utf8");
     await expect(readLocalReadme(markdownRoot)).resolves.toBe("# Markdown README\n");
+  });
+
+  it("continues to docs when the highest-priority local README is empty", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-readme-empty-root-"));
+    temporaryDirectories.push(root);
+    await mkdir(join(root, "docs"));
+    await writeFile(join(root, "README.md"), "\n", "utf8");
+    await writeFile(join(root, "docs", "README.md"), "# Docs README\n", "utf8");
+
+    await expect(readLocalReadme(root)).resolves.toBe("# Docs README\n");
+  });
+
+  it("continues to a localized README when the primary variant is empty", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-readme-empty-localized-"));
+    temporaryDirectories.push(root);
+    await writeFile(join(root, "README.md"), "\n", "utf8");
+    await writeFile(join(root, "README.zh-CN.md"), "# 中文说明\n", "utf8");
+
+    await expect(readLocalReadme(root)).resolves.toBe("# 中文说明\n");
   });
 
   it("cancels an oversized remote README stream after retaining its UTF-8-safe prefix", async () => {

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import type { FieldAssistResult, FieldSpec } from "../../shared/schema.ts";
 import {
   effectiveValue,
+  enumValueEqual,
   fieldKey,
   isJsonDraft,
   parseJsonDraft,
@@ -264,7 +265,10 @@ function FieldControl({
 
   if (field.type === "enum") {
     const options = field.enum ?? [];
-    const selectedIndex = options.findIndex((option) => Object.is(option, value));
+    const exactIndex = options.findIndex((option) => Object.is(option, value));
+    const selectedIndex = exactIndex >= 0
+      ? exactIndex
+      : options.findIndex((option) => enumValueEqual(option, value));
     return (
       <div class="select-wrap">
         <select
@@ -360,8 +364,8 @@ function FieldControl({
     // 上下界都已知且跨度不大的整数用滑块；端口号那种上万的跨度滑块反而更难对准，仍走数字输入框。
     const { minimum, maximum } = field;
     const slidable = field.type === "integer"
-      && typeof minimum === "number" && Number.isFinite(minimum)
-      && typeof maximum === "number" && Number.isFinite(maximum)
+      && typeof minimum === "number" && Number.isSafeInteger(minimum)
+      && typeof maximum === "number" && Number.isSafeInteger(maximum)
       && maximum > minimum && maximum - minimum <= 1000;
     if (slidable) {
       return (
@@ -381,6 +385,13 @@ function FieldControl({
             onInput={(event) => onChange(event.currentTarget.valueAsNumber)}
           />
           <b class="range-control__value">{current ?? "—"}</b>
+          <button
+            type="button"
+            class="boolean-control__reset range-control__reset"
+            disabled={disabled || current === undefined}
+            onClick={() => onChange(undefined)}
+            aria-label={`${field.label}设为未设置`}
+          >重置</button>
         </div>
       );
     }
@@ -405,13 +416,17 @@ function FieldControl({
             return;
           }
           const parsed = Number(raw);
-          const valid = Number.isFinite(parsed) && (field.type !== "integer" || Number.isInteger(parsed));
+          const valid = Number.isFinite(parsed)
+            && (field.type !== "integer" || Number.isSafeInteger(parsed))
+            && (field.type !== "number" || !Number.isInteger(parsed) || Number.isSafeInteger(parsed));
           lastNumberValue.current = valid ? parsed : raw;
           onChange(valid ? parsed : raw);
         }}
         onBlur={() => {
           const parsed = Number(numberText);
-          if (numberText.trim() && Number.isFinite(parsed) && (field.type !== "integer" || Number.isInteger(parsed))) {
+          if (numberText.trim() && Number.isFinite(parsed)
+            && (field.type !== "integer" || Number.isSafeInteger(parsed))
+            && (field.type !== "number" || !Number.isInteger(parsed) || Number.isSafeInteger(parsed))) {
             setNumberText(String(parsed));
           }
         }}

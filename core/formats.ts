@@ -9,10 +9,10 @@ import {
   type FormattingOptions,
   type ParseError,
 } from "jsonc-parser";
-import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml, TomlDate } from "smol-toml";
 import type { ConfigChange, ConfigFormat, PathSegment } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
-import { cloneValue, deleteAtPath, formatPath, getAtPath, setAtPath } from "./paths.ts";
+import { deleteAtPath, formatPath, getAtPath, setAtPath } from "./paths.ts";
 
 /** Share of meaningful lines that must look like `[section]` or `key=value`. */
 const INI_ASSIGNMENT_RATIO = 0.8;
@@ -47,7 +47,7 @@ export function looksLikeIni(text: string): boolean {
   for (const rawLine of stripBom(text).split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#") || line.startsWith(";")) continue;
-    if (/^\[[^\]]+]$/.test(line) || /^[^=]+=/.test(line)) assignments += 1;
+    if (/^\[[^\]]+]$/.test(line) || isIniAssignmentLine(line)) assignments += 1;
     else others += 1;
   }
   const total = assignments + others;
@@ -93,11 +93,13 @@ export function parseConfig(text: string, format: ConfigFormat): unknown {
         return value;
       }
       case "toml":
-        return parseToml(source);
+        // Keep ordinary integers as numbers but retain valid TOML integers
+        // beyond JavaScript's safe range as BigInt instead of rejecting them.
+        return parseToml(source, { integersAsBigInt: "asNeeded" });
       case "env":
         return parseEnv(source);
       case "ini":
-        return ini.parse(source);
+        return parseIni(source);
       case "properties":
         return parseProperties(source);
     }
@@ -166,9 +168,15 @@ export function updateConfigText(
     case "yaml":
     case "toml": {
       const parsed = parseConfig(source, format);
-      const next = cloneValue(parsed);
+      // `smol-toml` uses TomlDate instances to retain whether a value is a
+      // local date/time or an offset date/time. structuredClone turns those
+      // into ordinary Date objects, so stringifyToml would silently rewrite
+      // offsets and local values even when an unrelated key was edited.
+      // Parsing already gives us a fresh tree; mutate that private tree.
+      const next = parsed;
       for (const change of changes) {
         if (change.value === undefined) deleteAtPath(next, change.segments);
+        else if (format === "toml") applyTomlChange(next, change.segments, change.value);
         else setAtPath(next, change.segments, change.value);
       }
       result = {
@@ -234,6 +242,113 @@ function updateJsonc(originalText: string, changes: readonly ConfigChange[]): st
   return output;
 }
 
+const TOML_DELETE = Symbol("toml-delete");
+
+function applyTomlChange(target: unknown, segments: readonly PathSegment[], value: unknown): void {
+  const current = getAtPath(target, segments);
+  const converted = coerceTomlValue(current, value, segments, true);
+  if (converted === TOML_DELETE) {
+    deleteAtPath(target, segments);
+    return;
+  }
+  setAtPath(target, segments, converted);
+}
+
+function coerceTomlValue(
+  current: unknown,
+  value: unknown,
+  segments: readonly PathSegment[],
+  allowUnset: boolean,
+): unknown | typeof TOML_DELETE {
+  if (current instanceof TomlDate && typeof value === "string") {
+    const text = value.trim();
+    if (!text) {
+      if (allowUnset) return TOML_DELETE;
+      throw new ConfuiError("SAVE_ERROR", "TOML 日期或时间不能为空", `${segments.join(".")}：请填写有效的 TOML 日期或时间。`);
+    }
+    let date: TomlDate;
+    try {
+      date = new TomlDate(text);
+    } catch {
+      throw new ConfuiError("SAVE_ERROR", "TOML 日期或时间格式无效", `${segments.join(".")}：请填写有效的 TOML 日期或时间。`);
+    }
+    if (!date.isValid()) {
+      throw new ConfuiError("SAVE_ERROR", "TOML 日期或时间格式无效", `${segments.join(".")}：请填写有效的 TOML 日期或时间。`);
+    }
+    return date;
+  }
+  if (typeof current === "bigint" && typeof value === "string") {
+    const text = value.trim();
+    if (!text) {
+      if (allowUnset) return TOML_DELETE;
+      throw new ConfuiError("SAVE_ERROR", "TOML 大整数不能为空", `${segments.join(".")}：请填写整数。`);
+    }
+    const match = text.match(/^([+-]?)(?:(\d(?:_?\d)*)|(0x[0-9a-f](?:_?[0-9a-f])*)|(0o[0-7](?:_?[0-7])*)|(0b[01](?:_?[01])*))$/i);
+    if (!match) {
+      throw new ConfuiError("SAVE_ERROR", "TOML 大整数格式无效", `${segments.join(".")}：请填写整数。`);
+    }
+    try {
+      const literal = match[2] ?? match[3] ?? match[4] ?? match[5];
+      if (!literal) throw new Error("missing integer literal");
+      const integer = BigInt(literal.replace(/_/g, ""));
+      return match[1] === "-" ? -integer : integer;
+    } catch {
+      throw new ConfuiError("SAVE_ERROR", "TOML 大整数格式无效", `${segments.join(".")}：请填写整数。`);
+    }
+  }
+  if (typeof current === "number" && !Number.isFinite(current) && typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (!text) {
+      if (allowUnset) return TOML_DELETE;
+      throw new ConfuiError("SAVE_ERROR", "TOML 特殊浮点值不能为空", `${segments.join(".")}：请填写 inf、-inf 或 nan。`);
+    }
+    const special = text === "inf" || text === "+inf"
+      ? Infinity
+      : text === "-inf"
+        ? -Infinity
+        : text === "nan" || text === "+nan" || text === "-nan"
+          ? Number.NaN
+          : undefined;
+    if (special === undefined) {
+      throw new ConfuiError("SAVE_ERROR", "TOML 特殊浮点格式无效", `${segments.join(".")}：请填写 inf、-inf 或 nan。`);
+    }
+    return special;
+  }
+  if (Array.isArray(current) && Array.isArray(value)) {
+    return value.map((item, index) => {
+      // TOML arrays are homogeneous, but the renderer represents parser-only
+      // values such as BigInt, TomlDate and inf/-inf as strings. When a user
+      // appends an item there is no value at that index to identify the type;
+      // use the first existing item as the type witness instead of silently
+      // turning the new item into a TOML string.
+      const currentItem = current[index] ?? current[0];
+      const converted = coerceTomlValue(currentItem, item, [...segments, index], false);
+      if (converted === TOML_DELETE) {
+        throw new ConfuiError("SAVE_ERROR", "TOML 数组中的日期或特殊数值不能为空");
+      }
+      return converted;
+    });
+  }
+  if (isTomlRecord(current) && isTomlRecord(value)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      const converted = coerceTomlValue(current[key], item, [...segments, key], false);
+      if (converted === TOML_DELETE) continue;
+      if (key === "__proto__") {
+        Object.defineProperty(result, key, { configurable: true, enumerable: true, value: converted, writable: true });
+      } else {
+        result[key] = converted;
+      }
+    }
+    return result;
+  }
+  return value;
+}
+
+function isTomlRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date);
+}
+
 function detectFormattingOptions(text: string): FormattingOptions {
   const indentMatch = text.match(/\n([ \t]+)["'}\w]/);
   const indent = indentMatch?.[1] ?? "  ";
@@ -262,6 +377,177 @@ function parseEnv(text: string): Record<string, string> {
   return result;
 }
 
+/**
+ * `ini` deliberately coerces the unquoted values `true`, `false` and `null`.
+ * That is useful for a generic parser, but it loses the user's type when a
+ * string field is edited to one of those literal values. Keep the library's
+ * parsing behavior for everything else and restore explicitly quoted strings
+ * afterwards, which is the representation emitted by Confui.
+ */
+function parseIni(text: string): Record<string, unknown> {
+  // The `ini` package accepts `=` but treats the equally common `key: value`
+  // spelling as a bare boolean key. Normalize only the first unescaped
+  // separator for parsing, while keeping the original text for quote
+  // restoration and source-preserving edits.
+  const normalized = text.split(/\r?\n/).map(normalizeIniLine).join("\n");
+  const parsed = ini.parse(normalized) as Record<string, unknown>;
+  restoreQuotedIniStrings(text, parsed);
+  return parsed;
+}
+
+interface IniAssignment {
+  indent: string;
+  rawKey: string;
+  character: "=" | ":";
+  separator: string;
+  rawValue: string;
+}
+
+function isIniAssignmentLine(line: string): boolean {
+  const assignment = matchIniAssignment(line);
+  // A bare URL such as `https://example.com` is common in directive-style
+  // configuration and should not make a `.conf` file look like INI merely
+  // because the colon separator is supported.
+  return Boolean(assignment && (assignment.character === "=" || !assignment.rawValue.startsWith("//")));
+}
+
+function normalizeIniLine(line: string): string {
+  if (/^\s*(?:[#;]|\[)/.test(line)) return line;
+  const separator = findIniSeparator(line);
+  if (!separator || separator.character !== ":") return line;
+  return `${line.slice(0, separator.index)}=${line.slice(separator.index + 1)}`;
+}
+
+/** Finds the first unescaped INI assignment delimiter. */
+function findIniSeparator(line: string): { index: number; character: "=" | ":" } | undefined {
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "=" || character === ":") return { index, character };
+  }
+  return undefined;
+}
+
+function matchIniAssignment(line: string): IniAssignment | undefined {
+  const separator = findIniSeparator(line);
+  if (!separator) return undefined;
+  const before = line.slice(0, separator.index);
+  const indent = before.match(/^\s*/)?.[0] ?? "";
+  const keyWithTrailingWhitespace = before.slice(indent.length);
+  const rawKey = keyWithTrailingWhitespace.replace(/\s+$/, "");
+  if (!rawKey) return undefined;
+  const keyTrailingWhitespace = keyWithTrailingWhitespace.slice(rawKey.length);
+  const after = line.slice(separator.index + 1);
+  const valueLeadingWhitespace = after.match(/^\s*/)?.[0] ?? "";
+  return {
+    indent,
+    rawKey,
+    character: separator.character,
+    separator: `${keyTrailingWhitespace}${separator.character}${valueLeadingWhitespace}`,
+    rawValue: after.slice(valueLeadingWhitespace.length),
+  };
+}
+
+interface IniParseState {
+  segments: string[];
+  arrayMode: boolean;
+  count: number;
+  lastAssignment?: { quoted: boolean; value?: string };
+  quotedArrayValues: Map<number, string>;
+}
+
+function restoreQuotedIniStrings(text: string, parsed: Record<string, unknown>): void {
+  const states = new Map<string, IniParseState>();
+  let section: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const sectionMatch = line.match(/^\s*\[([^\]]+)]\s*$/);
+    if (sectionMatch?.[1]) {
+      section = parseIniSection(sectionMatch[1]);
+      continue;
+    }
+    if (/^\s*[#;]/.test(line)) continue;
+    const keyMatch = matchIniAssignment(line);
+    if (!keyMatch) continue;
+    const rawKey = ini.unsafe(keyMatch.rawKey);
+    const isArray = rawKey.length > 2 && rawKey.endsWith("[]");
+    const key = isArray ? rawKey.slice(0, -2) : rawKey;
+    const segments = [...section, key];
+    if (!key || segments.some(isUnsafeIniSegment)) continue;
+    const id = JSON.stringify(segments);
+    const state = states.get(id) ?? {
+      segments,
+      arrayMode: false,
+      count: 0,
+      quotedArrayValues: new Map<number, string>(),
+    };
+    const rawValue = splitIniValueAndComment(keyMatch.rawValue).value.trim();
+    const quotedValue = readQuotedIniString(rawValue);
+    if (state.arrayMode) {
+      const index = state.count;
+      state.count += 1;
+      if (quotedValue !== undefined) state.quotedArrayValues.set(index, quotedValue);
+    } else if (isArray) {
+      state.arrayMode = true;
+      // A scalar assignment immediately before the first [] assignment is
+      // promoted to the first array item by the ini package.
+      if (state.lastAssignment?.quoted && state.count > 0) {
+        state.quotedArrayValues.set(0, state.lastAssignment.value ?? "");
+      }
+      const index = state.count;
+      state.count += 1;
+      if (quotedValue !== undefined) state.quotedArrayValues.set(index, quotedValue);
+    } else {
+      // Without [] the ini package uses last-write-wins semantics.
+      state.count = 1;
+      state.lastAssignment = quotedValue === undefined
+        ? { quoted: false }
+        : { quoted: true, value: quotedValue };
+    }
+    states.set(id, state);
+  }
+
+  for (const state of states.values()) {
+    const current = getAtPath(parsed, state.segments);
+    if (Array.isArray(current)) {
+      for (const [index, value] of state.quotedArrayValues) {
+        if (index < current.length) current[index] = value;
+      }
+    } else if (!state.arrayMode && state.lastAssignment?.quoted) {
+      setParsedIniValue(parsed, state.segments, state.lastAssignment.value ?? "");
+    }
+  }
+}
+
+function readQuotedIniString(value: string): string | undefined {
+  if (value.length < 2 || !((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) return undefined;
+  const parsed = ini.unsafe(value);
+  if (typeof parsed === "string") return parsed;
+  // ini.unsafe strips single quotes before attempting JSON.parse, so a
+  // single-quoted literal such as 'true' needs the same explicit-string
+  // treatment as its double-quoted counterpart.
+  return value.startsWith("'") ? value.slice(1, -1) : undefined;
+}
+
+function setParsedIniValue(target: Record<string, unknown>, segments: readonly string[], value: string): void {
+  if (!segments.length || segments.some(isUnsafeIniSegment)) return;
+  const parent = getAtPath(target, segments.slice(0, -1));
+  const key = segments.at(-1);
+  if (key === undefined || parent === null || typeof parent !== "object" || Array.isArray(parent)) return;
+  (parent as Record<string, unknown>)[key] = value;
+}
+
+function isUnsafeIniSegment(segment: string): boolean {
+  return segment === "__proto__" || segment === "prototype" || segment === "constructor";
+}
+
 function parseProperties(text: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const rawLine of joinPropertyLines(text.split(/\r?\n/))) {
@@ -283,6 +569,9 @@ function patchFlatAssignments(
   for (const change of changes) {
     if (change.segments.length !== 1 || typeof change.segments[0] !== "string") {
       throw new ConfuiError("SAVE_ERROR", `${format.toUpperCase()} 只支持顶层键值`);
+    }
+    if (change.value !== undefined && !isIniScalar(change.value)) {
+      throw new ConfuiError("SAVE_ERROR", `${format.toUpperCase()} 只支持标量键值`, "复杂对象不能安全地表示为这种格式。");
     }
     updates.set(change.segments[0], change.value);
   }
@@ -405,14 +694,20 @@ function assertAppendable(
 function patchIni(text: string, changes: readonly ConfigChange[]): string {
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text.split(/\r?\n/);
-  const updates = new Map<string, { segments: readonly PathSegment[]; value: unknown }>();
+  const updates = new Map<string, {
+    segments: readonly PathSegment[];
+    value: unknown;
+    wrote: boolean;
+  }>();
   for (const change of changes) {
-    if (change.segments.length < 1 || change.segments.some((part) => typeof part !== "string")) {
+    if (change.segments.length < 1
+      || change.segments.some((part) => typeof part !== "string" || isUnsafeIniSegment(part))) {
       throw new ConfuiError("SAVE_ERROR", "INI 只支持字符串类型的节与键");
     }
-    updates.set(JSON.stringify(change.segments), change);
+    if (change.value !== undefined) assertIniValue(change.value);
+    updates.set(JSON.stringify(change.segments), { ...change, wrote: false });
   }
-  const parsed = ini.parse(text);
+  const parsed = parseIni(text);
   const seen = new Set<string>();
   let section: string[] = [];
   const next: string[] = [];
@@ -427,9 +722,15 @@ function patchIni(text: string, changes: readonly ConfigChange[]): string {
       next.push(line);
       continue;
     }
-    const keyMatch = line.match(/^(\s*)([^=]+?)(\s*=\s*)(.*)$/);
-    const key = keyMatch?.[2] ? ini.unsafe(keyMatch[2]) : "";
+    const keyMatch = matchIniAssignment(line);
+    const rawKey = keyMatch ? ini.unsafe(keyMatch.rawKey) : "";
+    const isArrayAssignment = rawKey.length > 2 && rawKey.endsWith("[]");
+    const key = isArrayAssignment ? rawKey.slice(0, -2) : rawKey;
     if (!key) {
+      next.push(line);
+      continue;
+    }
+    if (!keyMatch) {
       next.push(line);
       continue;
     }
@@ -441,9 +742,26 @@ function patchIni(text: string, changes: readonly ConfigChange[]): string {
       continue;
     }
     seen.add(id);
+    const current = getAtPath(parsed, change.segments);
+    const arrayUpdate = Array.isArray(current) || Array.isArray(change.value);
+    if (arrayUpdate) {
+      if (change.value !== undefined && !Array.isArray(change.value)) {
+        throw new ConfuiError("SAVE_ERROR", "INI 数组字段只能替换为数组");
+      }
+      if (!change.wrote) {
+        change.wrote = true;
+        if (change.value !== undefined) {
+          const rawAssignmentKey = keyMatch?.rawKey ?? key;
+          const assignmentKey = isArrayAssignment ? rawAssignmentKey : `${rawAssignmentKey}[]`;
+          const comment = splitIniValueAndComment(keyMatch?.rawValue ?? "").comment;
+          next.push(...formatIniArrayAssignments(keyMatch, assignmentKey, change.value, comment));
+        }
+      }
+      continue;
+    }
     if (change.value === undefined) continue;
-    const comment = splitIniValueAndComment(keyMatch?.[4] ?? "").comment;
-    next.push(`${keyMatch?.[1] ?? ""}${keyMatch?.[2] ?? key}${keyMatch?.[3] ?? "="}${ini.safe(String(change.value ?? ""))}${comment}`);
+    const comment = splitIniValueAndComment(keyMatch.rawValue).comment;
+    next.push(`${keyMatch.indent}${keyMatch.rawKey}${keyMatch.separator}${formatIniValue(change.value)}${comment}`);
   }
   for (const [id, change] of updates) {
     if (seen.has(id)) continue;
@@ -456,7 +774,7 @@ function patchIni(text: string, changes: readonly ConfigChange[]): string {
     }
     assertAppendable(parsed, stringSegments, "ini");
     const sectionSegments = stringSegments.slice(0, -1);
-    const assignment = `${ini.safe(key)}=${ini.safe(String(change.value ?? ""))}`;
+    const assignments = formatIniAssignments(key, change.value);
     if (sectionSegments.length) {
       const headerIndex = next.findIndex((line) => {
         const match = line.match(/^\s*\[([^\]]+)]\s*$/);
@@ -466,20 +784,60 @@ function patchIni(text: string, changes: readonly ConfigChange[]): string {
         let insertionIndex = next.findIndex((line, index) => index > headerIndex && /^\s*\[[^\]]+]\s*$/.test(line));
         if (insertionIndex < 0) insertionIndex = next.length;
         while (insertionIndex > headerIndex + 1 && !next[insertionIndex - 1]?.trim()) insertionIndex -= 1;
-        next.splice(insertionIndex, 0, assignment);
+        next.splice(insertionIndex, 0, ...assignments);
       } else {
         while (next.length && !next.at(-1)?.trim()) next.pop();
         if (next.length) next.push("");
-        next.push(`[${formatIniSection(sectionSegments)}]`, assignment);
+        next.push(`[${formatIniSection(sectionSegments)}]`, ...assignments);
       }
     } else {
       const firstSection = next.findIndex((line) => /^\s*\[[^\]]+]\s*$/.test(line));
       const insertionIndex = firstSection >= 0 ? firstSection : next.findIndex((line, index) => index === next.length - 1 && !line.trim());
-      next.splice(insertionIndex >= 0 ? insertionIndex : next.length, 0, assignment);
+      next.splice(insertionIndex >= 0 ? insertionIndex : next.length, 0, ...assignments);
     }
   }
   while (next.length > 1 && next.at(-1) === "" && next.at(-2) === "") next.pop();
   return next.join(eol).replace(new RegExp(`${escapeRegExp(eol)}+$`), "") + eol;
+}
+
+function formatIniArrayAssignments(
+  keyMatch: IniAssignment | undefined,
+  key: string,
+  values: readonly unknown[],
+  comment: string,
+): string[] {
+  return values.map((value, index) =>
+    `${keyMatch?.indent ?? ""}${key}${keyMatch?.separator ?? "="}${formatIniValue(value)}${index === values.length - 1 ? comment : ""}`,
+  );
+}
+
+function formatIniAssignments(key: string, value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => `${ini.safe(key)}[]=${formatIniValue(item)}`);
+  }
+  return [`${ini.safe(key)}=${formatIniValue(value)}`];
+}
+
+function assertIniValue(value: unknown): void {
+  if (isIniScalar(value)) return;
+  if (Array.isArray(value) && value.length > 0 && value.every(isIniScalar)) return;
+  throw new ConfuiError("SAVE_ERROR", "INI 只支持字符串、数字、布尔值或标量数组", "复杂对象不能安全地表示为 INI 值。");
+}
+
+function isIniScalar(value: unknown): value is string | number | boolean | null {
+  return value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+    || typeof value === "number" && Number.isFinite(value);
+}
+
+function formatIniValue(value: unknown): string {
+  // The ini package parses these three unquoted literals back into non-string
+  // values. JSON quoting is the least surprising INI representation, and
+  // parseIni restores the quoted string on the way back in.
+  if (typeof value === "string" && /^(?:true|false|null)$/.test(value)) return JSON.stringify(value);
+  if (value === null) return "null";
+  return ini.safe(String(value ?? ""));
 }
 
 function formatEnvValue(value: unknown, previous = ""): string {
@@ -493,6 +851,10 @@ function formatEnvValue(value: unknown, previous = ""): string {
         ? "\""
         : "";
   if (quote === "'" && stringValue.includes("'")) quote = "\"";
+  // A single-quoted ENV value cannot span physical lines. Switch to a
+  // double-quoted escaped representation before a multiline value turns the
+  // remainder of the assignment into unrelated lines.
+  if (quote === "'" && /[\r\n\t]/.test(stringValue)) quote = "\"";
   if (!quote) return stringValue;
   const escaped = quote === "\""
     ? stringValue
