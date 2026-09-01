@@ -8,7 +8,7 @@ export const SOURCE_LABELS: Record<FieldSource, string> = {
   "known-template": "内置模板",
   example: "示例文件",
   readme: "README",
-  ai: "AI 分析",
+  ai: "AI 补充",
   heuristic: "结构推断",
 };
 

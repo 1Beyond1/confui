@@ -6,6 +6,11 @@ export default defineConfig({
   main: {
     build: {
       lib: { entry: "electron/main.ts" },
+      // The portable package intentionally contains only `out/` and the
+      // Electron runtime. Bundle runtime dependencies into the main process
+      // instead of leaving imports that would require a shipped node_modules
+      // directory (and make the Windows build needlessly large).
+      externalizeDeps: false,
       rollupOptions: { external: ["electron"] },
     },
   },

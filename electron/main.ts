@@ -56,6 +56,10 @@ let lastVerifiedReleasePage = "https://github.com/1Beyond1/confui/releases/lates
 let fieldAssistInFlight = 0;
 
 app.setName("Confui");
+// Confui is a lightweight form editor and does not need GPU compositing.
+// Disabling it on Windows also avoids driver-specific native crashes on
+// machines where Chromium cannot initialize hardware acceleration.
+if (process.platform === "win32") app.disableHardwareAcceleration();
 if (process.platform === "win32") app.setAppUserModelId("com.1beyond1.confui");
 
 // Two instances editing one file would overwrite each other's `.bak` and only
@@ -96,7 +100,7 @@ function createWindow(): void {
     icon: resolveWindowIcon(),
     show: false,
     autoHideMenuBar: true,
-    backgroundColor: "#f3f5f8",
+    backgroundColor: "#fbfaf9",
     webPreferences: {
       preload: join(currentDirectory, "../preload/preload.cjs"),
       contextIsolation: true,

@@ -60,6 +60,17 @@ const FORMAT_LABELS: Record<ConfigFormat, string> = {
   properties: "PROPERTIES",
 };
 
+// Keep file badges short without slicing words (JSON must not become “JSO”).
+const FORMAT_SHORT_LABELS: Record<ConfigFormat, string> = {
+  json: "JSON",
+  jsonc: "JSONC",
+  yaml: "YAML",
+  toml: "TOML",
+  env: "ENV",
+  ini: "INI",
+  properties: "PROP",
+};
+
 export function App() {
   const [settings, setSettings] = useState<AppSettings>();
   const [view, setView] = useState<View>("home");
@@ -516,7 +527,7 @@ export function App() {
                   onClick={() => requestAction({ kind: "file", file })}
                   title={file.warning || file.path}
                 >
-                  <span class={`format-icon format-icon--${file.format}`}>{FORMAT_LABELS[file.format].slice(0, 3)}</span>
+                  <span class={`format-icon format-icon--${file.format}`}>{FORMAT_SHORT_LABELS[file.format]}</span>
                   <span class="file-item__copy"><strong>{file.path.split("/").at(-1)}</strong><small>{parentPath(file.path)} · {formatBytes(file.size)}</small></span>
                   {activeFile?.path === file.path && dirty && <i class="dirty-dot" title="有未保存的更改"/>}
                   {file.status !== "ready" && <Icon name="warning" size={14} class="file-warning"/>}
@@ -530,7 +541,8 @@ export function App() {
         ) : (
           <div class="sidebar-empty">
             <Icon name="folder"/>
-            <p>打开项目后，配置文件会出现在这里。</p>
+            <strong>还没有打开项目</strong>
+            <p>从“开始”选择一个项目文件夹，配置文件会出现在这里。</p>
           </div>
         )}
 
@@ -552,9 +564,13 @@ export function App() {
                   <button id="editor-tab-form" role="tab" tabIndex={editorTab === "form" ? 0 : -1} aria-selected={editorTab === "form"} aria-controls="editor-panel-form" class={editorTab === "form" ? "active" : ""} onKeyDown={handleEditorTabKey} onClick={() => selectEditorTab("form")}><Icon name="layers" size={15}/>表单</button>
                   <button id="editor-tab-raw" role="tab" tabIndex={editorTab === "raw" ? 0 : -1} aria-selected={editorTab === "raw"} aria-controls="editor-panel-raw" class={editorTab === "raw" ? "active" : ""} onKeyDown={handleEditorTabKey} onClick={() => selectEditorTab("raw")}><Icon name="code" size={15}/>原始内容</button>
                 </div>
-                <Button variant="primary" icon="save" disabled={!dirty || errors.size > 0 || busy !== null} busy={busy === "preview" || busy === "save"} onClick={() => void beginSave()}>
-                  {dirty ? `保存 ${changes.length} 项` : "已保存"}
-                </Button>
+                {dirty ? (
+                  <Button variant="primary" icon="save" disabled={errors.size > 0 || busy !== null} busy={busy === "preview" || busy === "save"} onClick={() => void beginSave()}>
+                    保存 {changes.length} 项
+                  </Button>
+                ) : (
+                  <span class="saved-status" role="status"><Icon name="check" size={15}/>已保存</span>
+                )}
               </>
             )}
             {view === "home" && <Button icon="folder-open" disabled={busy !== null} onClick={() => void browseForProject()}>选择文件夹</Button>}
@@ -742,7 +758,7 @@ function HomePage({
         <div><p class="eyebrow">本地配置工作台</p><h1>打开项目，直接开始配置</h1><p>Confui 会识别常见配置格式，把字段说明和正确控件放到同一个桌面界面里。</p></div>
       </div>
       <section class="open-project-card">
-        <div class="open-project-card__head"><div><h2>选择本地项目</h2><p>配置文件只在你的电脑上读取和保存。</p></div><span class="local-pill"><Icon name="shield" size={14}/>本地处理</span></div>
+        <div class="open-project-card__head"><div><h2>选择本地项目</h2><p>配置文件本地读取和保存；文档与 AI 按需访问。</p></div><span class="local-pill"><Icon name="shield" size={14}/>文件本地读写</span></div>
         <div class="project-input-block">
           <label for="project-root">项目文件夹 <em>必选</em></label>
           <div class="path-control"><Icon name="folder"/><input id="project-root" value={root} disabled={busy} placeholder="选择或粘贴项目文件夹路径" onInput={(event) => onRoot(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") onOpen(); }}/><Button disabled={busy} onClick={onBrowse}>浏览</Button></div>
@@ -751,7 +767,7 @@ function HomePage({
           <label for="github-url">GitHub 仓库 <span>可选，用于本地无 README 时补充说明</span></label>
           <div class="path-control"><Icon name="github"/><input id="github-url" value={github} disabled={busy} placeholder="https://github.com/owner/repository" onInput={(event) => onGithub(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") onOpen(); }}/></div>
         </div>
-        <div class="open-project-card__footer"><p><Icon name="info" size={15}/>优先读取本地 Schema、示例文件和 README；AI 只是最后一层补充。</p><Button variant="primary" icon="folder-open" busy={busy} disabled={busy || !root.trim()} onClick={onOpen}>识别并打开</Button></div>
+        <div class="open-project-card__footer"><p><Icon name="info" size={15}/>优先读取本地 Schema、示例文件和 README；GitHub 与 AI 只在需要时访问。</p><Button variant="primary" icon="folder-open" busy={busy} disabled={busy || !root.trim()} onClick={onOpen}>识别并打开</Button></div>
       </section>
 
       {recent.length > 0 && (
@@ -777,10 +793,11 @@ function EditorSummary({ schema }: { schema: ConfigFormSchema }) {
   return (
     <section class="editor-summary">
       <div class="editor-summary__main">
-        <span class={`format-icon format-icon--${schema.format}`}>{FORMAT_LABELS[schema.format].slice(0, 3)}</span>
+        <span class={`format-icon format-icon--${schema.format}`}>{FORMAT_SHORT_LABELS[schema.format]}</span>
         <div><h1>{schema.kind}</h1><p>{schema.fields.length} 个字段 · {FORMAT_LABELS[schema.format]} · {formatBytes(schema.version.size)}</p></div>
       </div>
-      <div class="source-pipeline">
+      <div class="source-pipeline" aria-label="字段识别依据">
+        <span class="source-pipeline__label">字段来源</span>
         {schema.sources.map((source) => <span key={source.source} title={`${source.fieldCount} 个字段使用了此来源`}><SourceBadge source={source.source}/><small>{source.fieldCount}</small></span>)}
       </div>
       {(schema.warnings.length > 0 || schema.exampleFiles.length > 0 || schema.readmeSource) && (
