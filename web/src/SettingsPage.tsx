@@ -163,7 +163,7 @@ export function SettingsPage({
 
       <section class="settings-card">
         <header class="settings-card__header">
-          <span class="settings-card__icon settings-card__icon--primary"><Icon name="sparkles"/></span>
+          <span class="settings-card__icon settings-card__icon--violet"><Icon name="sparkles"/></span>
           <div><h2>AI 字段分析</h2><p>只在 Schema、模板、示例和 README 仍无法说明字段时补充分析。</p></div>
           <button
             type="button"
@@ -235,7 +235,7 @@ export function SettingsPage({
 
       <section class="settings-card">
         <header class="settings-card__header">
-          <span class="settings-card__icon settings-card__icon--primary"><Icon name="layers"/></span>
+          <span class="settings-card__icon settings-card__icon--blue"><Icon name="layers"/></span>
           <div><h2>外观</h2><p>可以跟随 Windows，也可以固定为浅色或深色。</p></div>
         </header>
         <div class="settings-card__body">
@@ -262,7 +262,7 @@ export function SettingsPage({
 
       <section class="settings-card">
         <header class="settings-card__header">
-          <span class="settings-card__icon settings-card__icon--primary"><Icon name="refresh"/></span>
+          <span class="settings-card__icon settings-card__icon--blue"><Icon name="refresh"/></span>
           <div><h2>软件更新</h2><p>从 GitHub Release 检查 Confui 是否有新版本。</p></div>
         </header>
         <div class="settings-card__body">
