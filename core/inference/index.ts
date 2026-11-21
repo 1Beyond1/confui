@@ -1,10 +1,11 @@
 import { basename } from "node:path";
-import type { ConfigFormSchema, InferOptions } from "../../shared/schema.ts";
+import type { ConfigFormSchema, FieldSpec, InferOptions } from "../../shared/schema.ts";
 import type { AIProvider } from "../ai/provider.ts";
 import { AI_FILE_LIMIT, readTextSnapshot } from "../files.ts";
 import { assertEditableSyntax, detectFormat, parseConfig } from "../formats.ts";
-import { resolveExistingProjectPath } from "../paths.ts";
+import { getAtPath, resolveExistingProjectPath } from "../paths.ts";
 import { inferAIFields } from "./ai.ts";
+import { toEditorValue } from "./common.ts";
 import { inferExampleFields } from "./examples.ts";
 import { inferHeuristicFields, maskDocumentSecrets, maskSecrets } from "./heuristic.ts";
 import { inferJsonSchemaFields } from "./json-schema.ts";
@@ -102,23 +103,33 @@ export async function inferConfig(
   }
 
   const merged = mergeCandidates(candidates);
+  const fields = hydrateFieldValues(merged.fields, parsed);
   if (merged.truncated) {
     warnings.push(`字段数量较多（共 ${merged.totalFieldCount} 项），仅展示优先级最高的前 ${MAX_FORM_FIELDS} 项；其余内容仍保留在原始文件中。`);
   }
-  if (!merged.fields.length) warnings.push("没有发现可转换为表单的字段，可在原始内容中检查文件");
+  if (!fields.length) warnings.push("没有发现可转换为表单的字段，可在原始内容中检查文件");
   return {
     file: relativeFile.replace(/\\/g, "/"),
     kind: basename(relativeFile),
     format,
-    fields: merged.fields,
+    fields,
     sources: merged.sources,
-    writable: merged.fields.length > 0,
+    writable: fields.length > 0,
     warnings: [...new Set(warnings)],
     exampleFiles: examples.files,
     readmeSource: readme.source,
     version,
     rawText: text,
   };
+}
+
+function hydrateFieldValues(fields: readonly FieldSpec[], parsed: unknown): FieldSpec[] {
+  return fields.map((field) => {
+    if (field.value !== undefined) return field;
+    const actual = getAtPath(parsed, field.segments);
+    if (actual === undefined) return field;
+    return { ...field, value: toEditorValue(actual) };
+  });
 }
 
 function uniquePaths(paths: readonly (readonly (string | number)[])[]): Array<Array<string | number>> {

@@ -522,4 +522,65 @@ describe("inference pipeline", () => {
     expect(result.entries).toHaveLength(3);
     expect(result.truncated).toBe(true);
   });
+
+  it("eliminates parent-child path overlaps across heuristic, schema, known-template and examples", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-infer-overlap-"));
+    temporaryDirectories.push(root);
+    await Promise.all([
+      writeFile(join(root, "config.json"), JSON.stringify({
+        server: {},
+        deep: { a: { b: { leaf: 42 } } },
+      })),
+      writeFile(join(root, "config.schema.json"), JSON.stringify({
+        type: "object",
+        properties: {
+          server: {
+            type: "object",
+            properties: {
+              port: { type: "integer" },
+            },
+          },
+          deep: {
+            type: "object",
+            properties: {
+              a: {
+                type: "object",
+                properties: {
+                  b: {
+                    type: "object",
+                    properties: {
+                      leaf: { type: "integer" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      })),
+      writeFile(join(root, "package.json"), JSON.stringify({
+        name: "demo",
+        scripts: { test: "vitest" },
+      })),
+      writeFile(join(root, "package.example.json"), JSON.stringify({
+        name: "demo",
+        scripts: { dev: "vite" },
+      })),
+    ]);
+
+    const configSchema = await inferConfig(root, "config.json");
+    const configPaths = configSchema.fields.map((field) => field.path);
+    expect(configPaths).not.toContain("server");
+    expect(configPaths).toContain("server.port");
+    expect(configPaths).not.toContain("deep.a.b");
+    expect(configSchema.fields.find((field) => field.path === "deep.a.b.leaf")).toMatchObject({
+      type: "integer",
+      value: 42,
+    });
+
+    const pkgSchema = await inferConfig(root, "package.json");
+    const pkgPaths = pkgSchema.fields.map((field) => field.path);
+    expect(pkgPaths).toContain("scripts");
+    expect(pkgPaths).not.toContain("scripts.dev");
+  });
 });

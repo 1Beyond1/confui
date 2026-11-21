@@ -11,7 +11,7 @@ import type {
   SaveResult,
 } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
-import { HARD_FILE_LIMIT, currentVersion, readTextSnapshot } from "./files.ts";
+import { HARD_FILE_LIMIT, currentVersion, hashText, readTextSnapshot } from "./files.ts";
 import { assertEditableSyntax, detectFormat, parseConfig, updateConfigText } from "./formats.ts";
 import { ensurePathInsideProject, formatPath, getAtPath, pathKey, resolveExistingProjectPath } from "./paths.ts";
 
@@ -19,6 +19,7 @@ const FORBIDDEN_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
 const activeSavePaths = new Set<string>();
 const MAX_SAVE_CHANGES = 2_000;
 const MAX_CHANGE_VALUE_BYTES = 1 * 1024 * 1024;
+const RENAME_RETRY_DELAYS_MS = [20, 50, 100, 200];
 
 export async function previewSave(
   root: string,
@@ -94,7 +95,13 @@ async function commitSaveExclusive(
   const backupPath = `${absolutePath}.bak`;
   const temporaryPath = join(dirname(absolutePath), `.${basename(absolutePath)}.confui-${process.pid}-${randomUUID()}.tmp`);
   const backupTemporaryPath = join(dirname(absolutePath), `.${basename(absolutePath)}.confui-${process.pid}-${randomUUID()}.bak.tmp`);
+  let mainReplaced = false;
+  let effectiveBackupPath = backupPath;
   try {
+    // Reject a non-regular `.bak` (such as a symlink) before writing or
+    // touching the target file.
+    await assertSafeBackupTarget(backupPath);
+
     const mode = (await stat(absolutePath)).mode;
     const handle = await open(temporaryPath, "wx");
     try {
@@ -110,24 +117,22 @@ async function commitSaveExclusive(
     // made during that window is not silently overwritten.
     await assertStableTarget(projectRoot, absolutePath);
     assertSameVersion(await currentVersion(absolutePath), preview.expectedVersion);
-    // Build the backup beside the target first, then rename it into place.
-    // Unlike copyFile(destination), rename replaces the directory entry and
-    // never follows a pre-existing `.bak` symlink to an outside path.
+
+    // Stage the backup copy beside the target before replacing the main file,
+    // but do NOT overwrite the existing `.bak` until the main replacement
+    // actually succeeds — if replacing the target fails, the previous `.bak`
+    // stays intact.
     await copyFile(absolutePath, backupTemporaryPath);
-    // The source can change while copyFile is running. A second boundary and
-    // version check prevents the common race from turning the newer external
-    // file into a backup and then overwriting it with this stale preview.
     await assertStableTarget(projectRoot, absolutePath);
     assertSameVersion(await currentVersion(absolutePath), preview.expectedVersion);
-    await replaceBackup(backupTemporaryPath, backupPath);
-    // Keep the final rename bound to the same physical target. This is not an
-    // OS-level compare-and-swap, but it closes the checks-after-copy window and
-    // rejects parent junction/symlink replacement whenever it remains visible.
-    await assertStableTarget(projectRoot, absolutePath);
-    await rename(temporaryPath, absolutePath);
+
+    // Atomically replace the main file first (with short Windows EPERM/EBUSY
+    // backoff retry).
+    await renameWithRetry(temporaryPath, absolutePath);
+    mainReplaced = true;
   } catch (error) {
-    await unlink(temporaryPath).catch(() => undefined);
-    await unlink(backupTemporaryPath).catch(() => undefined);
+    await safeUnlink(temporaryPath);
+    if (!mainReplaced) await safeUnlink(backupTemporaryPath);
     if (error instanceof ConfuiError) throw error;
     throw new ConfuiError(
       "SAVE_ERROR",
@@ -135,11 +140,90 @@ async function commitSaveExclusive(
       error instanceof Error ? error.message : String(error),
     );
   }
+
+  // Promote the staged backup into `.bak` atomically via rename (never
+  // unlinking `.bak` beforehand, so a failure never leaves the user with no
+  // backup). If promotion still fails after the main file was already written,
+  // keep the staged backup file and return its path rather than falsely
+  // reporting that the save itself failed.
+  try {
+    await promoteBackup(backupTemporaryPath, backupPath);
+  } catch {
+    effectiveBackupPath = backupTemporaryPath;
+  }
+
+  // Compute the new FileVersion from the bytes we just wrote rather than
+  // re-reading the file, so a transient antivirus/indexer lock immediately
+  // after rename cannot falsely fail a completed save.
+  const mtimeMs = await stat(absolutePath).then((info) => info.mtimeMs).catch(() => Date.now());
   return {
     file: preview.file,
-    version: await currentVersion(absolutePath),
-    backupPath,
+    version: {
+      mtimeMs,
+      size: Buffer.byteLength(generated.output, "utf8"),
+      hash: hashText(generated.output),
+    },
+    backupPath: effectiveBackupPath,
   };
+}
+
+export async function renameWithRetry(
+  source: string,
+  target: string,
+  renameFn: (src: string, dst: string) => Promise<void> = rename,
+  delaysMs: readonly number[] = RENAME_RETRY_DELAYS_MS,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  let attempt = 0;
+  while (true) {
+    try {
+      await renameFn(source, target);
+      return;
+    } catch (error) {
+      const code = errorCode(error);
+      const retryable = platform === "win32"
+        ? code === "EPERM" || code === "EBUSY"
+        : code === "EBUSY";
+      if (!retryable || attempt >= delaysMs.length) throw error;
+      await sleep(delaysMs[attempt]!);
+      attempt += 1;
+    }
+  }
+}
+
+async function assertSafeBackupTarget(target: string): Promise<{ mode: number } | undefined> {
+  try {
+    const existing = await lstat(target);
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      throw new ConfuiError("SAVE_ERROR", "已有的 .bak 不是普通文件，已拒绝覆盖");
+    }
+    return { mode: existing.mode };
+  } catch (error) {
+    if (isMissingFile(error)) return undefined;
+    throw error;
+  }
+}
+
+async function promoteBackup(source: string, target: string): Promise<void> {
+  const existing = await assertSafeBackupTarget(target);
+  if (existing && (existing.mode & 0o200) === 0) {
+    await chmod(target, existing.mode | 0o200).catch(() => undefined);
+  }
+  await renameWithRetry(source, target);
+}
+
+async function safeUnlink(filePath: string): Promise<void> {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (isMissingFile(error)) return;
+    try {
+      await chmod(filePath, 0o600);
+      await unlink(filePath);
+    } catch {
+      // Best-effort temporary file cleanup.
+    }
+  }
 }
 
 function validateChanges(changes: readonly ConfigChange[]): void {
@@ -188,26 +272,18 @@ function assertWritableSize(output: string): void {
   }
 }
 
-async function replaceBackup(source: string, target: string): Promise<void> {
-  try {
-    const existing = await lstat(target);
-    if (existing.isSymbolicLink() || !existing.isFile()) {
-      throw new ConfuiError("SAVE_ERROR", "已有的 .bak 不是普通文件，已拒绝覆盖");
-    }
-  } catch (error) {
-    if (!isMissingFile(error)) throw error;
-  }
-  try {
-    await unlink(target);
-  } catch (error) {
-    if (!isMissingFile(error)) throw error;
-  }
-  await rename(source, target);
+function errorCode(error: unknown): string | undefined {
+  return error !== null && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : undefined;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isMissingFile(error: unknown): boolean {
-  return error !== null && typeof error === "object" && "code" in error
-    && (error as { code?: unknown }).code === "ENOENT";
+  return errorCode(error) === "ENOENT";
 }
 
 function samePath(left: string, right: string): boolean {

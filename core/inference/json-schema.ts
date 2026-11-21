@@ -36,6 +36,8 @@ const SCHEMA_HOSTS = new Set([
 const SCHEMA_CACHE_TTL_MS = 10 * 60 * 1_000;
 const SCHEMA_CACHE_LIMIT = 32;
 const SCHEMA_MAX_BYTES = 2 * 1024 * 1024;
+const MAX_SCHEMA_REDIRECTS = 3;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_SCHEMA_FIELDS = 6_000;
 const MAX_SCHEMA_ENUM_VALUES = 100;
 const MAX_SCHEMA_TEXT_CHARS = 500;
@@ -159,25 +161,50 @@ async function fetchSchemaUncached(url: string, fetcher: typeof fetch): Promise<
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 4_000);
   try {
-    const response = await fetcher(url, {
-      headers: { Accept: "application/schema+json, application/json" },
-      // The allowlist applies to the actual request, not just the first URL.
-      // Refusing redirects prevents an allowlisted URL from bouncing to an
-      // arbitrary host while a project is being opened.
-      redirect: "error",
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new Error(`HTTP ${response.status}`);
+    let currentUrl = url;
+    for (let redirects = 0; redirects <= MAX_SCHEMA_REDIRECTS; redirects += 1) {
+      const response = await fetcher(currentUrl, {
+        headers: { Accept: "application/schema+json, application/json" },
+        // Follow redirects manually so every hop is re-validated against the
+        // HTTPS + host allowlist before any outbound request is issued.
+        redirect: "manual",
+        signal: controller.signal,
+      });
+      if (REDIRECT_STATUSES.has(response.status)) {
+        await response.body?.cancel().catch(() => undefined);
+        if (redirects >= MAX_SCHEMA_REDIRECTS) {
+          throw new Error("Schema 重定向次数过多");
+        }
+        const location = response.headers.get("location");
+        if (!location) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        let resolvedNext: string;
+        try {
+          resolvedNext = new URL(location, currentUrl).href;
+        } catch {
+          throw new Error("Schema 重定向地址无效");
+        }
+        const nextAllowed = allowedSchemaUrl(resolvedNext);
+        if (!nextAllowed) {
+          throw new Error(`Schema 重定向到未授信的地址：${describeHost(resolvedNext)}`);
+        }
+        currentUrl = nextAllowed;
+        continue;
+      }
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const text = await readLimitedUtf8Response(response, {
+        maxBytes: SCHEMA_MAX_BYTES,
+        overflow: "reject",
+        tooLargeMessage: "Schema 超过 2 MiB",
+        invalidUtf8Message: "Schema 不是有效的 UTF-8 编码",
+      });
+      return JSON.parse(text.replace(/^\uFEFF/, "")) as JsonSchema;
     }
-    const text = await readLimitedUtf8Response(response, {
-      maxBytes: SCHEMA_MAX_BYTES,
-      overflow: "reject",
-      tooLargeMessage: "Schema 超过 2 MiB",
-      invalidUtf8Message: "Schema 不是有效的 UTF-8 编码",
-    });
-    return JSON.parse(text.replace(/^\uFEFF/, "")) as JsonSchema;
+    throw new Error("Schema 重定向次数过多");
   } finally {
     clearTimeout(timeout);
   }
@@ -226,15 +253,18 @@ function fieldsFromSchema(
     const enumValues = Array.isArray(child.enum)
       ? child.enum.filter((item): item is string | number => typeof item === "string" || typeof item === "number")
         .slice(0, MAX_SCHEMA_ENUM_VALUES)
-      : undefined;
+      : (typeof child.const === "string" || typeof child.const === "number")
+        ? [child.const]
+        : undefined;
     const secret = isSecretPath(segments) || child.writeOnly === true || child.format === "password";
+    const defaultValue = child.default !== undefined ? child.default : child.const;
     fields.push({
       segments,
       label: boundedText(child.title, MAX_SCHEMA_TEXT_CHARS) ?? humanize(key),
       description: boundedText(child.description, MAX_SCHEMA_TEXT_CHARS),
       type: secret ? "secret" : enumValues?.length ? "enum" : type,
       required: required.has(key),
-      default: safeSchemaValue(child.default),
+      default: safeSchemaValue(defaultValue),
       enum: enumValues?.length ? enumValues : undefined,
       minimum: asNumber(child.minimum),
       maximum: asNumber(child.maximum),
@@ -258,47 +288,188 @@ function fieldsFromSchema(
 function resolveSchema(
   schema: JsonSchema,
   root: JsonSchema,
-  resolvingRefs: ReadonlySet<string> = new Set(),
+  visited: ReadonlySet<string> = new Set(),
   depth = 0,
 ): JsonSchema {
   if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) return schema;
   const reference = schema.$ref;
-  if (typeof reference !== "string" || !reference.startsWith("#/")) return mergeAllOf(schema, root, resolvingRefs, depth);
-  if (resolvingRefs.has(reference)) return schema;
+  if (typeof reference !== "string" || !reference.startsWith("#/")) {
+    return resolveComposition(schema, root, visited, depth);
+  }
+  const { $ref: _ignoredRef, ...siblings } = schema;
+  if (visited.has(reference)) {
+    return resolveComposition(siblings, root, visited, depth + 1);
+  }
   const parts = reference.slice(2).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~"));
   let current: unknown = root;
   for (const part of parts) {
-    if (!isRecord(current)) return schema;
+    if (!isRecord(current)) return resolveComposition(siblings, root, visited, depth + 1);
     current = current[part];
   }
-  const nextRefs = new Set(resolvingRefs);
-  nextRefs.add(reference);
-  return isRecord(current)
-    ? mergeAllOf({ ...current, ...schema, $ref: undefined }, root, nextRefs, depth + 1)
-    : schema;
+  if (!isRecord(current)) return resolveComposition(siblings, root, visited, depth + 1);
+  const nextVisited = new Set(visited);
+  nextVisited.add(reference);
+  const resolvedTarget = resolveSchema(current, root, nextVisited, depth + 1);
+  const combined = mergeSchemaObjects(resolvedTarget, siblings);
+  return resolveComposition(combined, root, nextVisited, depth + 1);
+}
+
+function resolveComposition(
+  schema: JsonSchema,
+  root: JsonSchema,
+  visited: ReadonlySet<string>,
+  depth: number,
+): JsonSchema {
+  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) return schema;
+  const afterAllOf = mergeAllOf(schema, root, visited, depth);
+  return mergeOneOrAnyOf(afterAllOf, root, visited, depth);
 }
 
 function mergeAllOf(
   schema: JsonSchema,
   root: JsonSchema,
-  resolvingRefs: ReadonlySet<string> = new Set(),
+  visited: ReadonlySet<string> = new Set(),
   depth = 0,
 ): JsonSchema {
   if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) return schema;
   if (!Array.isArray(schema.allOf)) return schema;
-  return schema.allOf.reduce<JsonSchema>((merged, item) => {
+  const { allOf, ...rest } = schema;
+  return allOf.reduce<JsonSchema>((merged, item) => {
     if (!isRecord(item)) return merged;
-    const child = resolveSchema(item, root, resolvingRefs, depth + 1);
+    const child = resolveSchema(item, root, visited, depth + 1);
+    return mergeSchemaObjects(merged, child);
+  }, rest);
+}
+
+function mergeOneOrAnyOf(
+  schema: JsonSchema,
+  root: JsonSchema,
+  visited: ReadonlySet<string>,
+  depth: number,
+): JsonSchema {
+  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) return schema;
+  const rawBranches = Array.isArray(schema.oneOf)
+    ? schema.oneOf
+    : Array.isArray(schema.anyOf)
+      ? schema.anyOf
+      : undefined;
+  if (!rawBranches?.length) return schema;
+  const resolvedBranches = rawBranches
+    .filter(isRecord)
+    .map((branch) => resolveSchema(branch, root, visited, depth + 1));
+  if (!resolvedBranches.length) return schema;
+
+  const nonNullBranches = resolvedBranches.filter((branch) => !isNullOnlySchema(branch));
+  if (!nonNullBranches.length) return schema;
+
+  const { oneOf: _oneOf, anyOf: _anyOf, ...base } = schema;
+
+  // Nullable or single effective branch: safely unwrap and merge with parent annotations.
+  if (nonNullBranches.length === 1) {
+    return mergeSchemaObjects(nonNullBranches[0]!, base);
+  }
+
+  // All non-null branches enumerate scalar string/number values via `const` or `enum`.
+  const collectedEnums: Array<string | number> = [];
+  let allScalarEnums = true;
+  for (const branch of nonNullBranches) {
+    const values = extractScalarEnumValues(branch);
+    if (!values) {
+      allScalarEnums = false;
+      break;
+    }
+    for (const item of values) {
+      if (!collectedEnums.some((existing) => Object.is(existing, item))) {
+        collectedEnums.push(item);
+      }
+    }
+  }
+  if (allScalarEnums && collectedEnums.length > 0) {
     return {
-      ...merged,
-      ...child,
-      properties: { ...(isRecord(merged.properties) ? merged.properties : {}), ...(isRecord(child.properties) ? child.properties : {}) },
-      required: [...new Set([...(Array.isArray(merged.required) ? merged.required : []), ...(Array.isArray(child.required) ? child.required : [])])],
+      ...base,
+      enum: collectedEnums.slice(0, MAX_SCHEMA_ENUM_VALUES),
     };
-  }, { ...schema, allOf: undefined });
+  }
+
+  // All non-null branches share a single basic JSON type (or integer + number -> number).
+  const branchTypes = nonNullBranches.map(extractBasicSchemaType);
+  if (branchTypes.every((item): item is string => typeof item === "string")) {
+    const unique = new Set(branchTypes);
+    if (unique.size === 1) {
+      const [sharedType] = unique;
+      return { type: sharedType, ...base };
+    }
+    if (unique.size === 2 && unique.has("integer") && unique.has("number")) {
+      return { type: "number", ...base };
+    }
+  }
+
+  return schema;
+}
+
+function mergeSchemaObjects(base: JsonSchema, override: JsonSchema): JsonSchema {
+  const merged: JsonSchema = { ...base, ...override };
+  if (isRecord(base.properties) || isRecord(override.properties)) {
+    merged.properties = {
+      ...(isRecord(base.properties) ? base.properties : {}),
+      ...(isRecord(override.properties) ? override.properties : {}),
+    };
+  }
+  if (Array.isArray(base.required) || Array.isArray(override.required)) {
+    merged.required = [
+      ...new Set([
+        ...(Array.isArray(base.required) ? base.required : []),
+        ...(Array.isArray(override.required) ? override.required : []),
+      ]),
+    ];
+  }
+  return merged;
+}
+
+function isNullOnlySchema(schema: JsonSchema): boolean {
+  if (schema.type === "null") return true;
+  if ("const" in schema && schema.const === null) return true;
+  if (Array.isArray(schema.enum) && schema.enum.length > 0 && schema.enum.every((item) => item === null)) return true;
+  return false;
+}
+
+function extractScalarEnumValues(schema: JsonSchema): Array<string | number> | undefined {
+  if ("const" in schema) {
+    return typeof schema.const === "string" || typeof schema.const === "number"
+      ? [schema.const]
+      : undefined;
+  }
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    const nonNull = schema.enum.filter((item) => item !== null);
+    if (nonNull.length > 0 && nonNull.every((item): item is string | number => typeof item === "string" || typeof item === "number")) {
+      return nonNull;
+    }
+  }
+  return undefined;
+}
+
+function extractBasicSchemaType(schema: JsonSchema): string | undefined {
+  if (typeof schema.type === "string") return schema.type;
+  if (Array.isArray(schema.type)) {
+    const nonNull = schema.type.filter((item): item is string => typeof item === "string" && item !== "null");
+    return nonNull.length === 1 ? nonNull[0] : undefined;
+  }
+  if ("const" in schema) {
+    if (typeof schema.const === "string") return "string";
+    if (typeof schema.const === "boolean") return "boolean";
+    if (typeof schema.const === "number") return Number.isInteger(schema.const) ? "integer" : "number";
+    if (Array.isArray(schema.const)) return "array";
+    if (schema.const !== null && typeof schema.const === "object") return "object";
+  }
+  if (isRecord(schema.properties)) return "object";
+  return undefined;
 }
 
 function schemaType(schema: JsonSchema, key: string, value: unknown): FieldType {
+  if (typeof schema.const === "string" || typeof schema.const === "number") return "enum";
+  if (typeof schema.const === "boolean") return "boolean";
+  if (Array.isArray(schema.const)) return "array";
+  if (schema.const !== null && typeof schema.const === "object") return "json";
   const schemaEnum = Array.isArray(schema.enum) ? schema.enum : [];
   // The editor's enum control only accepts scalar string/number options. Do
   // not turn a boolean/object/null enum into an empty, unusable select.

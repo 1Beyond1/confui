@@ -1,9 +1,9 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { HARD_FILE_LIMIT, readTextSnapshot } from "../core/files.ts";
-import { commitSave, previewSave } from "../core/save.ts";
+import { commitSave, previewSave, renameWithRetry } from "../core/save.ts";
 import { ConfuiError } from "../core/errors.ts";
 
 const temporaryDirectories: string[] = [];
@@ -155,5 +155,55 @@ describe("safe save", () => {
     await expect(previewSave(root, "config.json", [
       { segments: ["value"], value: "before\0after" },
     ], snapshot.version)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+
+  it("retries transient Windows EPERM/EBUSY errors during rename", async () => {
+    const eperm = Object.assign(new Error("busy"), { code: "EPERM" });
+    const ebusy = Object.assign(new Error("busy"), { code: "EBUSY" });
+    const renameFn = vi.fn<(src: string, dst: string) => Promise<void>>()
+      .mockRejectedValueOnce(eperm)
+      .mockRejectedValueOnce(ebusy)
+      .mockResolvedValueOnce(undefined);
+
+    await renameWithRetry("a.tmp", "a.json", renameFn, [1, 1, 1], "win32");
+    expect(renameFn).toHaveBeenCalledTimes(3);
+
+    const permanent = vi.fn<(src: string, dst: string) => Promise<void>>().mockRejectedValue(eperm);
+    await expect(renameWithRetry("a.tmp", "a.json", permanent, [1, 1], "win32")).rejects.toThrow("busy");
+    expect(permanent).toHaveBeenCalledTimes(3);
+  });
+
+  it("preserves existing .bak on save failure and cleans up read-only temporary files", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-save-readonly-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "config.json");
+    const backup = `${path}.bak`;
+    await writeFile(path, '{"port":3000}\n', "utf8");
+    await writeFile(backup, '{"port":1000}\n', "utf8");
+    const snapshot = await readTextSnapshot(path);
+    const preview = await previewSave(root, "config.json", [{ segments: ["port"], value: 8080 }], snapshot.version);
+
+    // Make the target file read-only on Windows (or mutate it to force conflict)
+    // and ensure temp files are cleaned up and previous `.bak` stays untouched.
+    await chmod(path, 0o444);
+    try {
+      if (process.platform === "win32") {
+        await expect(commitSave(root, preview)).rejects.toMatchObject({ code: "SAVE_ERROR" });
+        expect(await readFile(backup, "utf8")).toBe('{"port":1000}\n');
+        const entries = await readdir(root);
+        expect(entries.filter((name) => name.includes(".confui-"))).toEqual([]);
+      }
+    } finally {
+      await chmod(path, 0o666).catch(() => undefined);
+    }
+
+    // Once writable again, saving replaces both target and `.bak` cleanly and
+    // computes the returned version from the written content.
+    const result = await commitSave(root, preview);
+    expect(await readFile(path, "utf8")).toBe('{"port":8080}\n');
+    expect(await readFile(backup, "utf8")).toBe('{"port":3000}\n');
+    expect(result.version.size).toBe(Buffer.byteLength('{"port":8080}\n', "utf8"));
+    const entries = await readdir(root);
+    expect(entries.filter((name) => name.includes(".confui-"))).toEqual([]);
   });
 });

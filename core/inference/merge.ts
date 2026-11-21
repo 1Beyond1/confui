@@ -1,4 +1,4 @@
-import type { FieldProperty, FieldSource, FieldSpec, SourceSummary } from "../../shared/schema.ts";
+import type { FieldProperty, FieldSource, FieldSpec, PathSegment, SourceSummary } from "../../shared/schema.ts";
 import { formatPath, pathKey } from "../paths.ts";
 import { groupForPath, humanize } from "./common.ts";
 import type { FieldCandidate } from "./types.ts";
@@ -105,8 +105,9 @@ export function mergeCandidates(candidates: readonly FieldCandidate[]): {
     } satisfies FieldSpec & { order: number };
   });
 
-  fields.sort((left, right) => left.order - right.order || left.path.localeCompare(right.path));
-  const limitedOrderedFields = limitFields(fields);
+  const nonOverlappingFields = resolveOverlappingPaths(fields);
+  nonOverlappingFields.sort((left, right) => left.order - right.order || left.path.localeCompare(right.path));
+  const limitedOrderedFields = limitFields(nonOverlappingFields);
   const limitedFields = limitedOrderedFields.map(({ order: _order, ...field }) => field);
   const sources = (["json-schema", "known-template", "example", "readme", "ai", "heuristic"] as FieldSource[])
     .map((source) => ({
@@ -117,9 +118,50 @@ export function mergeCandidates(candidates: readonly FieldCandidate[]): {
   return {
     fields: limitedFields,
     sources,
-    truncated: fields.length > limitedFields.length,
-    totalFieldCount: fields.length,
+    truncated: nonOverlappingFields.length > limitedFields.length,
+    totalFieldCount: nonOverlappingFields.length,
   };
+}
+
+/**
+ * Eliminates overlapping ancestor/descendant field paths (for example a
+ * heuristic-collapsed parent object alongside JSON Schema or example-expanded
+ * children) so the form never presents two conflicting editors for the same
+ * subtree and triggers a parent/child conflict on save.
+ */
+function resolveOverlappingPaths<T extends FieldSpec & { order: number }>(fields: readonly T[]): T[] {
+  if (fields.length <= 1) return [...fields];
+  const byLength = fields.map((field, index) => ({ field, index }))
+    .sort((left, right) => left.field.segments.length - right.field.segments.length || left.index - right.index);
+  const dropped = new Set<number>();
+
+  for (let i = 0; i < byLength.length; i += 1) {
+    const parentEntry = byLength[i]!;
+    if (dropped.has(parentEntry.index)) continue;
+    const descendants: Array<{ field: T; index: number }> = [];
+    for (let j = i + 1; j < byLength.length; j += 1) {
+      const candidate = byLength[j]!;
+      if (dropped.has(candidate.index)) continue;
+      if (isStrictPrefix(parentEntry.field.segments, candidate.field.segments)) {
+        descendants.push(candidate);
+      }
+    }
+    if (!descendants.length) continue;
+
+    const parentPriority = strongestPriority(parentEntry.field);
+    const maxDescendantPriority = Math.max(...descendants.map((item) => strongestPriority(item.field)));
+    if (parentPriority >= maxDescendantPriority) {
+      for (const descendant of descendants) dropped.add(descendant.index);
+    } else {
+      dropped.add(parentEntry.index);
+    }
+  }
+
+  return fields.filter((_field, index) => !dropped.has(index));
+}
+
+function isStrictPrefix(prefix: readonly PathSegment[], path: readonly PathSegment[]): boolean {
+  return prefix.length < path.length && prefix.every((segment, index) => segment === path[index]);
 }
 
 function limitFields(fields: Array<FieldSpec & { order: number }>): Array<FieldSpec & { order: number }> {

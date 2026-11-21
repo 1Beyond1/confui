@@ -66,7 +66,7 @@ describe("remote JSON Schema gating", () => {
 
     const first = await inferJsonSchemaFields(file, root, value, fetcher);
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(fetcher).toHaveBeenCalledWith(url, expect.objectContaining({ redirect: "error" }));
+    expect(fetcher).toHaveBeenCalledWith(url, expect.objectContaining({ redirect: "manual" }));
     expect(first.warnings).toEqual([]);
     expect(first.fields.map((field) => field.label)).toEqual(["端口"]);
 
@@ -204,5 +204,132 @@ describe("remote JSON Schema gating", () => {
     expect(result.fields).toEqual([]);
     expect(result.warnings.join("\n")).toContain("Schema 超过 2 MiB");
     expect(canceled).toBe(true);
+  });
+
+  it("follows up to 3 allowlisted redirects and blocks untrusted or excessive redirects", async () => {
+    const startUrl = "https://unpkg.com/confui-redirect-ok/schema.json";
+    const { root, file } = await projectWith({ $schema: startUrl, port: 8080 });
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "/confui-redirect-ok@1.0.0/schema.json" } }))
+      .mockResolvedValueOnce(new Response(null, { status: 301, headers: { location: "https://json.schemastore.org/confui-final.json" } }))
+      .mockResolvedValueOnce(jsonResponse(SCHEMA));
+
+    const okResult = await inferJsonSchemaFields(file, root, { $schema: startUrl, port: 8080 }, fetcher);
+    expect(okResult.warnings).toEqual([]);
+    expect(okResult.fields.map((f) => f.label)).toEqual(["端口"]);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher).toHaveBeenNthCalledWith(2, "https://unpkg.com/confui-redirect-ok@1.0.0/schema.json", expect.objectContaining({ redirect: "manual" }));
+    expect(fetcher).toHaveBeenNthCalledWith(3, "https://json.schemastore.org/confui-final.json", expect.objectContaining({ redirect: "manual" }));
+
+    // Redirect to untrusted host must be blocked without issuing a second request.
+    const evilStart = "https://unpkg.com/confui-redirect-evil/schema.json";
+    const evilFetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "https://attacker.example/evil.json" } }));
+    const evilResult = await inferJsonSchemaFields(file, root, { $schema: evilStart }, evilFetcher);
+    expect(evilFetcher).toHaveBeenCalledTimes(1);
+    expect(evilResult.fields).toEqual([]);
+    expect(evilResult.warnings.join("\n")).toContain("未授信");
+
+    // More than 3 redirects must be rejected.
+    const loopStart = "https://schemastore.org/confui-redirect-loop.json";
+    const loopFetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "https://json.schemastore.org/hop1.json" } }))
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "https://json.schemastore.org/hop2.json" } }))
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "https://json.schemastore.org/hop3.json" } }))
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "https://json.schemastore.org/hop4.json" } }));
+    const loopResult = await inferJsonSchemaFields(file, root, { $schema: loopStart }, loopFetcher);
+    expect(loopFetcher).toHaveBeenCalledTimes(4);
+    expect(loopResult.fields).toEqual([]);
+    expect(loopResult.warnings.join("\n")).toContain("重定向次数过多");
+  });
+
+  it("resolves chained $ref safely with cycle protection, const, and oneOf/anyOf unions", async () => {
+    const { root, file } = await projectWith({
+      $schema: "./advanced.schema.json",
+      port: 3000,
+      version: "v2",
+      mode: "prod",
+      nickname: "demo",
+      retry: 3,
+      cyclic: "ok",
+    });
+    await writeFile(join(root, "advanced.schema.json"), JSON.stringify({
+      type: "object",
+      $defs: {
+        PortAlias: { $ref: "#/$defs/PortBase" },
+        PortBase: { type: "integer", minimum: 1, maximum: 65535, description: "服务端口" },
+        CycleA: { $ref: "#/$defs/CycleB", description: "循环引用安全兜底" },
+        CycleB: { $ref: "#/$defs/CycleA", type: "string" },
+      },
+      properties: {
+        port: { $ref: "#/$defs/PortAlias", title: "监听端口" },
+        version: { const: "v2", description: "协议版本" },
+        mode: {
+          description: "运行模式",
+          oneOf: [
+            { const: "dev", title: "开发" },
+            { const: "prod", title: "生产" },
+            { type: "null" },
+          ],
+        },
+        nickname: {
+          description: "可选昵称",
+          anyOf: [
+            { type: "string", minLength: 2 },
+            { type: "null" },
+          ],
+        },
+        retry: {
+          description: "重试次数",
+          anyOf: [
+            { type: "integer", minimum: 0 },
+            { type: "number", maximum: 10 },
+          ],
+        },
+        cyclic: { $ref: "#/$defs/CycleA" },
+      },
+    }));
+
+    const result = await inferJsonSchemaFields(file, root, {
+      $schema: "./advanced.schema.json",
+      port: 3000,
+      version: "v2",
+      mode: "prod",
+      nickname: "demo",
+      retry: 3,
+      cyclic: "ok",
+    });
+
+    expect(result.warnings).toEqual([]);
+    expect(result.fields.find((f) => f.segments.join(".") === "port")).toMatchObject({
+      type: "integer",
+      label: "监听端口",
+      description: "服务端口",
+      minimum: 1,
+      maximum: 65535,
+    });
+    expect(result.fields.find((f) => f.segments.join(".") === "version")).toMatchObject({
+      type: "enum",
+      enum: ["v2"],
+      default: "v2",
+    });
+    expect(result.fields.find((f) => f.segments.join(".") === "mode")).toMatchObject({
+      type: "enum",
+      enum: ["dev", "prod"],
+      description: "运行模式",
+    });
+    expect(result.fields.find((f) => f.segments.join(".") === "nickname")).toMatchObject({
+      type: "string",
+      minLength: 2,
+      description: "可选昵称",
+    });
+    expect(result.fields.find((f) => f.segments.join(".") === "retry")).toMatchObject({
+      type: "number",
+      description: "重试次数",
+    });
+    expect(result.fields.find((f) => f.segments.join(".") === "cyclic")).toMatchObject({
+      type: "string",
+      description: "循环引用安全兜底",
+    });
   });
 });
