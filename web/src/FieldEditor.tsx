@@ -4,6 +4,7 @@ import {
   effectiveValue,
   enumValueEqual,
   fieldKey,
+  isInactiveExamplePlaceholder,
   isJsonDraft,
   parseJsonDraft,
   type EditorValues,
@@ -12,6 +13,7 @@ import { Icon } from "./icons.tsx";
 import { SourceBadge } from "./ui.tsx";
 
 export function FieldEditor({
+  fileKey,
   fields,
   values,
   errors,
@@ -20,6 +22,7 @@ export function FieldEditor({
   onExplain,
   disabled = false,
 }: {
+  fileKey?: string;
   fields: FieldSpec[];
   values: EditorValues;
   errors: Map<string, string>;
@@ -29,7 +32,9 @@ export function FieldEditor({
   disabled?: boolean;
 }) {
   const [query, setQuery] = useState("");
-  useEffect(() => setQuery(""), [fields]);
+  useEffect(() => {
+    setQuery("");
+  }, [fileKey]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleFields = normalizedQuery
     ? fields.filter((field) => [field.label, field.path, field.description, field.group]
@@ -137,17 +142,27 @@ function FieldRow({
     }
   }
 
-  function handleChange(value: unknown): void {
-    if (assist.status !== "idle") setAssist({ status: "idle" });
-    onChange(value);
+  function handleChange(nextValue: unknown): void {
+    // Keep any existing AI explanation visible while the user edits the field
+    // so they can follow the guidance without it disappearing on the first keystroke.
+    onChange(nextValue);
   }
+
+  const inactiveExampleRequired = isInactiveExamplePlaceholder(field, effectiveValue(value));
 
   return (
     <div class={`field-row ${field.confidence < 0.7 ? "field-row--suggested" : ""} ${error ? "field-row--error" : ""}`}>
       <div class="field-row__meta">
         <div class="field-row__title">
           <label for={controlId}>{field.label}</label>
-          {field.required && <span class="required-mark" title="必填">必填</span>}
+          {field.required && (
+            <span
+              class="required-mark"
+              title={inactiveExampleRequired ? "来自示例文件的建议必填项，未在当前配置中启用" : "必填"}
+            >
+              {inactiveExampleRequired ? "建议填写" : "必填"}
+            </span>
+          )}
         </div>
         <code>{field.path}</code>
         <div title={evidenceTitle}><SourceBadge source={field.source} confidence={field.confidence}/></div>
@@ -383,6 +398,15 @@ function FieldControl({
             aria-valuetext={current === undefined ? "未设置" : String(current)}
             disabled={disabled}
             onInput={(event) => onChange(event.currentTarget.valueAsNumber)}
+            onClick={(event) => {
+              if (current === undefined) onChange(event.currentTarget.valueAsNumber);
+            }}
+            onKeyDown={(event) => {
+              if (current === undefined && ["ArrowLeft", "ArrowDown", "Home", "PageDown", "Enter", " "].includes(event.key)) {
+                event.preventDefault();
+                onChange(minimum);
+              }
+            }}
           />
           <b class="range-control__value">{current ?? "—"}</b>
           <button

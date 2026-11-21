@@ -8,6 +8,7 @@ import type {
   FileVersion,
   InferOptions,
   SavePreview,
+  TestAIRequest,
 } from "../shared/schema.ts";
 
 const api: ConfuiAPI = {
@@ -23,11 +24,12 @@ const api: ConfuiAPI = {
     ipcRenderer.invoke("confui:saveConfig", root, preview),
   getSettings: () => ipcRenderer.invoke("confui:getSettings"),
   setSettings: (settings: AppSettings) => ipcRenderer.invoke("confui:setSettings", settings),
-  testAI: (settings: AppSettings["ai"]) => ipcRenderer.invoke("confui:testAI", settings),
+  testAI: (settings: TestAIRequest) => ipcRenderer.invoke("confui:testAI", settings),
   getAppInfo: () => ipcRenderer.invoke("confui:getAppInfo"),
   checkForUpdates: () => ipcRenderer.invoke("confui:checkForUpdates"),
   openReleasePage: () => ipcRenderer.invoke("confui:openReleasePage"),
   setDirtyState: (dirty: boolean) => ipcRenderer.send("confui:setDirtyState", dirty),
+  stopWatching: () => ipcRenderer.send("confui:stopWatching"),
   onFileChanged: (callback: (event: FileChangedEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: FileChangedEvent) => callback(payload);
     ipcRenderer.on("confui:fileChanged", listener);

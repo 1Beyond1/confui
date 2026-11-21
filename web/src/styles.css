@@ -87,6 +87,20 @@
   text-rendering: optimizeLegibility;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #000000;
+    --bg-soft: #080808;
+    --surface: #0c0c0c;
+    --text: #ffffff;
+    --text-secondary: #9a9a9a;
+    --text-muted: #6b6b6b;
+    background: #000000;
+    color: #ffffff;
+  }
+}
+
 :root[data-theme="dark"] {
   color-scheme: dark;
 

@@ -25,6 +25,8 @@ export function SettingsPage({
   onDirtyChange: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState<AppSettings>(() => structuredClone(settings));
+  const [clearApiKey, setClearApiKey] = useState(false);
+  const [clearGithubToken, setClearGithubToken] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -37,36 +39,43 @@ export function SettingsPage({
     [settings.ai.provider]: settings.ai.apiKey,
   }));
 
-  useEffect(() => setDraft(structuredClone(settings)), [settings]);
+  useEffect(() => {
+    setDraft(structuredClone(settings));
+    setClearApiKey(false);
+    setClearGithubToken(false);
+  }, [settings]);
   useEffect(() => setApiKeysByProvider({ [settings.ai.provider]: settings.ai.apiKey }), [settings]);
   useEffect(() => {
     void window.confui.getAppInfo().then((result) => {
       if (result.ok) setAppInfo(result.data);
     });
   }, []);
-  const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(settings), [draft, settings]);
+
+  const dirty = useMemo(
+    () => JSON.stringify(draft) !== JSON.stringify(settings) || clearApiKey || clearGithubToken,
+    [draft, settings, clearApiKey, clearGithubToken],
+  );
   const aiErrors = useMemo(() => validateAiDraft(draft.ai), [draft.ai]);
   // A locked credential is shown as an empty field, so say why: otherwise the
   // user reads it as "never saved" and cannot tell that a value is still stored.
   const locked = settings.lockedSecrets;
+  const hasStoredApiKey = Boolean(
+    settings.secrets?.hasApiKey
+    && draft.ai.provider === settings.ai.provider
+    && !clearApiKey,
+  );
+  const hasStoredGithubToken = Boolean(settings.secrets?.hasGithubToken && !clearGithubToken);
+
   useEffect(() => {
     onDirtyChange(dirty);
     return () => onDirtyChange(false);
   }, [dirty, onDirtyChange]);
-  useEffect(() => {
-    const listener = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
-      event.preventDefault();
-      if (dirty && !saving) void save();
-    };
-    window.addEventListener("keydown", listener);
-    return () => window.removeEventListener("keydown", listener);
-  }, [dirty, saving]);
 
   const setAi = (patch: Partial<AppSettings["ai"]>) => {
     // A connection test may still be in flight when an input changes. Mark
     // that result stale so it cannot report success for a different draft.
     testRun.current += 1;
+    if (patch.apiKey) setClearApiKey(false);
     setDraft((current) => ({
       ...current,
       ai: { ...current.ai, ...patch },
@@ -82,7 +91,16 @@ export function SettingsPage({
     }
     setSaving(true);
     try {
-      await onSave(draft);
+      const payload: AppSettings = {
+        ...draft,
+        clearSecrets: clearApiKey || clearGithubToken
+          ? {
+            apiKey: clearApiKey || undefined,
+            githubToken: clearGithubToken || undefined,
+          }
+          : undefined,
+      };
+      await onSave(payload);
       onToast("设置已安全保存", "success");
     } catch (error) {
       onToast(error instanceof Error ? error.message : "设置保存失败", "error");
@@ -90,6 +108,21 @@ export function SettingsPage({
       setSaving(false);
     }
   }
+
+  // Keep the latest state & save handler in a ref so Ctrl+S never captures a
+  // stale draft snapshot when the user keeps typing after the first character.
+  const shortcutRef = useRef({ dirty, saving, testing, save });
+  shortcutRef.current = { dirty, saving, testing, save };
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      const latest = shortcutRef.current;
+      if (latest.dirty && !latest.saving && !latest.testing) void latest.save();
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
 
   async function testConnection(): Promise<void> {
     if (testing || saving) return;
@@ -99,7 +132,10 @@ export function SettingsPage({
       return;
     }
     const run = ++testRun.current;
-    const testedAi = structuredClone(draft.ai);
+    const testedAi = {
+      ...structuredClone(draft.ai),
+      useStoredApiKey: !draft.ai.apiKey && hasStoredApiKey,
+    };
     setTesting(true);
     try {
       const result = await window.confui.testAI(testedAi);
@@ -117,6 +153,7 @@ export function SettingsPage({
   function chooseProvider(id: string): void {
     const provider = PROVIDERS.find((item) => item.id === id) ?? PROVIDERS.at(-1)!;
     setApiKeysByProvider((current) => ({ ...current, [draft.ai.provider]: draft.ai.apiKey }));
+    setClearApiKey(false);
     setAi({
       provider: provider.id,
       // API keys belong to a provider. Never carry a key entered for one
@@ -200,12 +237,45 @@ export function SettingsPage({
             <div class="setting-field setting-field--wide">
               <label for="settings-ai-api-key">API Key</label>
               <div class="input-with-action">
-                <input id="settings-ai-api-key" class="control" type={showApiKey ? "text" : "password"} value={draft.ai.apiKey} maxlength={8_000} disabled={!draft.ai.enabled || saving || testing} autocomplete="off" placeholder="本地模型可留空" onInput={(event) => setAi({ apiKey: event.currentTarget.value })}/>
+                <input
+                  id="settings-ai-api-key"
+                  class="control"
+                  type={showApiKey ? "text" : "password"}
+                  value={draft.ai.apiKey}
+                  maxlength={8_000}
+                  disabled={!draft.ai.enabled || saving || testing}
+                  autocomplete="off"
+                  placeholder={clearApiKey
+                    ? "保存后将清除已保存的 API Key"
+                    : hasStoredApiKey
+                      ? `已保存 (${settings.secrets?.apiKeyHint ?? "••••"})，留空保持不变`
+                      : "本地模型可留空"}
+                  onInput={(event) => setAi({ apiKey: event.currentTarget.value })}
+                />
                 <button class="icon-button" type="button" disabled={!draft.ai.enabled || saving || testing} onClick={() => setShowApiKey(!showApiKey)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}><Icon name={showApiKey ? "eye-off" : "eye"}/></button>
+                {settings.secrets?.hasApiKey && draft.ai.provider === settings.ai.provider && !draft.ai.apiKey && (
+                  <button
+                    class="icon-button"
+                    type="button"
+                    disabled={!draft.ai.enabled || saving || testing}
+                    onClick={() => {
+                      testRun.current += 1;
+                      setClearApiKey(!clearApiKey);
+                    }}
+                    title={clearApiKey ? "撤销清除 API Key" : "清除已保存的 API Key"}
+                    aria-label={clearApiKey ? "撤销清除 API Key" : "清除已保存的 API Key"}
+                  >
+                    <Icon name={clearApiKey ? "refresh" : "x"} size={15}/>
+                  </button>
+                )}
               </div>
               {locked?.apiKey
                 ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>已保存的 API Key 无法解密（Windows 安全存储不可用），密文已保留。留空保存不会清除它；填入新值会覆盖。</small>
-                : <small class="secure-note"><Icon name="shield" size={14}/>使用 Windows 安全存储加密，不会写入项目文件；切换供应商时不会复用其他供应商的 Key。</small>}
+                : clearApiKey
+                  ? <small class="secure-note"><Icon name="shield" size={14}/>保存设置后将清除已保存的 API Key；你也可以输入新值覆盖或点右侧按钮撤销。</small>
+                  : hasStoredApiKey
+                    ? <small class="secure-note"><Icon name="shield" size={14}/>已在主进程安全存储（{settings.secrets?.apiKeyHint ?? "••••"}），不会以明文暴露到界面。留空保存保持不变，输入新值可覆盖。</small>
+                    : <small class="secure-note"><Icon name="shield" size={14}/>使用 Windows 安全存储加密，不会写入项目文件；切换供应商时不会复用其他供应商的 Key。</small>}
             </div>
           </div>
           <div class="settings-inline-action">
@@ -223,12 +293,46 @@ export function SettingsPage({
           <div class="setting-field setting-field--wide">
             <label for="settings-github-token">Personal Access Token <em>可选</em></label>
             <div class="input-with-action">
-              <input id="settings-github-token" class="control" type={showGithubToken ? "text" : "password"} value={draft.github.token} maxlength={8_000} disabled={saving} autocomplete="off" placeholder="github_pat_..." onInput={(event) => setDraft((current) => ({ ...current, github: { token: event.currentTarget.value } }))}/>
+              <input
+                id="settings-github-token"
+                class="control"
+                type={showGithubToken ? "text" : "password"}
+                value={draft.github.token}
+                maxlength={8_000}
+                disabled={saving}
+                autocomplete="off"
+                placeholder={clearGithubToken
+                  ? "保存后将清除已保存的 Token"
+                  : hasStoredGithubToken
+                    ? `已保存 (${settings.secrets?.githubTokenHint ?? "••••"})，留空保持不变`
+                    : "github_pat_..."}
+                onInput={(event) => {
+                  const nextToken = event.currentTarget.value;
+                  if (nextToken) setClearGithubToken(false);
+                  setDraft((current) => ({ ...current, github: { token: nextToken } }));
+                }}
+              />
               <button class="icon-button" type="button" disabled={saving} onClick={() => setShowGithubToken(!showGithubToken)} aria-label={showGithubToken ? "隐藏 GitHub Token" : "显示 GitHub Token"}><Icon name={showGithubToken ? "eye-off" : "eye"}/></button>
+              {settings.secrets?.hasGithubToken && !draft.github.token && (
+                <button
+                  class="icon-button"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => setClearGithubToken(!clearGithubToken)}
+                  title={clearGithubToken ? "撤销清除 GitHub Token" : "清除已保存的 GitHub Token"}
+                  aria-label={clearGithubToken ? "撤销清除 GitHub Token" : "清除已保存的 GitHub Token"}
+                >
+                  <Icon name={clearGithubToken ? "refresh" : "x"} size={15}/>
+                </button>
+              )}
             </div>
             {locked?.githubToken
               ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>已保存的 Token 无法解密（Windows 安全存储不可用），密文已保留。留空保存不会清除它；填入新值会覆盖。</small>
-              : <small>公开仓库通常无需填写。Token 同样会加密保存。</small>}
+              : clearGithubToken
+                ? <small class="secure-note"><Icon name="shield" size={14}/>保存设置后将清除已保存的 GitHub Token；你也可以输入新值覆盖或点右侧按钮撤销。</small>
+                : hasStoredGithubToken
+                  ? <small class="secure-note"><Icon name="shield" size={14}/>已在主进程安全存储（{settings.secrets?.githubTokenHint ?? "••••"}），留空保存保持不变，输入新值可覆盖。</small>
+                  : <small>公开仓库通常无需填写。Token 同样会加密保存。</small>}
           </div>
         </div>
       </section>
@@ -291,7 +395,18 @@ export function SettingsPage({
       <div class={`settings-savebar ${dirty ? "settings-savebar--visible" : ""}`}>
         <span>{dirty ? "设置有未保存的更改" : "设置已保存"}</span>
         <div>
-          {dirty && <Button variant="ghost" disabled={saving || testing} onClick={() => { setDraft(structuredClone(settings)); onThemePreview(settings.theme); }}>撤销</Button>}
+          {dirty && (
+            <Button
+              variant="ghost"
+              disabled={saving || testing}
+              onClick={() => {
+                setDraft(structuredClone(settings));
+                setClearApiKey(false);
+                setClearGithubToken(false);
+                onThemePreview(settings.theme);
+              }}
+            >撤销</Button>
+          )}
           <Button variant="primary" icon="save" disabled={!dirty || saving || testing} busy={saving} onClick={() => void save()}>保存设置</Button>
         </div>
       </div>

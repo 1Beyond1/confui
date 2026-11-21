@@ -180,6 +180,7 @@ export interface SaveResult {
 }
 
 export interface FileChangedEvent {
+  projectRoot?: string;
   file: string;
   version?: FileVersion;
 }
@@ -204,6 +205,26 @@ export interface LockedSecrets {
   githubToken: boolean;
 }
 
+/**
+ * Redacted status metadata sent to the renderer instead of plaintext secrets.
+ * Derived in the main process on every read; renderer-supplied values are ignored.
+ */
+export interface StoredSecretsMeta {
+  hasApiKey: boolean;
+  apiKeyHint?: string;
+  hasGithubToken: boolean;
+  githubTokenHint?: string;
+}
+
+export interface SecretClearFlags {
+  apiKey?: boolean;
+  githubToken?: boolean;
+}
+
+export type TestAIRequest = AppSettings["ai"] & {
+  useStoredApiKey?: boolean;
+};
+
 export interface AppSettings {
   theme: ThemePreference;
   ai: {
@@ -223,6 +244,16 @@ export interface AppSettings {
    * it, so a value sent by the renderer is discarded rather than trusted.
    */
   lockedSecrets?: LockedSecrets;
+  /**
+   * Derived in the main process for renderer responses so plaintext credentials
+   * never leave the main process.
+   */
+  secrets?: StoredSecretsMeta;
+  /**
+   * One-shot intent sent by the renderer when the user explicitly clears a
+   * stored credential. Never persisted to disk.
+   */
+  clearSecrets?: SecretClearFlags;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -287,10 +318,11 @@ export interface ConfuiAPI {
   saveConfig(root: string, preview: SavePreview): Promise<Result<SaveResult>>;
   getSettings(): Promise<Result<AppSettings>>;
   setSettings(settings: AppSettings): Promise<Result<AppSettings>>;
-  testAI(settings: AppSettings["ai"]): Promise<Result<ConnectionTestResult>>;
+  testAI(settings: TestAIRequest): Promise<Result<ConnectionTestResult>>;
   getAppInfo(): Promise<Result<AppInfo>>;
   checkForUpdates(): Promise<Result<UpdateCheckResult>>;
   openReleasePage(): Promise<Result<null>>;
   setDirtyState(dirty: boolean): void;
+  stopWatching(): void;
   onFileChanged(callback: (event: FileChangedEvent) => void): () => void;
 }

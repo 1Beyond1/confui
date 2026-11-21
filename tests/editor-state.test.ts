@@ -112,4 +112,60 @@ describe("editor state", () => {
     expect(validationErrors([number], { [fieldKey(number)]: Number.MAX_SAFE_INTEGER + 1 })
       .get(fieldKey(number))).toBe("整数超过 JavaScript 安全范围，无法安全保存");
   });
+
+  it("does not let untouched example placeholders block saving, while still enforcing existing or schema required fields", () => {
+    const examplePlaceholder = field({
+      path: "STRIPE_KEY",
+      segments: ["STRIPE_KEY"],
+      required: true,
+      value: undefined,
+      placeholder: "<your-stripe-key>",
+      source: "readme",
+      evidence: [
+        { property: "description", source: "readme", confidence: 0.8 },
+        { property: "required", source: "example", confidence: 0.82 },
+      ],
+    });
+    const existingRequired = field({
+      path: "API_KEY",
+      segments: ["API_KEY"],
+      required: true,
+      value: "live-key",
+      source: "example",
+      evidence: [{ property: "required", source: "example", confidence: 0.82 }],
+    });
+    const schemaRequired = field({
+      path: "PORT",
+      segments: ["PORT"],
+      type: "integer",
+      required: true,
+      value: undefined,
+      source: "json-schema",
+      evidence: [{ property: "required", source: "json-schema", confidence: 0.995 }],
+    });
+    const otherField = field({
+      path: "HOST",
+      segments: ["HOST"],
+      value: "localhost",
+      source: "heuristic",
+    });
+
+    const values = initializeEditorValues([examplePlaceholder, existingRequired, otherField]);
+    values[fieldKey(otherField)] = "0.0.0.0";
+    // Untouched example placeholder must not block saving another modified field.
+    expect(validationErrors([examplePlaceholder, existingRequired, otherField], values).size).toBe(0);
+
+    // Clearing an existing required field must still block saving.
+    values[fieldKey(existingRequired)] = "";
+    expect(validationErrors([examplePlaceholder, existingRequired, otherField], values).get(fieldKey(existingRequired)))
+      .toBe("这是必填项");
+
+    // Actively typing an empty value into the example placeholder triggers required validation.
+    values[fieldKey(examplePlaceholder)] = "";
+    expect(validationErrors([examplePlaceholder], values).get(fieldKey(examplePlaceholder))).toBe("这是必填项");
+
+    // Schema-declared required fields remain enforced even when absent from the file.
+    const schemaValues = initializeEditorValues([schemaRequired]);
+    expect(validationErrors([schemaRequired], schemaValues).get(fieldKey(schemaRequired))).toBe("这是必填项");
+  });
 });

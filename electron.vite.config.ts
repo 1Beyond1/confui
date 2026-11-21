@@ -27,7 +27,16 @@ export default defineConfig({
     build: {
       rollupOptions: { input: { index: resolve("web/index.html") } },
     },
-    plugins: [preact()],
+    plugins: [
+      preact(),
+      {
+        name: "confui-prod-csp",
+        apply: "build",
+        transformIndexHtml(html) {
+          return html.replace("connect-src 'self' ws:;", "connect-src 'self';");
+        },
+      },
+    ],
     server: { port: 5173 },
   },
 });

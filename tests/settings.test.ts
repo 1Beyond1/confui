@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { SettingsStore, normalizeSettings, type SecretCodec } from "../core/settings.ts";
+import { SettingsStore, maskSecretHint, normalizeSettings, type SecretCodec } from "../core/settings.ts";
 import { DEFAULT_SETTINGS } from "../shared/schema.ts";
 
 /** Mirrors the real codec: `enc:` values are readable only while unlocked. */
@@ -223,5 +223,92 @@ describe("settings store", () => {
     });
 
     await expect(store.load()).resolves.toMatchObject({ ai: { apiKey: "restored-secret" } });
+  });
+
+  it("redacts credentials for the renderer and updates them only on explicit input, clear, or provider switch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-settings-redacted-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "settings.json");
+    const state = { unlocked: true };
+    const store = new SettingsStore(path, keychainCodec(state));
+
+    expect(maskSecretHint("")).toBeUndefined();
+    expect(maskSecretHint("short")).toBe("••••");
+    expect(maskSecretHint("sk-1234567890abcd")).toBe("sk-•••abcd");
+
+    const initial = structuredClone(DEFAULT_SETTINGS);
+    initial.ai.enabled = true;
+    initial.ai.provider = "openai";
+    initial.ai.model = "gpt-4.1-mini";
+    initial.ai.baseUrl = "https://api.openai.com/v1";
+    initial.ai.apiKey = "sk-1234567890abcd";
+    initial.github.token = "ghp_1234567890wxyz";
+    const saved = await store.saveFromRenderer(initial);
+
+    // Renderer response must never expose plaintext secrets.
+    expect(saved.ai.apiKey).toBe("");
+    expect(saved.github.token).toBe("");
+    expect(saved.secrets).toEqual({
+      hasApiKey: true,
+      apiKeyHint: "sk-•••abcd",
+      hasGithubToken: true,
+      githubTokenHint: "ghp•••wxyz",
+    });
+
+    const loadedForRenderer = await store.loadForRenderer();
+    expect(loadedForRenderer.ai.apiKey).toBe("");
+    expect(loadedForRenderer.github.token).toBe("");
+    expect(loadedForRenderer.secrets).toEqual(saved.secrets);
+
+    // Saving an unrelated preference (theme) with blank secret fields preserves stored secrets.
+    const themeUpdate = structuredClone(loadedForRenderer);
+    themeUpdate.theme = "dark";
+    const afterTheme = await store.saveFromRenderer(themeUpdate);
+    expect(afterTheme.theme).toBe("dark");
+    expect(afterTheme.secrets?.hasApiKey).toBe(true);
+    expect(afterTheme.secrets?.hasGithubToken).toBe(true);
+    await expect(store.load()).resolves.toMatchObject({
+      theme: "dark",
+      ai: { apiKey: "sk-1234567890abcd" },
+      github: { token: "ghp_1234567890wxyz" },
+    });
+
+    // Switching AI provider without supplying a new key clears the old provider's key.
+    const switchedProvider = structuredClone(afterTheme);
+    switchedProvider.ai.provider = "deepseek";
+    const afterSwitch = await store.saveFromRenderer(switchedProvider);
+    expect(afterSwitch.secrets?.hasApiKey).toBe(false);
+    expect(afterSwitch.secrets?.hasGithubToken).toBe(true);
+    await expect(store.load()).resolves.toMatchObject({
+      ai: { provider: "deepseek", apiKey: "" },
+      github: { token: "ghp_1234567890wxyz" },
+    });
+
+    // Explicitly clearing GitHub token removes it.
+    const clearedGithub = structuredClone(afterSwitch);
+    clearedGithub.clearSecrets = { githubToken: true };
+    const afterClear = await store.saveFromRenderer(clearedGithub);
+    expect(afterClear.secrets?.hasGithubToken).toBe(false);
+    await expect(store.load()).resolves.toMatchObject({ github: { token: "" } });
+    const rawDisk = await readFile(path, "utf8");
+    expect(rawDisk).not.toContain("clearSecrets");
+    expect(rawDisk).not.toContain("hasApiKey");
+
+    // Locked secrets stay preserved when keychain becomes unavailable.
+    const withNewKey = structuredClone(afterClear);
+    withNewKey.ai.apiKey = "sk-locked-secret-9999";
+    await store.saveFromRenderer(withNewKey);
+    state.unlocked = false;
+    const lockedRead = await store.loadForRenderer();
+    expect(lockedRead.lockedSecrets).toEqual({ apiKey: true, githubToken: false });
+    expect(lockedRead.secrets?.hasApiKey).toBe(false);
+    lockedRead.theme = "light";
+    const afterLockedSave = await store.saveFromRenderer(lockedRead);
+    expect(afterLockedSave.lockedSecrets).toEqual({ apiKey: true, githubToken: false });
+    state.unlocked = true;
+    await expect(store.load()).resolves.toMatchObject({
+      theme: "light",
+      ai: { apiKey: "sk-locked-secret-9999" },
+    });
   });
 });

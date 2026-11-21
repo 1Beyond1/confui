@@ -143,8 +143,15 @@ export function App() {
   }, [settings?.theme]);
 
   useEffect(() => window.confui.onFileChanged((event) => {
-    if (schema && event.file === schema.file) setExternalChange(true);
-  }), [schema]);
+    if (
+      schema
+      && project
+      && event.file === schema.file
+      && (!event.projectRoot || sameProjectRoot(event.projectRoot, project.root))
+    ) {
+      setExternalChange(true);
+    }
+  }), [schema, project]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -289,7 +296,7 @@ export function App() {
       setPendingSettingsAction(action);
       return;
     }
-    const sameFile = action.kind === "file" && action.file.path === activeFile?.path;
+    const sameFile = view !== "home" && action.kind === "file" && action.file.path === activeFile?.path;
     if (sameFile && !loadError) {
       setView("editor");
       return;
@@ -305,6 +312,8 @@ export function App() {
         await loadFile(action.file);
         return;
       case "home":
+        window.confui.stopWatching();
+        setExternalChange(false);
         setView("home");
         return;
       case "settings":
@@ -634,6 +643,7 @@ export function App() {
               {schema.fields.length ? (
                 <FieldEditor
                   key={fieldEditorRevision}
+                  fileKey={`${project?.root ?? ""}:${schema.file}`}
                   fields={schema.fields}
                   values={values}
                   errors={errors}
@@ -835,6 +845,11 @@ function defaultClientSettings(): AppSettings {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "操作失败，请重试";
+}
+
+function sameProjectRoot(left: string, right: string): boolean {
+  const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return normalize(left) === normalize(right);
 }
 
 function parentPath(path: string): string {

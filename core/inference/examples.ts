@@ -129,7 +129,7 @@ function flattenExample(
       label: humanize(leaf),
       description: comments.get(leaf.toLowerCase()),
       type: secret ? "secret" : inferFieldType(leaf, current),
-      required: placeholder,
+      required: placeholder ? true : undefined,
       default: placeholder ? undefined : editorValue,
       placeholder: placeholder ? String(current) : undefined,
       secret,

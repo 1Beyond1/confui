@@ -3,8 +3,10 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  nativeTheme,
   safeStorage,
   shell,
+  type IpcMainEvent,
   type IpcMainInvokeEvent,
   type OpenDialogOptions,
 } from "electron";
@@ -36,6 +38,8 @@ import type {
   InferOptions,
   Result,
   SavePreview,
+  TestAIRequest,
+  ThemePreference,
 } from "../shared/schema.ts";
 
 const currentDirectory = fileURLToPath(new URL(".", import.meta.url));
@@ -46,9 +50,10 @@ const MAX_RECENT_PROJECTS = 100;
 const MAX_SAVE_OPERATIONS = 2_000;
 const MAX_FIELD_ASSIST_CONCURRENCY = 3;
 const SUPPORTED_FORMATS = new Set(["json", "jsonc", "yaml", "toml", "env", "ini", "properties"]);
+const PRODUCTION_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'";
 let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore;
-let watchedFile: { watcher: FSWatcher; absolutePath: string; relativePath: string } | undefined;
+let watchedFile: { watcher: FSWatcher; projectRoot: string; absolutePath: string; relativePath: string } | undefined;
 let suppressChange: { absolutePath: string; until: number; hash?: string } | undefined;
 let watcherTimer: NodeJS.Timeout | undefined;
 let hasUnsavedChanges = false;
@@ -72,10 +77,20 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     settingsStore = new SettingsStore(join(app.getPath("userData"), "settings.json"), createSecretCodec());
+    const initialTheme = await settingsStore.load().then((settings) => settings.theme).catch(() => "system" as const);
+    applyNativeTheme(initialTheme);
     registerIpcHandlers();
-    createWindow();
+    createWindow(initialTheme);
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      if (BrowserWindow.getAllWindows().length === 0) {
+        void settingsStore.load()
+          .then((settings) => settings.theme)
+          .catch(() => "system" as const)
+          .then((theme) => {
+            applyNativeTheme(theme);
+            createWindow(theme);
+          });
+      }
     });
   });
 }
@@ -85,7 +100,7 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-function createWindow(): void {
+function createWindow(initialTheme: ThemePreference = "system"): void {
   let allowClose = false;
   const window = new BrowserWindow({
     title: "Confui",
@@ -96,7 +111,7 @@ function createWindow(): void {
     icon: resolveWindowIcon(),
     show: false,
     autoHideMenuBar: true,
-    backgroundColor: "#f3f5f8",
+    backgroundColor: resolveWindowBackground(initialTheme),
     webPreferences: {
       preload: join(currentDirectory, "../preload/preload.cjs"),
       contextIsolation: true,
@@ -106,6 +121,16 @@ function createWindow(): void {
     },
   });
   mainWindow = window;
+  if (!process.env.ELECTRON_RENDERER_URL) {
+    window.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+      const responseHeaders = { ...details.responseHeaders };
+      for (const key of Object.keys(responseHeaders)) {
+        if (key.toLowerCase() === "content-security-policy") delete responseHeaders[key];
+      }
+      responseHeaders["Content-Security-Policy"] = [PRODUCTION_CSP];
+      callback({ responseHeaders });
+    });
+  }
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event, url) => {
     if (url !== window.webContents.getURL()) event.preventDefault();
@@ -141,6 +166,15 @@ function createWindow(): void {
   }
 }
 
+function applyNativeTheme(preference: ThemePreference): void {
+  nativeTheme.themeSource = preference;
+}
+
+function resolveWindowBackground(preference: ThemePreference): string {
+  const dark = preference === "dark" || (preference === "system" && nativeTheme.shouldUseDarkColors);
+  return dark ? "#000000" : "#f3f3f0";
+}
+
 function resolveWindowIcon(): string | undefined {
   return [
     join(currentDirectory, "../renderer/confui-icon.png"),
@@ -148,10 +182,32 @@ function resolveWindowIcon(): string | undefined {
   ].find(existsSync);
 }
 
+function isTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): boolean {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  const frame = event.senderFrame;
+  if (!frame || frame !== mainWindow.webContents.mainFrame) return false;
+  const devUrl = process.env.ELECTRON_RENDERER_URL;
+  if (devUrl) {
+    try {
+      return new URL(frame.url).origin === new URL(devUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+  return frame.url.startsWith("file://");
+}
+
 function registerIpcHandlers(): void {
   ipcMain.removeAllListeners("confui:setDirtyState");
-  ipcMain.on("confui:setDirtyState", (_event, dirty: unknown) => {
+  ipcMain.on("confui:setDirtyState", (event, dirty: unknown) => {
+    if (!isTrustedSender(event)) return;
     if (typeof dirty === "boolean") hasUnsavedChanges = dirty;
+  });
+
+  ipcMain.removeAllListeners("confui:stopWatching");
+  ipcMain.on("confui:stopWatching", (event) => {
+    if (!isTrustedSender(event)) return;
+    closeWatcher();
   });
 
   handle("confui:selectFolder", async () => {
@@ -169,6 +225,8 @@ function registerIpcHandlers(): void {
   handle("confui:scanProject", async (_event, root: unknown, githubUrl?: unknown) => {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertOptionalString(githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
+    // Stop watching any previously opened project file before switching.
+    closeWatcher();
     const result = await scanProject(root);
     const requestedGithubUrl = typeof githubUrl === "string" ? normalizeGithubUrl(githubUrl) : undefined;
     const effectiveGithubUrl = requestedGithubUrl ?? result.detectedGithubUrl;
@@ -197,7 +255,7 @@ function registerIpcHandlers(): void {
       ai,
     });
     const resolved = await resolveExistingProjectPath(root, file);
-    watchConfigFile(resolved.path, file);
+    watchConfigFile(resolved.root, resolved.path, file);
     return schema;
   });
 
@@ -278,16 +336,35 @@ function registerIpcHandlers(): void {
     }
   });
 
-  handle("confui:getSettings", async () => settingsStore.load());
+  handle("confui:getSettings", async () => settingsStore.loadForRenderer());
 
   handle("confui:setSettings", async (_event, settings: unknown) => {
     if (!isAppSettings(settings)) throw new ConfuiError("INVALID_INPUT", "设置内容无效");
-    return settingsStore.save(settings);
+    const saved = await settingsStore.saveFromRenderer(settings);
+    applyNativeTheme(saved.theme);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setBackgroundColor(resolveWindowBackground(saved.theme));
+    }
+    return saved;
   });
 
   handle("confui:testAI", async (_event, settings: unknown) => {
-    if (!isAiSettings(settings)) throw new ConfuiError("INVALID_INPUT", "AI 设置内容无效");
-    return testAIConnection(settings);
+    if (!isTestAIRequest(settings)) throw new ConfuiError("INVALID_INPUT", "AI 设置内容无效");
+    let effectiveApiKey = settings.apiKey;
+    if (!effectiveApiKey && settings.useStoredApiKey === true) {
+      const stored = await settingsStore.load();
+      if (stored.ai.provider === settings.provider) {
+        effectiveApiKey = stored.ai.apiKey;
+      }
+    }
+    return testAIConnection({
+      enabled: settings.enabled,
+      provider: settings.provider,
+      model: settings.model,
+      baseUrl: settings.baseUrl,
+      apiKey: effectiveApiKey,
+      timeoutMs: settings.timeoutMs,
+    });
   });
 
   handle("confui:getAppInfo", async () => ({ version: app.getVersion() }));
@@ -311,6 +388,9 @@ function handle<T>(
   ipcMain.removeHandler(channel);
   ipcMain.handle(channel, async (event, ...args): Promise<Result<T>> => {
     try {
+      if (!isTrustedSender(event)) {
+        throw new ConfuiError("INVALID_INPUT", "未授权的 IPC 请求来源");
+      }
       return { ok: true, data: await action(event, ...(args as never[])) };
     } catch (error) {
       return { ok: false, error: toAppError(error) };
@@ -330,8 +410,8 @@ async function withFieldAssistSlot<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
-function watchConfigFile(absolutePath: string, relativeFile: string): void {
-  if (watchedFile?.absolutePath === absolutePath) return;
+function watchConfigFile(projectRoot: string, absolutePath: string, relativeFile: string): void {
+  if (watchedFile?.absolutePath === absolutePath && watchedFile.projectRoot === projectRoot) return;
   closeWatcher();
   try {
     const targetName = basename(absolutePath).toLowerCase();
@@ -341,7 +421,7 @@ function watchConfigFile(absolutePath: string, relativeFile: string): void {
     const watcher = watch(dirname(absolutePath), { persistent: false }, (_eventType, filename) => {
       if (filename && filename.toString().toLowerCase() !== targetName) return;
       if (watcherTimer) clearTimeout(watcherTimer);
-      watcherTimer = setTimeout(() => void emitFileChange(absolutePath, relativeFile), 140);
+      watcherTimer = setTimeout(() => void emitFileChange(projectRoot, absolutePath, relativeFile), 140);
     });
     watcher.on("error", () => {
       if (watchedFile?.watcher !== watcher) return;
@@ -349,27 +429,30 @@ function watchConfigFile(absolutePath: string, relativeFile: string): void {
       // Treat a broken watcher as an external change. The user can then
       // reload after restoring the directory or file instead of losing the
       // notification silently (or crashing the main process).
-      mainWindow?.webContents.send("confui:fileChanged", { file: relativeFile });
+      const event: FileChangedEvent = { projectRoot, file: relativeFile.replace(/\\/g, "/") };
+      mainWindow?.webContents.send("confui:fileChanged", event);
     });
-    watchedFile = { watcher, absolutePath, relativePath: relativeFile };
+    watchedFile = { watcher, projectRoot, absolutePath, relativePath: relativeFile };
   } catch {
     // Watching is a convenience; opening the file still works if the platform refuses it.
   }
 }
 
-async function emitFileChange(absolutePath: string, relativeFile: string): Promise<void> {
+async function emitFileChange(projectRoot: string, absolutePath: string, relativeFile: string): Promise<void> {
+  if (watchedFile?.absolutePath !== absolutePath || watchedFile.projectRoot !== projectRoot) return;
   let version: FileVersion | undefined;
   try {
     version = await currentVersion(absolutePath);
   } catch {
     // A rename-save from another editor can make the file briefly unavailable.
   }
+  if (watchedFile?.absolutePath !== absolutePath || watchedFile.projectRoot !== projectRoot) return;
   const suppression = suppressChange;
   if (suppression?.absolutePath === absolutePath && Date.now() <= suppression.until) {
     if (!suppression.hash || suppression.hash === version?.hash) return;
   }
   suppressChange = undefined;
-  const event: FileChangedEvent = { file: relativeFile.replace(/\\/g, "/"), version };
+  const event: FileChangedEvent = { projectRoot, file: relativeFile.replace(/\\/g, "/"), version };
   mainWindow?.webContents.send("confui:fileChanged", event);
 }
 
@@ -452,14 +535,26 @@ function isAiSettings(value: unknown): value is AppSettings["ai"] {
     && Number.isFinite((value as AppSettings["ai"]).timeoutMs);
 }
 
+function isTestAIRequest(value: unknown): value is TestAIRequest {
+  if (!isAiSettings(value)) return false;
+  const flag = (value as TestAIRequest).useStoredApiKey;
+  return flag === undefined || typeof flag === "boolean";
+}
+
 function isAppSettings(value: unknown): value is AppSettings {
-  return value !== null && typeof value === "object"
-    && isAiSettings((value as AppSettings).ai)
-    && (value as AppSettings).github !== null
-    && typeof (value as AppSettings).github === "object"
-    && boundedString((value as AppSettings).github.token, 24_000)
-    && Array.isArray((value as AppSettings).recentProjects)
-    && (value as AppSettings).recentProjects.length <= MAX_RECENT_PROJECTS;
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as AppSettings;
+  if (candidate.clearSecrets !== undefined) {
+    if (candidate.clearSecrets === null || typeof candidate.clearSecrets !== "object") return false;
+    if (candidate.clearSecrets.apiKey !== undefined && typeof candidate.clearSecrets.apiKey !== "boolean") return false;
+    if (candidate.clearSecrets.githubToken !== undefined && typeof candidate.clearSecrets.githubToken !== "boolean") return false;
+  }
+  return isAiSettings(candidate.ai)
+    && candidate.github !== null
+    && typeof candidate.github === "object"
+    && boundedString(candidate.github.token, 24_000)
+    && Array.isArray(candidate.recentProjects)
+    && candidate.recentProjects.length <= MAX_RECENT_PROJECTS;
 }
 
 function boundedString(value: unknown, maxLength: number): value is string {

@@ -40,6 +40,14 @@ export class SettingsStore {
     return this.decodeSecrets(await this.readPersisted());
   }
 
+  /**
+   * Loads settings with plaintext credentials stripped so the renderer only
+   * receives safe presence/hint flags and locked-keychain indicators.
+   */
+  async loadForRenderer(): Promise<AppSettings> {
+    return redactSettingsForRenderer(await this.load());
+  }
+
   async save(input: AppSettings): Promise<AppSettings> {
     return this.withWriteLock(async () => {
       const settings = normalizeSettings(input);
@@ -59,6 +67,42 @@ export class SettingsStore {
       // Reported from what was actually written, not from `input`: a locked secret
       // is preserved rather than cleared, and the caller needs to know that.
       return this.decodeSecrets(persisted);
+    });
+  }
+
+  /**
+   * Persists settings sent by the renderer without ever requiring plaintext
+   * credentials to round-trip through the renderer. Existing stored secrets are
+   * preserved unless the user supplies a new value, explicitly requests clear,
+   * or switches AI providers.
+   */
+  async saveFromRenderer(input: AppSettings): Promise<AppSettings> {
+    return this.withWriteLock(async () => {
+      const settings = normalizeSettings(input);
+      const clearApiKey = isRecord(input) && isRecord(input.clearSecrets) && input.clearSecrets.apiKey === true;
+      const clearGithubToken = isRecord(input) && isRecord(input.clearSecrets) && input.clearSecrets.githubToken === true;
+      const stored = await this.readPersistedForWrite();
+      const providerChanged = settings.ai.provider !== stored.ai.provider;
+
+      const nextApiKey = settings.ai.apiKey
+        ? this.codec.encode(settings.ai.apiKey)
+        : clearApiKey || providerChanged
+          ? ""
+          : stored.ai.apiKey;
+      const nextGithubToken = settings.github.token
+        ? this.codec.encode(settings.github.token)
+        : clearGithubToken
+          ? ""
+          : stored.github.token;
+
+      const persisted: PersistedSettings = {
+        ...settings,
+        recentProjects: stored.recentProjects,
+        ai: { ...settings.ai, apiKey: nextApiKey },
+        github: { token: nextGithubToken },
+      };
+      await this.writePersisted(persisted);
+      return redactSettingsForRenderer(this.decodeSecrets(persisted));
     });
   }
 
@@ -168,6 +212,29 @@ export class SettingsStore {
     if (!value && stored && this.codec.decode(stored) === undefined) return stored;
     return this.codec.encode(value);
   }
+}
+
+export function maskSecretHint(value: string): string | undefined {
+  if (!value) return undefined;
+  if (value.length <= 8) return "••••";
+  return `${value.slice(0, 3)}•••${value.slice(-4)}`;
+}
+
+export function redactSettingsForRenderer(settings: AppSettings): AppSettings {
+  const hasApiKey = Boolean(settings.ai.apiKey);
+  const hasGithubToken = Boolean(settings.github.token);
+  return {
+    ...settings,
+    ai: { ...settings.ai, apiKey: "" },
+    github: { token: "" },
+    secrets: {
+      hasApiKey,
+      apiKeyHint: maskSecretHint(settings.ai.apiKey),
+      hasGithubToken,
+      githubTokenHint: maskSecretHint(settings.github.token),
+    },
+    clearSecrets: undefined,
+  };
 }
 
 export function normalizeSettings(input: unknown): AppSettings {

@@ -62,10 +62,24 @@ export function collectChanges(fields: readonly FieldSpec[], values: EditorValue
   });
 }
 
+export function isInactiveExamplePlaceholder(field: FieldSpec, value: unknown): boolean {
+  if (field.value !== undefined) return false;
+  if (value !== undefined) return false;
+  const requiredEvidence = field.evidence.find((item) => item.property === "required");
+  const requiredSource = requiredEvidence?.source ?? field.source;
+  return requiredSource === "example";
+}
+
 export function validateField(field: FieldSpec, editorValue: unknown, format?: ConfigFormat): string | undefined {
   if (isJsonDraft(editorValue) && editorValue.error) return "JSON 格式有误，请修正后再保存";
   const value = effectiveValue(editorValue);
-  if (field.required && (value === undefined || value === null || value === "")) return "这是必填项";
+  if (
+    field.required
+    && (value === undefined || value === null || value === "")
+    && !isInactiveExamplePlaceholder(field, value)
+  ) {
+    return "这是必填项";
+  }
   const explicitJson = isJsonDraft(editorValue) && editorValue.text.trim() !== "";
   if (field.type === "array" && (explicitJson || value !== undefined && value !== null)) {
     if (!Array.isArray(value)) return "请输入 JSON 数组";
