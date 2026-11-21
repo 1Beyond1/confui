@@ -392,4 +392,86 @@ app.name=Confui
     expect(() => parseConfig("self: &self\n  child: *self\n", "yaml"))
       .toThrow(/循环引用/);
   });
+
+  it("handles properties comment trailing backslashes, comment lines, and unescaped value delimiters", () => {
+    const original = String.raw`# Windows path C:\Users\demo\
+! another comment with C:\temp\
+# app.port=9999
+app.port=3000
+app.url=http://localhost:3000
+space.key value
+`;
+    expect(parseConfig(original, "properties")).toEqual({
+      "app.port": "3000",
+      "app.url": "http://localhost:3000",
+      "space.key": "value",
+    });
+
+    const { output } = updateConfigText(original, "properties", [
+      { segments: ["app.port"], value: "8080" },
+      { segments: ["app.url"], value: "https://example.com:8443/api?a=1&b=2" },
+      { segments: ["space.key"], value: "=leading" },
+    ]);
+    expect(output).toContain("# Windows path C:\\Users\\demo\\");
+    expect(output).toContain("# app.port=9999");
+    expect(output).toContain("app.port=8080");
+    expect(output).toContain("app.url=https://example.com:8443/api?a=1&b=2");
+    expect(output).not.toContain("https\\://");
+    expect(parseConfig(output, "properties")).toEqual({
+      "app.port": "8080",
+      "app.url": "https://example.com:8443/api?a=1&b=2",
+      "space.key": "=leading",
+    });
+  });
+
+  it("quotes env values containing single quotes and preserves comments after unquoted apostrophes", () => {
+    const original = "MSG=it's ok # keep inline note\nFOO=plain\n";
+    expect(parseConfig(original, "env")).toEqual({
+      MSG: "it's ok",
+      FOO: "plain",
+    });
+
+    const { output } = updateConfigText(original, "env", [
+      { segments: ["MSG"], value: "it's updated" },
+      { segments: ["FOO"], value: "'bar'" },
+    ]);
+    expect(output).toContain('MSG="it\'s updated" # keep inline note');
+    expect(output).toContain('FOO="\'bar\'"');
+    expect(parseConfig(output, "env")).toEqual({
+      MSG: "it's updated",
+      FOO: "'bar'",
+    });
+  });
+
+  it("preserves YAML special floats and timestamps on write-back", () => {
+    const original = "createdAt: 2026-08-31T12:34:56.000Z\nmaxLimit: .inf\nminLimit: -.inf\nratio: .nan\nlimits:\n  - .inf\n  - -.inf\n";
+    const { output } = updateConfigText(original, "yaml", [
+      { segments: ["createdAt"], value: "2026-09-01T00:00:00.000Z" },
+      { segments: ["maxLimit"], value: "-inf" },
+      { segments: ["minLimit"], value: "42" },
+      { segments: ["ratio"], value: ".nan" },
+      { segments: ["limits"], value: ["-.inf", ".inf", "nan"] },
+    ]);
+    expect(output).toContain("maxLimit: -.inf");
+    expect(output).toContain("minLimit: 42");
+    expect(output).toContain("ratio: .nan");
+    const parsed = parseConfig(output, "yaml") as {
+      createdAt: string;
+      maxLimit: number;
+      minLimit: number;
+      ratio: number;
+      limits: number[];
+    };
+    expect(parsed.createdAt).toBe("2026-09-01T00:00:00.000Z");
+    expect(parsed.maxLimit).toBe(-Infinity);
+    expect(parsed.minLimit).toBe(42);
+    expect(Number.isNaN(parsed.ratio)).toBe(true);
+    expect(parsed.limits[0]).toBe(-Infinity);
+    expect(parsed.limits[1]).toBe(Infinity);
+    expect(Number.isNaN(parsed.limits[2]!)).toBe(true);
+
+    expect(() => updateConfigText(original, "yaml", [
+      { segments: ["maxLimit"], value: "not-a-float" },
+    ])).toThrow(/特殊浮点格式无效/);
+  });
 });

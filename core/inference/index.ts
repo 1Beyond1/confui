@@ -71,16 +71,25 @@ export async function inferConfig(
   if (readme.warning) warnings.push(readme.warning);
   if (readme.truncated) warnings.push("README 中可识别字段过多，已停止继续解析其余内容。");
 
-  const unresolvedPaths = mergeCandidates(candidates).fields
+  const preMerged = mergeCandidates(candidates);
+  const unresolvedPaths = preMerged.fields
     .filter((field) => !field.description)
     .map((field) => field.segments);
+  const secretPaths = uniquePaths([
+    ...candidates
+      .filter((candidate) => candidate.secret === true || candidate.type === "secret")
+      .map((candidate) => candidate.segments),
+    ...preMerged.fields
+      .filter((field) => field.secret === true || field.type === "secret")
+      .map((field) => field.segments),
+  ]);
   if (options.ai && version.size <= AI_FILE_LIMIT && unresolvedPaths.length) {
     try {
       candidates.push(...await inferAIFields({
         provider: options.ai,
         file: relativeFile,
         format,
-        maskedValue: maskSecrets(parsed),
+        maskedValue: maskSecrets(parsed, [], { secretPaths }),
         availablePaths: unresolvedPaths,
         readmeContext: maskDocumentSecrets(readme.text),
         exampleContext: examples.context,

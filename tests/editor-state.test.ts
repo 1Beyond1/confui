@@ -83,7 +83,24 @@ describe("editor state", () => {
 
     const flatFileEnum = field({ path: "MODE", segments: ["MODE"], type: "enum", enum: [1, 2], value: "1" });
     const flatValues = initializeEditorValues([flatFileEnum]);
+    expect(flatValues[fieldKey(flatFileEnum)]).toBe(1);
     expect(validationErrors([flatFileEnum], flatValues)).toEqual(new Map());
+    expect(collectChanges([flatFileEnum], flatValues)).toEqual([]);
+    flatValues[fieldKey(flatFileEnum)] = 2;
+    expect(collectChanges([flatFileEnum], flatValues)).toEqual([{ segments: ["MODE"], value: 2 }]);
+    flatValues[fieldKey(flatFileEnum)] = 1;
+    expect(collectChanges([flatFileEnum], flatValues)).toEqual([]);
+  });
+
+  it("aligns INI array validation with backend scalar-array constraints", () => {
+    const tags = field({ path: "app.tags", segments: ["app", "tags"], type: "array", value: ["one"] });
+    const values = initializeEditorValues([tags]);
+    values[fieldKey(tags)] = parseJsonDraft("[]");
+    expect(validationErrors([tags], values, "ini").get(fieldKey(tags))).toContain("空数组");
+    expect(validationErrors([tags], values, "json").size).toBe(0);
+
+    values[fieldKey(tags)] = parseJsonDraft('[{"nested":true}]');
+    expect(validationErrors([tags], values, "ini").get(fieldKey(tags))).toContain("INI 数组只支持");
   });
 
   it("rejects integer-valued numbers outside JavaScript's safe range", () => {

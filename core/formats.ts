@@ -177,7 +177,7 @@ export function updateConfigText(
       for (const change of changes) {
         if (change.value === undefined) deleteAtPath(next, change.segments);
         else if (format === "toml") applyTomlChange(next, change.segments, change.value);
-        else setAtPath(next, change.segments, change.value);
+        else applyYamlChange(next, change.segments, change.value);
       }
       result = {
         output: stringifyConfig(next, format, source),
@@ -347,6 +347,93 @@ function coerceTomlValue(
 
 function isTomlRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date);
+}
+
+const YAML_DELETE = Symbol("yaml-delete");
+const YAML_TIMESTAMP_RE = /^\d{4}-\d{1,2}-\d{1,2}(?:[Tt ]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?(?:[ \t]*(?:Z|[+-]\d{1,2}(?::\d{2})?))?)?$/;
+const YAML_FINITE_NUMBER_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
+
+function applyYamlChange(target: unknown, segments: readonly PathSegment[], value: unknown): void {
+  const current = getAtPath(target, segments);
+  const converted = coerceYamlValue(current, value, segments, true);
+  if (converted === YAML_DELETE) {
+    deleteAtPath(target, segments);
+    return;
+  }
+  setAtPath(target, segments, converted);
+}
+
+function coerceYamlValue(
+  current: unknown,
+  value: unknown,
+  segments: readonly PathSegment[],
+  allowUnset: boolean,
+): unknown | typeof YAML_DELETE {
+  if (current instanceof Date && typeof value === "string") {
+    const text = value.trim();
+    if (!text) {
+      if (allowUnset) return YAML_DELETE;
+      throw new ConfuiError("SAVE_ERROR", "YAML 日期或时间不能为空", `${segments.join(".")}：请填写有效的 ISO 日期或时间。`);
+    }
+    if (!YAML_TIMESTAMP_RE.test(text)) {
+      throw new ConfuiError("SAVE_ERROR", "YAML 日期或时间格式无效", `${segments.join(".")}：请填写有效的 ISO 日期或时间。`);
+    }
+    const parsedDate = new Date(text);
+    if (!Number.isFinite(parsedDate.getTime())) {
+      throw new ConfuiError("SAVE_ERROR", "YAML 日期或时间格式无效", `${segments.join(".")}：请填写有效的 ISO 日期或时间。`);
+    }
+    return parsedDate;
+  }
+  if (typeof current === "number" && !Number.isFinite(current) && typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (!text) {
+      if (allowUnset) return YAML_DELETE;
+      throw new ConfuiError("SAVE_ERROR", "YAML 特殊浮点值不能为空", `${segments.join(".")}：请填写 .inf、-.inf、.nan 或有限数字。`);
+    }
+    const special = text === "inf" || text === "+inf" || text === ".inf" || text === "+.inf"
+      ? Infinity
+      : text === "-inf" || text === "-.inf"
+        ? -Infinity
+        : text === "nan" || text === ".nan" || text === "+nan" || text === "-nan"
+          ? Number.NaN
+          : undefined;
+    if (special !== undefined) return special;
+    if (YAML_FINITE_NUMBER_RE.test(text)) {
+      const numeric = Number(text);
+      if (Number.isFinite(numeric)) return numeric;
+    }
+    throw new ConfuiError("SAVE_ERROR", "YAML 特殊浮点格式无效", `${segments.join(".")}：请填写 .inf、-.inf、.nan 或有限数字。`);
+  }
+  if (Array.isArray(current) && Array.isArray(value)) {
+    const homogeneousWitness = current.length > 0 && (
+      current.every((item) => item instanceof Date)
+      || current.every((item) => typeof item === "number" && !Number.isFinite(item))
+    )
+      ? current[0]
+      : undefined;
+    return value.map((item, index) => {
+      const currentItem = index < current.length ? current[index] : homogeneousWitness;
+      const converted = coerceYamlValue(currentItem, item, [...segments, index], false);
+      if (converted === YAML_DELETE) {
+        throw new ConfuiError("SAVE_ERROR", "YAML 数组中的日期或特殊数值不能为空");
+      }
+      return converted;
+    });
+  }
+  if (isTomlRecord(current) && isTomlRecord(value)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      const converted = coerceYamlValue(current[key], item, [...segments, key], false);
+      if (converted === YAML_DELETE) continue;
+      if (key === "__proto__") {
+        Object.defineProperty(result, key, { configurable: true, enumerable: true, value: converted, writable: true });
+      } else {
+        result[key] = converted;
+      }
+    }
+    return result;
+  }
+  return value;
 }
 
 function detectFormattingOptions(text: string): FormattingOptions {
@@ -583,6 +670,11 @@ function patchFlatAssignments(
   // together and no continuation is left behind as an orphan key.
   for (const group of groupLogicalLines(text.split(/\r?\n/), format)) {
     const logical = format === "properties" ? joinPropertyLines(group)[0] ?? "" : group[0] ?? "";
+    const trimmed = logical.trim();
+    if (!trimmed || (format === "env" ? trimmed.startsWith("#") : trimmed.startsWith("#") || trimmed.startsWith("!"))) {
+      nextLines.push(...group);
+      continue;
+    }
     const match = format === "env"
       ? logical.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/)
       : logical.match(/^(\s*)((?:\\.|[^:=\s])+?)(\s*(?:[:=]|\s)\s*)(.*)$/);
@@ -601,10 +693,11 @@ function patchFlatAssignments(
     }
     const oldValue = match?.[4] ?? "";
     const envParts = format === "env" ? splitEnvValueAndComment(oldValue) : undefined;
+    const separator = match?.[3] ?? "=";
     const nextValue = format === "env"
       ? `${formatEnvValue(updates.get(key), envParts?.value)}${envParts?.comment ?? ""}`
-      : escapeProperty(String(updates.get(key) ?? ""));
-    nextLines.push(`${match?.[1] ?? ""}${rawKey}${match?.[3] ?? "="}${nextValue}`);
+      : escapeProperty(String(updates.get(key) ?? ""), false, !/[:=]/.test(separator));
+    nextLines.push(`${match?.[1] ?? ""}${rawKey}${separator}${nextValue}`);
   }
   for (const [key, value] of updates) {
     if (seen.has(key)) continue;
@@ -639,6 +732,10 @@ function groupLogicalLines(lines: readonly string[], format: "env" | "properties
   const groups: string[][] = [];
   let current: string[] = [];
   for (const line of lines) {
+    if (current.length === 0 && isPropertyCommentLine(line)) {
+      groups.push([line]);
+      continue;
+    }
     current.push(line);
     if (!hasPropertyContinuation(line)) {
       groups.push(current);
@@ -649,10 +746,18 @@ function groupLogicalLines(lines: readonly string[], format: "env" | "properties
   return groups;
 }
 
+function isPropertyCommentLine(line: string): boolean {
+  return /^\s*[#!]/.test(line);
+}
+
 function joinPropertyLines(lines: readonly string[]): string[] {
   const logical: string[] = [];
   let current: string | undefined;
   for (const physical of lines) {
+    if (current === undefined && isPropertyCommentLine(physical)) {
+      logical.push(physical);
+      continue;
+    }
     const continuedPart = current === undefined ? physical : physical.replace(/^\s+/, "");
     current = (current ?? "") + continuedPart;
     if (hasPropertyContinuation(physical)) {
@@ -847,7 +952,7 @@ function formatEnvValue(value: unknown, previous = ""): string {
     ? "\""
     : previousValue.startsWith("'") && previousValue.endsWith("'")
       ? "'"
-      : /[\s#=\\\"]/.test(stringValue)
+      : /[\s#=\\"']/.test(stringValue)
         ? "\""
         : "";
   if (quote === "'" && stringValue.includes("'")) quote = "\"";
@@ -915,23 +1020,36 @@ function sameStringPath(left: readonly string[], right: readonly string[]): bool
 }
 
 function splitEnvValueAndComment(raw: string): { value: string; comment: string } {
-  let quote: "'" | '"' | undefined;
-  let escaped = false;
-  for (let index = 0; index < raw.length; index += 1) {
-    const character = raw[index];
-    if (escaped) {
-      escaped = false;
-      continue;
+  const leadingWhitespace = raw.match(/^\s*/)?.[0].length ?? 0;
+  const firstChar = raw[leadingWhitespace];
+  if (firstChar === "'" || firstChar === '"') {
+    const quote = firstChar;
+    let escaped = false;
+    let closed = false;
+    for (let index = leadingWhitespace + 1; index < raw.length; index += 1) {
+      const character = raw[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (!closed && character === "\\" && quote === '"') {
+        escaped = true;
+        continue;
+      }
+      if (!closed && character === quote) {
+        closed = true;
+        continue;
+      }
+      if (closed && character === "#") {
+        let commentStart = index;
+        while (commentStart > 0 && /\s/.test(raw[commentStart - 1] ?? "")) commentStart -= 1;
+        return { value: raw.slice(0, commentStart), comment: raw.slice(commentStart) };
+      }
     }
-    if (character === "\\" && quote === '"') {
-      escaped = true;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = quote === character ? undefined : quote ?? character;
-      continue;
-    }
-    if (character === "#" && !quote) {
+    return { value: raw, comment: "" };
+  }
+  for (let index = leadingWhitespace; index < raw.length; index += 1) {
+    if (raw[index] === "#" && (index === leadingWhitespace || /\s/.test(raw[index - 1] ?? ""))) {
       let commentStart = index;
       while (commentStart > 0 && /\s/.test(raw[commentStart - 1] ?? "")) commentStart -= 1;
       return { value: raw.slice(0, commentStart), comment: raw.slice(commentStart) };
@@ -975,16 +1093,20 @@ function decodeEnvEscapes(value: string): string {
   return output;
 }
 
-function escapeProperty(value: string, key = false): string {
+function escapeProperty(value: string, key = false, escapeLeadingDelimiter = false): string {
   const escaped = value
     .replace(/\\/g, "\\\\")
     .replace(/\t/g, "\\t")
     .replace(/\r/g, "\\r")
     .replace(/\n/g, "\\n")
-    .replace(/\f/g, "\\f")
-    .replace(/([:=])/g, "\\$1");
-  if (key) return escaped.replace(/ /g, "\\ ").replace(/^([#!])/, "\\$1");
-  return escaped.replace(/^ +/, (spaces) => spaces.replace(/ /g, "\\ "));
+    .replace(/\f/g, "\\f");
+  if (key) {
+    return escaped
+      .replace(/([:= ])/g, "\\$1")
+      .replace(/^([#!])/, "\\$1");
+  }
+  const withLeadingSpaces = escaped.replace(/^ +/, (spaces) => spaces.replace(/ /g, "\\ "));
+  return escapeLeadingDelimiter ? withLeadingSpaces.replace(/^([:=])/, "\\$1") : withLeadingSpaces;
 }
 
 function unescapeProperty(value: string): string {

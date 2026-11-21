@@ -100,7 +100,10 @@ export function App() {
   const mainContentRef = useRef<HTMLDivElement>(null);
 
   const changes = useMemo(() => schema ? collectChanges(schema.fields, values) : [], [schema, values]);
-  const errors = useMemo(() => schema ? validationErrors(schema.fields, values) : new Map<string, string>(), [schema, values]);
+  const errors = useMemo(
+    () => schema ? validationErrors(schema.fields, values, schema.format) : new Map<string, string>(),
+    [schema, values],
+  );
   const dirty = changes.length > 0;
 
   const filteredFiles = useMemo(() => {

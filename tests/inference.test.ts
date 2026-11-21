@@ -175,6 +175,90 @@ describe("inference pipeline", () => {
     expect((maskedPrototypeKey.__proto__ as Record<string, unknown>).token).toBe("***");
   });
 
+  it("masks prefixed keys, expanded credential keywords, PGP private keys and schema-marked secret paths", async () => {
+    expect(maskSecrets({
+      db_pwd: "p1",
+      keyPassphrase: "p2",
+      app_key: "p3",
+      master_key: "p4",
+      encryption_key: "p5",
+      customPin: "123456",
+      safe: "visible",
+    }, [], { secretPaths: [["customPin"]] })).toEqual({
+      db_pwd: "***",
+      keyPassphrase: "***",
+      app_key: "***",
+      master_key: "***",
+      encryption_key: "***",
+      customPin: "***",
+      safe: "visible",
+    });
+
+    expect(maskDocumentSecrets([
+      "| DB_PASSWORD | super-secret |",
+      "| GITHUB_TOKEN | tok-123 |",
+      "| `OPENAI_API_KEY` | openai-raw |",
+      "| ssh_private_key | raw-ssh |",
+      "| jwt_secret | raw-jwt |",
+      "ssh_private_key: |",
+      "  line-one",
+      "  line-two",
+      "jwt_secret: >-",
+      "  folded-secret",
+      "safe_key: visible",
+      "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+      "Version: GnuPG",
+      "super-secret-pgp-body",
+      "-----END PGP PRIVATE KEY BLOCK-----",
+    ].join("\n"))).toBe([
+      "| DB_PASSWORD | *** |",
+      "| GITHUB_TOKEN | *** |",
+      "| `OPENAI_API_KEY` | *** |",
+      "| ssh_private_key | *** |",
+      "| jwt_secret | *** |",
+      "ssh_private_key: |",
+      "  ***",
+      "  ***",
+      "jwt_secret: >-",
+      "  ***",
+      "safe_key: visible",
+      "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+      "***",
+      "-----END PGP PRIVATE KEY BLOCK-----",
+    ].join("\n"));
+
+    const root = await mkdtemp(join(tmpdir(), "confui-ai-schema-secret-"));
+    temporaryDirectories.push(root);
+    await Promise.all([
+      writeFile(join(root, "config.json"), JSON.stringify({
+        vaultCode: "live-vault-secret",
+        unlockPin: "live-pin-9999",
+        plain: "keep-me",
+      })),
+      writeFile(join(root, "config.schema.json"), JSON.stringify({
+        type: "object",
+        properties: {
+          vaultCode: { type: "string", writeOnly: true },
+          unlockPin: { type: "string", format: "password" },
+          plain: { type: "string" },
+        },
+      })),
+    ]);
+    const prompts: string[] = [];
+    await inferConfig(root, "config.json", {
+      ai: {
+        async chat(messages) {
+          prompts.push(messages.at(-1)?.content ?? "");
+          return JSON.stringify({ fields: [{ path: "plain", description: "普通字段" }] });
+        },
+      },
+    });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).not.toContain("live-vault-secret");
+    expect(prompts[0]).not.toContain("live-pin-9999");
+    expect(prompts[0]).toContain("keep-me");
+  });
+
   it("does not attach an ambiguous README leaf name to the wrong nested field", () => {
     const fields = parseReadme(
       "- `port`: generic port\n- `server.port`: server port",

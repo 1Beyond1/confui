@@ -1,6 +1,13 @@
 import type { PathSegment } from "../../shared/schema.ts";
-import { formatPath } from "../paths.ts";
-import { groupForPath, humanize, inferFieldType, isSecretPath, toEditorValue } from "./common.ts";
+import { formatPath, pathKey } from "../paths.ts";
+import {
+  groupForPath,
+  humanize,
+  inferFieldType,
+  isSecretPath,
+  SECRET_KEY_FRAGMENT,
+  toEditorValue,
+} from "./common.ts";
 import type { FieldCandidate } from "./types.ts";
 
 const MAX_OBJECT_DEPTH = 3;
@@ -8,6 +15,23 @@ const MAX_OBJECT_KEYS = 40;
 const MAX_HEURISTIC_FIELDS = 6_000;
 const MAX_MASK_NODES = 20_000;
 const MAX_MASK_DEPTH = 32;
+
+const MARKDOWN_TABLE_SECRET_RE = new RegExp(
+  `(\\|\\s*[\`"']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*[\`"']?\\s*\\|\\s*)([^|\\r\\n]*?)(\\s*\\|)`,
+  "gi",
+);
+const KEY_VALUE_SECRET_RE = new RegExp(
+  `(["']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*[=:]\\s*)("[^"]*"|'[^']*'|\\\`[^\\\`]*\\\`|[^\\s,;]+)`,
+  "gi",
+);
+const YAML_SECRET_BLOCK_RE = new RegExp(
+  `^\\s*(?:-\\s+)?["']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*:\\s*[|>](?:[-+]?\\d*|\\d*[-+])?(?:\\s+#.*)?$`,
+  "i",
+);
+
+export interface MaskSecretsOptions {
+  secretPaths?: readonly (readonly PathSegment[])[];
+}
 
 interface HeuristicResult {
   fields: FieldCandidate[];
@@ -65,8 +89,24 @@ export function inferHeuristicFields(value: unknown): HeuristicResult {
   return { fields, truncated };
 }
 
-export function maskSecrets(value: unknown, segments: PathSegment[] = [], state: MaskState = { nodes: 0 }): unknown {
-  if (isSecretPath(segments)) return "***";
+export function maskSecrets(
+  value: unknown,
+  segments: PathSegment[] = [],
+  options?: MaskSecretsOptions,
+): unknown {
+  const secretPathKeys = new Set<string>(
+    (options?.secretPaths ?? []).map((path) => pathKey(path)),
+  );
+  return maskSecretsInternal(value, segments, secretPathKeys, { nodes: 0 });
+}
+
+function maskSecretsInternal(
+  value: unknown,
+  segments: PathSegment[],
+  secretPathKeys: ReadonlySet<string>,
+  state: MaskState,
+): unknown {
+  if (isSecretPath(segments) || (segments.length > 0 && secretPathKeys.has(pathKey(segments)))) return "***";
   if (segments.length >= MAX_MASK_DEPTH || state.nodes >= MAX_MASK_NODES) return "[内容已省略]";
   state.nodes += 1;
   if (Array.isArray(value)) {
@@ -76,7 +116,7 @@ export function maskSecrets(value: unknown, segments: PathSegment[] = [], state:
         result.push("[内容已省略]");
         break;
       }
-      result.push(maskSecrets(value[index], [...segments, index], state));
+      result.push(maskSecretsInternal(value[index], [...segments, index], secretPathKeys, state));
     }
     return result;
   }
@@ -88,7 +128,7 @@ export function maskSecrets(value: unknown, segments: PathSegment[] = [], state:
         result["…"] = "[内容已省略]";
         break;
       }
-      const masked = maskSecrets(item, [...segments, key], state);
+      const masked = maskSecretsInternal(item, [...segments, key], secretPathKeys, state);
       if (key === "__proto__") {
         Object.defineProperty(result, key, {
           configurable: true,
@@ -112,7 +152,7 @@ export function maskSecrets(value: unknown, segments: PathSegment[] = [], state:
 export function maskDocumentSecrets(text: string): string {
   return maskYamlSecretBlocks(text)
     .replace(
-    /-----BEGIN ((?:(?:RSA|EC|OPENSSH|DSA) )?(?:ENCRYPTED )?PRIVATE KEY)-----[\s\S]*?-----END \1-----/g,
+      /-----BEGIN ((?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----[\s\S]*?-----END \1-----/g,
       "-----BEGIN $1-----\n***\n-----END $1-----",
     )
     // `@` is legal inside a userinfo password in several DSN spellings. Make
@@ -125,12 +165,9 @@ export function maskDocumentSecrets(text: string): string {
     .replace(/(\b(?:Bearer|Basic|Digest)\s+)[^\s"',;]+/gi, "$1***")
     // Markdown tables do not use `:` or `=` between a sensitive key and its
     // value, so the key/value expression below would otherwise miss them.
+    .replace(MARKDOWN_TABLE_SECRET_RE, "$1***$3")
     .replace(
-      /(\|\s*(?:password|passwd|secret|token|api[\s_-]?key|private[\s_-]?key|credential|auth(?:orization)?|cookie|jwt|session[\s_-]?key|signing[\s_-]?key|client[\s_-]?secret|access[\s_-]?key|database[\s_-]?url|connection[\s_-]?string|dsn|webhook[\s_-]?(?:url|secret))[\w.-]*\s*\|\s*)([^|\r\n]*?)(\s*\|)/gi,
-      "$1***$3",
-    )
-    .replace(
-      /(["']?(?:password|passwd|secret|token|api[\s_-]?key|private[\s_-]?key|credential|auth(?:orization)?|cookie|jwt|session[\s_-]?key|signing[\s_-]?key|client[\s_-]?secret|access[\s_-]?key|database[\s_-]?url|connection[\s_-]?string|dsn|webhook[\s_-]?(?:url|secret))[\w.-]*["']?\s*[=:]\s*)("[^"]*"|'[^']*'|`[^`]*`|[^\s,;]+)/gi,
+      KEY_VALUE_SECRET_RE,
       (_match, prefix: string, value: string) => {
         if (/auth(?:orization)?/i.test(prefix) && /^(?:Bearer|Basic|Digest)$/i.test(value)) return `${prefix}${value}`;
         if (/^(?:[|>])(?:[-+]\d*|\d*[-+]?)?$/.test(value.trim())) return `${prefix}${value}`;
@@ -157,7 +194,7 @@ function maskYamlSecretBlocks(text: string): string {
       }
       blockKeyIndent = undefined;
     }
-    if (/^\s*["']?(?:password|passwd|secret|token|api[\s_-]?key|private[\s_-]?key|credential|auth(?:orization)?|cookie|jwt|session[\s_-]?key|signing[\s_-]?key|client[\s_-]?secret|access[\s_-]?key|database[\s_-]?url|connection[\s_-]?string|dsn|webhook[\s_-]?(?:url|secret))[\w.-]*["']?\s*:\s*[|>](?:[-+]?\d*|\d*[-+])?(?:\s+#.*)?$/i.test(line)) {
+    if (YAML_SECRET_BLOCK_RE.test(line)) {
       blockKeyIndent = indent;
     }
   }

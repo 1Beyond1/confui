@@ -1,4 +1,4 @@
-import type { ConfigChange, FieldSpec } from "../../shared/schema.ts";
+import type { ConfigChange, ConfigFormat, FieldSpec } from "../../shared/schema.ts";
 
 export interface JsonDraft {
   __confuiJsonDraft: true;
@@ -62,13 +62,17 @@ export function collectChanges(fields: readonly FieldSpec[], values: EditorValue
   });
 }
 
-export function validateField(field: FieldSpec, editorValue: unknown): string | undefined {
+export function validateField(field: FieldSpec, editorValue: unknown, format?: ConfigFormat): string | undefined {
   if (isJsonDraft(editorValue) && editorValue.error) return "JSON 格式有误，请修正后再保存";
   const value = effectiveValue(editorValue);
   if (field.required && (value === undefined || value === null || value === "")) return "这是必填项";
   const explicitJson = isJsonDraft(editorValue) && editorValue.text.trim() !== "";
-  if (field.type === "array" && (explicitJson || value !== undefined && value !== null) && !Array.isArray(value)) {
-    return "请输入 JSON 数组";
+  if (field.type === "array" && (explicitJson || value !== undefined && value !== null)) {
+    if (!Array.isArray(value)) return "请输入 JSON 数组";
+    if (format === "ini") {
+      if (value.length === 0) return "INI 不支持空数组；如需移除该配置项请清空输入框";
+      if (!value.every(isIniScalarValue)) return "INI 数组只支持字符串、数字、布尔值或 null";
+    }
   }
   if (field.type === "json" && (explicitJson || value !== undefined && value !== null) && (value === null || Array.isArray(value) || typeof value !== "object")) {
     return "请输入 JSON 对象";
@@ -106,10 +110,14 @@ export function validateField(field: FieldSpec, editorValue: unknown): string | 
   return undefined;
 }
 
-export function validationErrors(fields: readonly FieldSpec[], values: EditorValues): Map<string, string> {
+export function validationErrors(
+  fields: readonly FieldSpec[],
+  values: EditorValues,
+  format?: ConfigFormat,
+): Map<string, string> {
   const errors = new Map<string, string>();
   for (const field of fields) {
-    const error = validateField(field, values[fieldKey(field)]);
+    const error = validateField(field, values[fieldKey(field)], format);
     if (error) errors.set(fieldKey(field), error);
   }
   return errors;
@@ -131,13 +139,25 @@ export function enumValueEqual(option: string | number, value: unknown): boolean
   return false;
 }
 
-function normalizeEditorValue(field: Pick<FieldSpec, "type">, value: unknown): unknown {
+function isIniScalarValue(value: unknown): boolean {
+  return value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value));
+}
+
+function normalizeEditorValue(field: Pick<FieldSpec, "type" | "enum">, value: unknown): unknown {
   if (value instanceof Date) {
     try {
       return value.toISOString();
     } catch {
       return value;
     }
+  }
+  if (field.type === "enum" && field.enum?.length) {
+    if (field.enum.some((option) => Object.is(option, value))) return value;
+    const matched = field.enum.find((option) => enumValueEqual(option, value));
+    if (matched !== undefined) return matched;
   }
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
