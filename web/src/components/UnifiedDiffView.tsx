@@ -1,5 +1,5 @@
 import { useMemo } from "preact/hooks";
-import { computeUnifiedDiff, maskUnifiedDiff } from "../../../shared/diff.ts";
+import { computeUnifiedDiff, maskUnifiedDiff, type DocumentLineSecrets } from "../../../shared/diff.ts";
 import type { ConfigFormat } from "../../../shared/schema.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
@@ -13,6 +13,8 @@ export function UnifiedDiffView({
   maskSecrets = false,
   secretKeys,
   secretValues,
+  oldDocumentSecrets,
+  newDocumentSecrets,
   onToggleRevealSecrets,
 }: {
   oldText: string;
@@ -23,16 +25,31 @@ export function UnifiedDiffView({
   maskSecrets?: boolean;
   secretKeys?: readonly string[];
   secretValues?: readonly string[];
+  oldDocumentSecrets?: readonly DocumentLineSecrets[];
+  newDocumentSecrets?: readonly DocumentLineSecrets[];
   onToggleRevealSecrets?: () => void;
 }) {
   const { t } = useI18n();
   const rawDiff = useMemo(() => computeUnifiedDiff(oldText, newText, 3), [oldText, newText]);
+  const hasScopedDocSecrets = Boolean(oldDocumentSecrets?.length || newDocumentSecrets?.length);
   const maskedResult = useMemo(
-    () => maskUnifiedDiff(rawDiff, { format, oldText, newText, secretKeys, secretValues }),
-    [rawDiff, format, oldText, newText, secretKeys, secretValues],
+    () => maskUnifiedDiff(rawDiff, {
+      format,
+      oldText,
+      newText,
+      secretKeys: hasScopedDocSecrets ? undefined : secretKeys,
+      secretValues: hasScopedDocSecrets ? undefined : secretValues,
+      oldDocumentSecrets,
+      newDocumentSecrets,
+    }),
+    [rawDiff, format, oldText, newText, hasScopedDocSecrets, secretKeys, secretValues, oldDocumentSecrets, newDocumentSecrets],
   );
   const diff = maskSecrets ? maskedResult.diff : rawDiff;
-  const hasSensitiveLines = maskedResult.maskedLineCount > 0 || Boolean(secretKeys?.length);
+  const hasDocScopedEntries = Boolean(
+    oldDocumentSecrets?.some((sec) => (sec.secretKeys?.length ?? 0) > 0 || (sec.secretValues?.length ?? 0) > 0)
+    || newDocumentSecrets?.some((sec) => (sec.secretKeys?.length ?? 0) > 0 || (sec.secretValues?.length ?? 0) > 0),
+  );
+  const hasSensitiveLines = maskedResult.maskedLineCount > 0 || Boolean(secretKeys?.length) || hasDocScopedEntries;
 
   if (!diff.hunks.length) {
     return <div class="udiff-empty">{emptyLabel ?? t("diff.empty")}</div>;

@@ -16,7 +16,12 @@ import { ConfuiError } from "./errors.ts";
 import { HARD_FILE_LIMIT, readTextSnapshot } from "./files.ts";
 import { assertEditableSyntax, parseConfig, parseYamlDocuments } from "./formats.ts";
 import { stripBom } from "./formats/common.ts";
-import { matchIniAssignment, matchIniSectionHeader, parseIniSection } from "./formats/ini.ts";
+import {
+  isSensitiveIniAssignment,
+  matchIniAssignment,
+  matchIniSectionHeader,
+  parseIniSection,
+} from "./formats/ini.ts";
 import { isSecretPath, toEditorValue } from "./inference/common.ts";
 import { maskDocumentSecrets } from "./inference/heuristic.ts";
 import { collectNestedSecretValues } from "./inference/index.ts";
@@ -521,11 +526,39 @@ export function extractFileComments(
     return comments;
   }
 
-  // ENV, INI: quote-aware `#` (and `;` for INI) comments
-  const markers = format === "ini" ? ["#", ";"] : ["#"];
+  if (format === "ini") {
+    let section: string[] = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i] ?? "";
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith("#") || trimmed.startsWith(";")) {
+        const body = trimmed.slice(1).trim();
+        if (body) comments.push({ line: i + 1, text: body });
+        continue;
+      }
+      const header = matchIniSectionHeader(line);
+      if (header) {
+        section = parseIniSection(header.rawSection);
+        const headerComment = header.comment.replace(/^\s*[#;]/, "").trim();
+        if (headerComment) comments.push({ line: i + 1, text: headerComment });
+        continue;
+      }
+      const assignment = matchIniAssignment(line);
+      if (assignment && isSensitiveIniAssignment(assignment.rawKey, section)) {
+        // Never extract `;` or `#` tails from sensitive INI / `.npmrc` assignment lines.
+        continue;
+      }
+      const comment = findHashComment(line, ["#", ";"]);
+      if (comment) comments.push({ line: i + 1, text: comment });
+    }
+    return comments;
+  }
+
+  // ENV: quote-aware `#` comments
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? "";
-    const comment = findHashComment(line, markers);
+    const comment = findHashComment(line, ["#"]);
     if (comment) comments.push({ line: i + 1, text: comment });
   }
   return comments;

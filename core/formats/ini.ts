@@ -458,6 +458,21 @@ function restoreSectionBracketTokens(obj: Record<string, unknown>, token: string
   return result;
 }
 
+/**
+ * Returns true when an INI / `.npmrc` assignment targets a sensitive key
+ * (including `.npmrc` scoped registry credentials like `//host/:_authToken=...`
+ * or any key/section matching `isSensitiveKey`). Trailing `;` / `#` segments on
+ * such lines must never be extracted as comments because credentials often
+ * contain `;` or `#`.
+ */
+export function isSensitiveIniAssignment(rawKey: string, section: readonly string[] = []): boolean {
+  const trimmed = rawKey.trim();
+  if (trimmed.startsWith("//")) return true;
+  const decoded = ini.unsafe(trimmed);
+  const key = decoded.length > 2 && decoded.endsWith("[]") ? decoded.slice(0, -2) : decoded;
+  return key.startsWith("//") || isSensitiveKey(key) || section.some(isSensitiveKey);
+}
+
 function preservedIniComment(keyMatch: IniAssignment, key: string, section: readonly string[]): string {
   const parsedComment = splitIniValueAndComment(keyMatch.rawValue).comment;
   if (!parsedComment) return "";

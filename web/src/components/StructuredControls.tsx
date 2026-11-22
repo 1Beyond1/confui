@@ -30,6 +30,10 @@ import {
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 
+const EMPTY_ARRAY: readonly unknown[] = [];
+const EMPTY_OBJECT: Record<string, unknown> = {};
+const EMPTY_OBJECT_ARRAY: Array<Record<string, unknown>> = [];
+
 export interface StructuredControlProps {
   id: string;
   field: FieldSpec;
@@ -323,7 +327,7 @@ export function StructuredObjectArrayControl({
   const draft = isJsonDraft(value) ? value : createJsonDraft(value);
   const parsed = draft.error ? undefined : draft.parsed;
   const cardEligible = !draft.error && isObjectArray(parsed, field.itemFields);
-  const items: Array<Record<string, unknown>> = cardEligible ? parsed : [];
+  const items: Array<Record<string, unknown>> = cardEligible ? parsed : EMPTY_OBJECT_ARRAY;
 
   const [groupJsonMode, setGroupJsonMode] = useState(!cardEligible);
   const [groupJsonRevealed, setGroupJsonRevealed] = useState(false);
@@ -340,6 +344,8 @@ export function StructuredObjectArrayControl({
   const [addingPropForCard, setAddingPropForCard] = useState<Record<number, { key: string; val: string; error?: string }>>({});
   const [highlightedDeepPath, setHighlightedDeepPath] = useState<string>();
   const lastEmittedDraftRef = useRef<unknown>(value);
+  const handledFocusTokenRef = useRef<number>();
+  const highlightTimerRef = useRef<number>();
   const [externalSyncVersion, setExternalSyncVersion] = useState(0);
 
   const useGroupJson = groupJsonMode || !cardEligible;
@@ -366,9 +372,18 @@ export function StructuredObjectArrayControl({
   }
 
   function reportSubError(subKey: string, err?: string): void {
-    const nextDraft = withJsonDraftSubError(draft, subKey, err);
+    const nextDraft = err === undefined
+      ? clearJsonDraftSubErrors(draft, subKey)
+      : withJsonDraftSubError(draft, subKey, err);
     if (nextDraft !== draft) emitDraft(nextDraft);
   }
+
+  useEffect(() => () => {
+    if (highlightTimerRef.current !== undefined) {
+      window.clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = undefined;
+    }
+  }, []);
 
   // Synchronize open single-card JSON drafts and nested fallback blocks when
   // `value` changes externally (Ctrl+Z Undo, Restore Value, Revert All, file switch).
@@ -393,6 +408,7 @@ export function StructuredObjectArrayControl({
   // Auto-expand card & exit JSON mode when Ctrl+K jumps into a card or nested property inside this array.
   useEffect(() => {
     if (!deepFocusTarget?.segments?.length) return;
+    if (handledFocusTokenRef.current === deepFocusTarget.token) return;
     const baseLen = field.segments.length;
     if (
       deepFocusTarget.segments.length <= baseLen
@@ -403,6 +419,7 @@ export function StructuredObjectArrayControl({
     const cardIdx = deepFocusTarget.segments[baseLen];
     if (typeof cardIdx !== "number" || cardIdx < 0 || cardIdx >= items.length) return;
 
+    handledFocusTokenRef.current = deepFocusTarget.token;
     if (cardEligible) setGroupJsonMode(false);
     setCollapsedCards((prev) => ({ ...prev, [cardIdx]: false }));
     setCardJsonDrafts((prev) => {
@@ -414,11 +431,15 @@ export function StructuredObjectArrayControl({
     if (draft.subErrors?.[`card:${cardIdx}`]) {
       reportSubError(`card:${cardIdx}`, undefined);
     }
-    setHighlightedDeepPath(deepFocusTarget.path);
-    const timer = window.setTimeout(() => {
-      setHighlightedDeepPath((current) => (current === deepFocusTarget.path ? undefined : current));
+    const targetPath = deepFocusTarget.path;
+    setHighlightedDeepPath(targetPath);
+    if (highlightTimerRef.current !== undefined) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(() => {
+      highlightTimerRef.current = undefined;
+      setHighlightedDeepPath((current) => (current === targetPath ? undefined : current));
     }, 2_600);
-    return () => window.clearTimeout(timer);
   }, [deepFocusTarget?.path, deepFocusTarget?.segments, deepFocusTarget?.token, field.segments, items.length, cardEligible]);
 
   function emitCards(next: Array<Record<string, unknown>>, clearSubErrorPrefix?: string): void {
@@ -506,15 +527,20 @@ export function StructuredObjectArrayControl({
   }
 
   function toggleCardJson(index: number): void {
+    const cardPath = formatSegmentPath([...field.segments, index]);
     if (index in cardJsonDrafts) {
       setCardJsonDrafts((prev) => {
         const next = { ...prev };
         delete next[index];
         return next;
       });
-      reportSubError(`card:${index}`, undefined);
+      let nextDraft = clearJsonDraftSubErrors(draft, `card:${index}`);
+      nextDraft = clearJsonDraftSubErrors(nextDraft, cardPath);
+      if (nextDraft !== draft) emitDraft(nextDraft);
       return;
     }
+    const cleared = clearJsonDraftSubErrors(draft, cardPath);
+    if (cleared !== draft) emitDraft(cleared);
     const card = items[index] ?? {};
     setCollapsedCards((prev) => ({ ...prev, [index]: false }));
     setCardJsonDrafts((prev) => ({
@@ -576,6 +602,9 @@ export function StructuredObjectArrayControl({
       const next: Record<number, boolean> = {};
       for (let i = 0; i < items.length; i += 1) next[i] = true;
       setCollapsedCards(next);
+      const fieldPrefix = formatSegmentPath(field.segments);
+      const cleared = clearJsonDraftSubErrors(draft, fieldPrefix);
+      if (cleared !== draft) emitDraft(cleared);
     }
   }
 
@@ -706,7 +735,13 @@ export function StructuredObjectArrayControl({
                       type="button"
                       class="array-card__toggle"
                       aria-expanded={!collapsed}
-                      onClick={() => setCollapsedCards((prev) => ({ ...prev, [cardIdx]: !collapsed }))}
+                      onClick={() => {
+                        if (!collapsed) {
+                          const cleared = clearJsonDraftSubErrors(draft, cardPath);
+                          if (cleared !== draft) emitDraft(cleared);
+                        }
+                        setCollapsedCards((prev) => ({ ...prev, [cardIdx]: !collapsed }));
+                      }}
                     >
                       <Icon name="chevron-down" size={14} class={`array-card__chevron ${collapsed ? "icon-rotate-neg90" : ""}`}/>
                       <span class="array-card__index">#{cardIdx + 1}</span>
@@ -1009,7 +1044,7 @@ function CardPropertyInput({
   if (Array.isArray(value) || spec?.type === "array") {
     return (
       <DeepJsonFallbackBlock
-        value={value ?? []}
+        value={value ?? EMPTY_ARRAY}
         sensitive={sensitive || valueContainsSecret(value)}
         disabled={disabled}
         compact
@@ -1192,9 +1227,10 @@ export function StructuredObjectControl({
   const [jsonRevealed, setJsonRevealed] = useState(false);
   const useJson = jsonMode || !treeEligible;
   const lastEmittedDraftRef = useRef<unknown>(value);
+  const handledFocusTokenRef = useRef<number>();
   const [externalSyncVersion, setExternalSyncVersion] = useState(0);
 
-  const objectVal: Record<string, unknown> = isPlainObject(parsed) ? parsed : {};
+  const objectVal: Record<string, unknown> = isPlainObject(parsed) ? parsed : EMPTY_OBJECT;
   const isNested = useMemo(
     () => Object.values(objectVal).some((v) => !isEditableScalar(v)),
     [objectVal],
@@ -1218,7 +1254,9 @@ export function StructuredObjectControl({
   }
 
   function reportSubError(subKey: string, err?: string): void {
-    const nextDraft = withJsonDraftSubError(draft, subKey, err);
+    const nextDraft = err === undefined
+      ? clearJsonDraftSubErrors(draft, subKey)
+      : withJsonDraftSubError(draft, subKey, err);
     if (nextDraft !== draft) emitDraft(nextDraft);
   }
 
@@ -1242,10 +1280,12 @@ export function StructuredObjectControl({
 
   useEffect(() => {
     if (!deepFocusTarget?.segments?.length || !treeEligible) return;
+    if (handledFocusTokenRef.current === deepFocusTarget.token) return;
     if (
       deepFocusTarget.segments.length > field.segments.length
       && field.segments.every((seg, idx) => deepFocusTarget.segments![idx] === seg)
     ) {
+      handledFocusTokenRef.current = deepFocusTarget.token;
       setJsonMode(false);
     }
   }, [deepFocusTarget?.segments, deepFocusTarget?.token, field.segments, treeEligible]);
@@ -1390,27 +1430,46 @@ export function NestedObjectTree({
   const [newType, setNewType] = useState<NewChildType>("string");
   const [kvError, setKvError] = useState<string>();
   const [highlightedPath, setHighlightedPath] = useState<string>();
+  const basePath = formatSegmentPath(baseSegments);
+  const baseSegmentsRef = useRef(baseSegments);
+  baseSegmentsRef.current = baseSegments;
+  const handledFocusTokenRef = useRef<number>();
+  const highlightTimerRef = useRef<number>();
 
-  // Auto-expand ancestor node whenever Ctrl+K deep jump targets a descendant path.
+  useEffect(() => () => {
+    if (highlightTimerRef.current !== undefined) {
+      window.clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = undefined;
+    }
+  }, []);
+
+  // Auto-expand ancestor node once per deepFocusTarget token whenever Ctrl+K targets a descendant path.
   useEffect(() => {
     if (!deepFocusTarget?.segments?.length) return;
-    const baseLen = baseSegments.length;
+    if (handledFocusTokenRef.current === deepFocusTarget.token) return;
+    const currentBase = baseSegmentsRef.current;
+    const baseLen = currentBase.length;
     if (
       deepFocusTarget.segments.length <= baseLen
-      || !baseSegments.every((seg, idx) => deepFocusTarget.segments![idx] === seg)
+      || !currentBase.every((seg, idx) => deepFocusTarget.segments![idx] === seg)
     ) {
       return;
     }
+    handledFocusTokenRef.current = deepFocusTarget.token;
     const childSeg = deepFocusTarget.segments[baseLen];
     if (typeof childSeg === "string") {
       setExpandedNodes((prev) => (prev[childSeg] ? prev : { ...prev, [childSeg]: true }));
     }
-    setHighlightedPath(deepFocusTarget.path);
-    const timer = window.setTimeout(() => {
-      setHighlightedPath((current) => (current === deepFocusTarget.path ? undefined : current));
+    const targetPath = deepFocusTarget.path;
+    setHighlightedPath(targetPath);
+    if (highlightTimerRef.current !== undefined) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(() => {
+      highlightTimerRef.current = undefined;
+      setHighlightedPath((current) => (current === targetPath ? undefined : current));
     }, 2_600);
-    return () => window.clearTimeout(timer);
-  }, [deepFocusTarget?.path, deepFocusTarget?.segments, deepFocusTarget?.token, baseSegments]);
+  }, [deepFocusTarget?.path, deepFocusTarget?.segments, deepFocusTarget?.token, basePath]);
 
   function emitWithEntries(nextEntries: Array<[string, unknown]>, clearSubErrorPrefix?: string): void {
     const next: Record<string, unknown> = {};
@@ -1528,7 +1587,7 @@ export function NestedObjectTree({
                     class="nested-node__toggle"
                     aria-expanded={expanded}
                     onClick={() => {
-                      if (expanded && exceedsDepth) onSubError?.(childPath, undefined);
+                      if (expanded) onSubError?.(childPath, undefined);
                       setExpandedNodes((prev) => ({ ...prev, [key]: !expanded }));
                     }}
                   >
@@ -1827,20 +1886,25 @@ function DeepJsonFallbackBlock({
   const [parseError, setParseError] = useState<string>();
   const lastEmittedValueRef = useRef<unknown>(value);
   const lastSyncVersionRef = useRef<number>(externalSyncVersion);
+  const parseErrorRef = useRef<string | undefined>(parseError);
+  parseErrorRef.current = parseError;
+  const onErrorChangeRef = useRef(onErrorChange);
+  onErrorChangeRef.current = onErrorChange;
 
   useEffect(() => {
-    // External history/reset/switch always overwrites any stale local draft or parseError.
-    if (externalSyncVersion !== lastSyncVersionRef.current) {
-      lastSyncVersionRef.current = externalSyncVersion;
-      lastEmittedValueRef.current = value;
-      setText(JSON.stringify(value, null, 2));
-      setParseError(undefined);
-      return;
-    }
-    if (value === lastEmittedValueRef.current) return;
+    // External history/reset/switch or genuine external value replacement
+    // overwrites stale local draft/parseError and clears any lingering parent subError.
+    const syncChanged = externalSyncVersion !== lastSyncVersionRef.current;
+    const valueChanged = value !== lastEmittedValueRef.current;
+    if (!syncChanged && !valueChanged) return;
+    lastSyncVersionRef.current = externalSyncVersion;
     lastEmittedValueRef.current = value;
     setText(JSON.stringify(value, null, 2));
     setParseError(undefined);
+    if (parseErrorRef.current !== undefined) {
+      parseErrorRef.current = undefined;
+      onErrorChangeRef.current?.(undefined);
+    }
   }, [value, externalSyncVersion]);
 
   if (sensitive && !revealed) {
@@ -1892,11 +1956,13 @@ function DeepJsonFallbackBlock({
           setText(nextText);
           try {
             const parsed = JSON.parse(nextText);
+            parseErrorRef.current = undefined;
             setParseError(undefined);
             lastEmittedValueRef.current = parsed;
             onChange(parsed);
           } catch {
             const errMsg = t("structured.treeJsonInvalid");
+            parseErrorRef.current = errMsg;
             setParseError(errMsg);
             onErrorChange?.(errMsg);
           }

@@ -564,20 +564,35 @@ function extractObjectItemSchema(
       : undefined;
   if (!unionBranches?.length) return undefined;
 
-  const objectBranches = unionBranches
-    .filter(isRecord)
-    .map((branch) => resolveSchema(branch, rootSchema, resolutionCtx))
-    .filter((branch) => isRecord(branch.properties) && Object.keys(branch.properties).length > 0);
+  const objectBranches: JsonSchema[] = [];
+  for (const branch of unionBranches) {
+    if (resolutionCtx.steps >= MAX_RESOLUTION_STEPS) {
+      resolutionCtx.truncated = true;
+      break;
+    }
+    resolutionCtx.steps += 1;
+    if (!isRecord(branch)) continue;
+    const resolved = resolveSchema(branch, rootSchema, resolutionCtx);
+    if (isRecord(resolved.properties) && Object.keys(resolved.properties).length > 0) {
+      objectBranches.push(resolved);
+    }
+    if (resolutionCtx.truncated) break;
+  }
   if (!objectBranches.length) return undefined;
 
   const mergedProperties: Record<string, unknown> = {};
-  const requiredSets = objectBranches.map((branch) =>
-    new Set(Array.isArray(branch.required) ? branch.required.filter((r): r is string => typeof r === "string") : []),
-  );
-  const commonRequired = [...(requiredSets[0] ?? [])].filter((key) =>
-    requiredSets.every((set) => set.has(key)),
-  );
+  let commonRequiredSet: Set<string> | undefined;
   for (const branch of objectBranches) {
+    const branchRequired = new Set(
+      Array.isArray(branch.required) ? branch.required.filter((r): r is string => typeof r === "string") : [],
+    );
+    if (commonRequiredSet === undefined) {
+      commonRequiredSet = branchRequired;
+    } else {
+      for (const key of commonRequiredSet) {
+        if (!branchRequired.has(key)) commonRequiredSet.delete(key);
+      }
+    }
     for (const [k, v] of Object.entries(branch.properties as Record<string, unknown>)) {
       if (!isForbiddenKey(k) && !(k in mergedProperties)) {
         mergedProperties[k] = v;
@@ -587,7 +602,7 @@ function extractObjectItemSchema(
   return {
     type: "object",
     properties: mergedProperties,
-    required: commonRequired,
+    required: [...(commonRequiredSet ?? [])],
   };
 }
 
@@ -691,16 +706,48 @@ function mergeAllOf(
   if (ctx.truncated) return schema;
   if (!Array.isArray(schema.allOf)) return schema;
   const { allOf, ...rest } = schema;
-  let merged: JsonSchema = rest;
+  const merged: JsonSchema = { ...rest };
+  let mergedProps: Record<string, unknown> | undefined;
+  if (isRecord(rest.properties)) {
+    mergedProps = {};
+    for (const [k, v] of Object.entries(rest.properties)) {
+      if (!isForbiddenKey(k)) mergedProps[k] = v;
+    }
+  }
+  let mergedRequired: Set<string> | undefined;
+  if (Array.isArray(rest.required)) {
+    mergedRequired = new Set(rest.required.filter((item): item is string => typeof item === "string"));
+  }
+
   for (const item of allOf) {
     if (ctx.steps >= MAX_RESOLUTION_STEPS) {
       ctx.truncated = true;
       break;
     }
+    ctx.steps += 1;
     if (!isRecord(item)) continue;
     const child = resolveSchema(item, root, ctx, visited, depth + 1, cycleTracker);
-    merged = mergeSchemaObjects(merged, child);
+    for (const [k, v] of Object.entries(child)) {
+      if (k === "properties" || k === "required" || isForbiddenKey(k)) continue;
+      merged[k] = v;
+    }
+    if (isRecord(child.properties)) {
+      if (!mergedProps) mergedProps = {};
+      for (const [k, v] of Object.entries(child.properties)) {
+        if (!isForbiddenKey(k)) mergedProps[k] = v;
+      }
+    }
+    if (Array.isArray(child.required)) {
+      if (!mergedRequired) mergedRequired = new Set();
+      for (const req of child.required) {
+        if (typeof req === "string") mergedRequired.add(req);
+      }
+    }
+    if (ctx.truncated) break;
   }
+
+  if (mergedProps) merged.properties = mergedProps;
+  if (mergedRequired) merged.required = [...mergedRequired];
   return merged;
 }
 
@@ -729,10 +776,12 @@ function mergeOneOrAnyOf(
       ctx.truncated = true;
       break;
     }
+    ctx.steps += 1;
     if (!isRecord(branch)) continue;
     resolvedBranches.push(resolveSchema(branch, root, ctx, visited, depth + 1, cycleTracker));
+    if (ctx.truncated) break;
   }
-  if (!resolvedBranches.length) return schema;
+  if (ctx.truncated || !resolvedBranches.length) return schema;
 
   const nonNullBranches = resolvedBranches.filter((branch) => !isNullOnlySchema(branch));
   if (!nonNullBranches.length) return schema;
@@ -746,6 +795,7 @@ function mergeOneOrAnyOf(
 
   // All non-null branches enumerate scalar string/number values via `const` or `enum`.
   const collectedEnums: Array<string | number> = [];
+  const seenEnums = new Set<string | number>();
   let allScalarEnums = true;
   for (const branch of nonNullBranches) {
     const values = extractScalarEnumValues(branch);
@@ -753,8 +803,11 @@ function mergeOneOrAnyOf(
       allScalarEnums = false;
       break;
     }
+    if (collectedEnums.length >= MAX_SCHEMA_ENUM_VALUES) continue;
     for (const item of values) {
-      if (!collectedEnums.some((existing) => Object.is(existing, item))) {
+      if (collectedEnums.length >= MAX_SCHEMA_ENUM_VALUES) break;
+      if (!seenEnums.has(item)) {
+        seenEnums.add(item);
         collectedEnums.push(item);
       }
     }
@@ -762,7 +815,7 @@ function mergeOneOrAnyOf(
   if (allScalarEnums && collectedEnums.length > 0) {
     return {
       ...base,
-      enum: collectedEnums.slice(0, MAX_SCHEMA_ENUM_VALUES),
+      enum: collectedEnums,
     };
   }
 
@@ -783,7 +836,13 @@ function mergeOneOrAnyOf(
 }
 
 function mergeSchemaObjects(base: JsonSchema, override: JsonSchema): JsonSchema {
-  const merged: JsonSchema = { ...base, ...override };
+  const merged: JsonSchema = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (!isForbiddenKey(k)) merged[k] = v;
+  }
+  for (const [k, v] of Object.entries(override)) {
+    if (!isForbiddenKey(k)) merged[k] = v;
+  }
   if (isRecord(base.properties) || isRecord(override.properties)) {
     const mergedProps: Record<string, unknown> = {};
     if (isRecord(base.properties)) {

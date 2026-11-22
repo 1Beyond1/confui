@@ -6,7 +6,13 @@ import type { ConfigFormat, Locale, PathSegment } from "../../shared/schema.ts";
 import { isForbiddenKey, PEM_BEGIN_RE } from "../../shared/validation.ts";
 import { stripBom } from "../formats/common.ts";
 import { splitEnvValueAndComment } from "../formats/env.ts";
-import { matchIniAssignment, matchIniSectionHeader, parseIniSection, splitIniValueAndComment } from "../formats/ini.ts";
+import {
+  isSensitiveIniAssignment,
+  matchIniAssignment,
+  matchIniSectionHeader,
+  parseIniSection,
+  splitIniValueAndComment,
+} from "../formats/ini.ts";
 import { groupPropertyLines, joinPropertyLines, unescapeProperty } from "../formats/properties.ts";
 import { scanTomlLines } from "../formats/toml.ts";
 import { parseYamlDocuments } from "../formats/yaml.ts";
@@ -570,7 +576,11 @@ function extractIniComments(source: string): RawCommentEntry[] {
       const key = rawKey.length > 2 && rawKey.endsWith("[]") ? rawKey.slice(0, -2) : rawKey;
       if (key) {
         const leading = pending.length ? pending.join("\n") : undefined;
-        const rawComment = splitIniValueAndComment(assignment.rawValue).comment;
+        // Never treat `;` or `#` tails on sensitive INI / `.npmrc` assignment lines
+        // (e.g. `//host/:_authToken=a;b` or `_authToken=a;b`) as trailing comments.
+        const rawComment = isSensitiveIniAssignment(assignment.rawKey, section)
+          ? ""
+          : splitIniValueAndComment(assignment.rawValue).comment;
         const trailing = rawComment ? rawComment.replace(/^\s*[#;]/, "") : undefined;
         if (leading || trailing) {
           entries.push({ segments: [...section, key], leading, trailing });

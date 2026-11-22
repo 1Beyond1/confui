@@ -1358,6 +1358,8 @@ export function App() {
           <RestoreBackupModal
             preview={restorePreview}
             fields={schema?.file === restorePreview.file ? allFields : undefined}
+            documentSecrets={schema?.file === restorePreview.file ? schema.documentSecrets : undefined}
+            activeDocumentIndex={schema?.file === restorePreview.file ? schema.activeDocumentIndex : undefined}
             restoring={busy === "restore"}
             onClose={() => { if (busy !== "restore") setRestorePreview(undefined); }}
             onConfirm={() => void confirmRestoreBackup()}
