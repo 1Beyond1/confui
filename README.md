@@ -4,7 +4,13 @@
 
 Confui 是一个 Windows x64 桌面配置编辑器。选择本地项目后，它会发现配置文件、组合项目中的 Schema / 内置模板 / 示例 / README / 可选 AI 信息，并把字段转换成可校验、支持撤销重做与差异核对的桌面表单。用户确认逐字段差异或 Unified Diff 源码差异后，Confui 才会原子写回原文件并保留 `.bak` 备份（支持一键回滚）。设置页支持切换中英文界面与手动检查 GitHub Release 更新。
 
-![Confui 配置编辑器界面](assets/confui-preview.png)
+![Confui v0.4.0 桌面配置编辑器主界面](assets/confui-preview.png)
+
+<p align="center"><em>Confui v0.4.0 桌面表单编辑器（浅色主题 · 多层推断来源标注 · 支持一键从 <code>.bak</code> 恢复）</em></p>
+
+| 保存确认与 Unified Diff 源码差异预览 | 深色主题与英文界面 |
+| :---: | :---: |
+| ![Confui v0.4.0 保存确认与 Unified Diff 源码差异预览](assets/confui-unified-diff.png) | ![Confui v0.4.0 深色主题与英文界面](assets/confui-dark-en.png) |
 
 ## 社区
 

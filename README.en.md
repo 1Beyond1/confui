@@ -4,7 +4,13 @@
 
 Confui is a Windows x64 desktop configuration editor. Point it at a local project folder and it discovers editable configuration files, merges metadata from JSON Schema, built-in templates, example files, READMEs, and optional AI providers, and presents a validated desktop form with undo/redo, visual array/object editing, and diff confirmation. Changes are only written after you review the field-level diff or Unified Diff, with automatic `.bak` backups and one-click rollback.
 
-![Confui Configuration Editor UI](assets/confui-preview.png)
+![Confui v0.4.0 Desktop Configuration Editor](assets/confui-preview.png)
+
+<p align="center"><em>Confui v0.4.0 desktop form editor (Light theme · multi-layer inference badges · one-click <code>.bak</code> restore)</em></p>
+
+| Save Confirmation & Unified Diff Preview | Dark Theme & English UI |
+| :---: | :---: |
+| ![Confui v0.4.0 Save Confirmation and Unified Diff Preview](assets/confui-unified-diff.png) | ![Confui v0.4.0 Dark Theme and English UI](assets/confui-dark-en.png) |
 
 ## Community
 
