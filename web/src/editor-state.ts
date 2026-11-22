@@ -329,3 +329,34 @@ function deepEqual(left: unknown, right: unknown): boolean {
     return false;
   }
 }
+
+/**
+ * Returns true when keyboard focus or event target resides inside a native text
+ * editing element (`<input>`, `<textarea>`, or `[contenteditable]`) so global
+ * `Ctrl+Z` / `Ctrl+Y` undo shortcuts never hijack native input editing.
+ */
+export function isEditableKeyboardTarget(target: unknown): boolean {
+  if (!target || typeof target !== "object") return false;
+  const node = target as {
+    tagName?: unknown;
+    isContentEditable?: unknown;
+    parentElement?: unknown;
+    closest?: (selector: string) => unknown;
+    getAttribute?: (name: string) => string | null;
+  };
+  const element = typeof node.tagName === "string" ? node : (node.parentElement as typeof node | undefined);
+  if (!element || typeof element !== "object") return false;
+  const tag = typeof element.tagName === "string" ? element.tagName.toUpperCase() : "";
+  if (tag === "INPUT" || tag === "TEXTAREA") return true;
+  if (element.isContentEditable === true) return true;
+  if (typeof element.getAttribute === "function") {
+    const attr = element.getAttribute("contenteditable");
+    if (attr !== null && attr.toLowerCase() !== "false") return true;
+  }
+  if (typeof element.closest === "function") {
+    if (element.closest('input, textarea, [contenteditable]:not([contenteditable="false"])')) {
+      return true;
+    }
+  }
+  return false;
+}

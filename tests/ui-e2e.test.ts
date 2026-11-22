@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { computeUnifiedDiff, formatUnifiedDiffText } from "../shared/diff.ts";
+import { computeUnifiedDiff, DIFF_SECRET_MASK, formatUnifiedDiffText, maskUnifiedDiff } from "../shared/diff.ts";
 import type { FieldSpec } from "../shared/schema.ts";
 import {
   isForbiddenKey,
@@ -16,6 +16,7 @@ import {
   createCustomFieldSpec,
   createJsonDraft,
   initialFieldEditorValue,
+  isEditableKeyboardTarget,
   isFieldModified,
   isFlatScalarObject,
   isScalarArray,
@@ -57,6 +58,63 @@ describe("UI state, diff, validation & i18n integration", () => {
     expect(text).toContain("+port = 8080");
     expect(text).toContain("+timeout = 30");
     expect(computeUnifiedDiff(before, before).hunks).toEqual([]);
+  });
+
+  it("masks secret values in Unified Diff hunks without hiding modified secret lines", () => {
+    const before = [
+      'API_KEY="sk-old-secret-1234567890"',
+      "DATABASE_URL=postgres://admin:oldpass@db.local/app # primary db",
+      "vaultCode=old-vault-pin",
+      "PORT=3000",
+    ].join("\n") + "\n";
+    const after = [
+      'API_KEY="sk-new-secret-9876543210"',
+      "DATABASE_URL=postgres://admin:newpass@db.local/app # primary db",
+      "vaultCode=new-vault-pin",
+      "PORT=8080",
+    ].join("\n") + "\n";
+
+    const rawDiff = computeUnifiedDiff(before, after, 1);
+    const { diff, maskedLineCount } = maskUnifiedDiff(rawDiff, {
+      secretKeys: ["vaultCode"],
+      secretValues: ["old-vault-pin", "new-vault-pin"],
+    });
+
+    expect(maskedLineCount).toBeGreaterThanOrEqual(6);
+    const rendered = diff.hunks.flatMap((h) => h.lines.map((l) => `${l.kind}:${l.text}`)).join("\n");
+    expect(rendered).not.toContain("sk-old-secret");
+    expect(rendered).not.toContain("sk-new-secret");
+    expect(rendered).not.toContain("oldpass");
+    expect(rendered).not.toContain("newpass");
+    expect(rendered).not.toContain("old-vault-pin");
+    expect(rendered).not.toContain("new-vault-pin");
+    expect(rendered).toContain(`remove:API_KEY="${DIFF_SECRET_MASK}"`);
+    expect(rendered).toContain(`add:API_KEY="${DIFF_SECRET_MASK}"`);
+    expect(rendered).toContain(`remove:vaultCode=${DIFF_SECRET_MASK}`);
+    expect(rendered).toContain(`add:vaultCode=${DIFF_SECRET_MASK}`);
+    expect(rendered).toContain("# primary db");
+    expect(rendered).toContain("remove:PORT=3000");
+    expect(rendered).toContain("add:PORT=8080");
+
+    // YAML block scalar secret masking
+    const yamlBefore = "ssh_private_key: |\n  line-secret-1\n  line-secret-2\nsafe: ok\n";
+    const yamlAfter = "ssh_private_key: |\n  line-secret-3\n  line-secret-2\nsafe: ok\n";
+    const yamlMasked = maskUnifiedDiff(computeUnifiedDiff(yamlBefore, yamlAfter, 3));
+    const yamlLines = yamlMasked.diff.hunks.flatMap((h) => h.lines.map((l) => l.text)).join("\n");
+    expect(yamlLines).not.toContain("line-secret");
+    expect(yamlLines).toContain(`  ${DIFF_SECRET_MASK}`);
+    expect(yamlLines).toContain("safe: ok");
+  });
+
+  it("excludes input, textarea and contenteditable targets from global Ctrl+Z/Y hijacking", () => {
+    expect(isEditableKeyboardTarget({ tagName: "INPUT" })).toBe(true);
+    expect(isEditableKeyboardTarget({ tagName: "textarea" })).toBe(true);
+    expect(isEditableKeyboardTarget({ tagName: "DIV", isContentEditable: true })).toBe(true);
+    expect(isEditableKeyboardTarget({ tagName: "DIV", getAttribute: () => "true" })).toBe(true);
+    expect(isEditableKeyboardTarget({ tagName: "DIV", getAttribute: () => "false" })).toBe(false);
+    expect(isEditableKeyboardTarget({ tagName: "BUTTON" })).toBe(false);
+    expect(isEditableKeyboardTarget({ tagName: "SPAN", parentElement: { tagName: "INPUT" }, closest: () => ({}) })).toBe(true);
+    expect(isEditableKeyboardTarget(null)).toBe(false);
   });
 
   it("enforces shared validation rules for colors, prototype keys and GitHub URLs", () => {

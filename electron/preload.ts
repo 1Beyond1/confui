@@ -7,6 +7,7 @@ import type {
   FieldAssistField,
   FileVersion,
   InferOptions,
+  Locale,
   RestoreBackupPreview,
   SavePreview,
   TestAIRequest,
@@ -17,8 +18,8 @@ const api: ConfuiAPI = {
   scanProject: (root: string, githubUrl?: string) => ipcRenderer.invoke("confui:scanProject", root, githubUrl),
   inferSchema: (root: string, file: string, options?: InferOptions) =>
     ipcRenderer.invoke("confui:inferSchema", root, file, options),
-  explainField: (root: string, file: string, field: FieldAssistField, githubUrl?: string) =>
-    ipcRenderer.invoke("confui:explainField", root, file, field, githubUrl),
+  explainField: (root: string, file: string, field: FieldAssistField, githubUrl?: string, locale?: Locale) =>
+    ipcRenderer.invoke("confui:explainField", root, file, field, githubUrl, locale),
   previewSave: (root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion) =>
     ipcRenderer.invoke("confui:previewSave", root, file, changes, expectedVersion),
   saveConfig: (root: string, preview: SavePreview) =>

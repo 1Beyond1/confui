@@ -475,6 +475,59 @@ describe("inference pipeline", () => {
     expect(prompts[0]).toContain("3000");
   });
 
+  it("propagates en-US locale to explainField and inferAIFields prompts", async () => {
+    const explainMessages: string[] = [];
+    const explainResult = await explainField({
+      provider: {
+        async chat(messages) {
+          explainMessages.push(messages.map((m) => m.content).join("\n"));
+          return JSON.stringify({
+            explanation: "Controls the HTTP server listening port.",
+            recommendation: "Use 3000 for local development.",
+          });
+        },
+      },
+      file: "config.json",
+      format: "json",
+      field: {
+        segments: ["server", "port"],
+        label: "Port",
+        type: "integer",
+      },
+      maskedValue: 3000,
+      readmeContext: "",
+      exampleContext: "",
+      locale: "en-US",
+    });
+
+    expect(explainResult.explanation).toBe("Controls the HTTP server listening port.");
+    expect(explainMessages[0]).toContain("Explain concisely in English");
+    expect(explainMessages[0]).not.toMatch(/[\u4e00-\u9fff]/);
+
+    const inferMessages: string[] = [];
+    const inferred = await inferAIFields({
+      provider: {
+        async chat(messages) {
+          inferMessages.push(messages.map((m) => m.content).join("\n"));
+          return JSON.stringify({
+            fields: [{ path: "server.port", label: "Port", description: "HTTP listening port." }],
+          });
+        },
+      },
+      file: "config.json",
+      format: "json",
+      maskedValue: { server: { port: 3000 } },
+      availablePaths: [["server", "port"]],
+      readmeContext: "",
+      exampleContext: "",
+      locale: "en-US",
+    });
+
+    expect(inferMessages[0]).toContain("Available field paths:");
+    expect(inferMessages[0]).not.toMatch(/[\u4e00-\u9fff]/);
+    expect(inferred[0]?.detail).toBe("Analyzed by your configured AI provider");
+  });
+
   it("limits pathological field counts before rendering the form", async () => {
     const root = await mkdtemp(join(tmpdir(), "confui-infer-large-form-"));
     temporaryDirectories.push(root);

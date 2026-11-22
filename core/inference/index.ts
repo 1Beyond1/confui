@@ -95,12 +95,14 @@ export async function inferConfig(
         availablePaths: unresolvedPaths,
         readmeContext: maskDocumentSecrets(readme.text),
         exampleContext: examples.context,
+        locale,
       }));
     } catch (error) {
-      warnings.push(`AI 分析已跳过：${error instanceof Error ? error.message : String(error)}`);
+      const prefix = locale === "en-US" ? "AI analysis skipped: " : "AI 分析已跳过：";
+      warnings.push(`${prefix}${error instanceof Error ? error.message : String(error)}`);
     }
   } else if (options.ai && version.size > AI_FILE_LIMIT && unresolvedPaths.length) {
-    warnings.push("文件超过 1 MB，已跳过 AI 分析");
+    warnings.push(locale === "en-US" ? "File exceeds 1 MB; AI analysis was skipped." : "文件超过 1 MB，已跳过 AI 分析");
   }
 
   const merged = mergeCandidates(candidates);

@@ -276,23 +276,45 @@ function registerIpcHandlers(): void {
     return schema;
   });
 
-  handle("confui:explainField", async (_event, root: unknown, file: unknown, field: unknown, githubUrl?: unknown) => {
+  handle("confui:explainField", async (_event, root: unknown, file: unknown, field: unknown, githubUrl?: unknown, locale?: unknown) => {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
     assertOptionalString(githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
-    if (!isFieldAssistField(field)) throw new ConfuiError("INVALID_INPUT", "字段助手参数无效");
+    if (locale !== undefined && locale !== "zh-CN" && locale !== "en-US") {
+      throw new ConfuiError("INVALID_INPUT", currentLocale === "en-US" ? "Invalid locale parameter" : "语言参数无效");
+    }
+    const requestedLocale: Locale | undefined = locale === "en-US" || locale === "zh-CN" ? locale : undefined;
+    if (!isFieldAssistField(field)) {
+      throw new ConfuiError(
+        "INVALID_INPUT",
+        (requestedLocale ?? currentLocale) === "en-US" ? "Invalid field assistant request" : "字段助手参数无效",
+      );
+    }
 
     return withFieldAssistSlot(async () => {
       const settings = await settingsStore.load();
+      const effectiveLocale: Locale = requestedLocale ?? settings.locale;
+      const isEn = effectiveLocale === "en-US";
       if (!settings.ai.enabled || !settings.ai.baseUrl.trim() || !settings.ai.model.trim()) {
-        throw new ConfuiError("AI_ERROR", "请先在设置中启用并配置 AI 服务");
+        throw new ConfuiError(
+          "AI_ERROR",
+          isEn ? "Enable and configure an AI provider in Settings first" : "请先在设置中启用并配置 AI 服务",
+        );
       }
       const resolved = await resolveExistingProjectPath(root, file);
       const format = detectFormat(file);
-      if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
+      if (!format) {
+        throw new ConfuiError(
+          "INVALID_INPUT",
+          isEn ? "Unsupported configuration file format" : "不支持这个配置文件格式",
+        );
+      }
       const snapshot = await readTextSnapshot(resolved.path);
       if (snapshot.version.size > AI_FILE_LIMIT) {
-        throw new ConfuiError("AI_ERROR", "文件超过 1 MB，暂不提供 AI 字段解释");
+        throw new ConfuiError(
+          "AI_ERROR",
+          isEn ? "File exceeds 1 MB; AI field explanation is unavailable" : "文件超过 1 MB，暂不提供 AI 字段解释",
+        );
       }
       assertEditableSyntax(file, snapshot.text);
       const parsed = parseConfig(snapshot.text, format);
@@ -321,8 +343,9 @@ function registerIpcHandlers(): void {
         maskedValue,
         readmeContext: maskDocumentSecrets(readme.text),
         exampleContext: examples.context,
+        locale: effectiveLocale,
       });
-    });
+    }, requestedLocale ?? currentLocale);
   });
 
   handle(
@@ -450,9 +473,14 @@ function handle<T>(
   });
 }
 
-async function withFieldAssistSlot<T>(operation: () => Promise<T>): Promise<T> {
+async function withFieldAssistSlot<T>(operation: () => Promise<T>, locale: Locale = currentLocale): Promise<T> {
   if (fieldAssistInFlight >= MAX_FIELD_ASSIST_CONCURRENCY) {
-    throw new ConfuiError("AI_ERROR", "当前正在处理其他字段的 AI 解读，请稍后再试");
+    throw new ConfuiError(
+      "AI_ERROR",
+      locale === "en-US"
+        ? "Other field explanations are in progress; please try again shortly"
+        : "当前正在处理其他字段的 AI 解读，请稍后再试",
+    );
   }
   fieldAssistInFlight += 1;
   try {

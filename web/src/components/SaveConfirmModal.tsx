@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import type { ConfigFormSchema, FieldSpec, SavePreview } from "../../../shared/schema.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
@@ -25,7 +25,35 @@ export function SaveConfirmModal({
 }) {
   const { locale, t } = useI18n();
   const [tab, setTab] = useState<DiffTab>("fields");
+  const [revealSecrets, setRevealSecrets] = useState(false);
   const fields = allFields ?? schema?.fields ?? [];
+
+  useEffect(() => {
+    setRevealSecrets(false);
+  }, [savePreview]);
+
+  const { secretKeys, secretValues } = useMemo(() => {
+    const keys = new Set<string>();
+    const values = new Set<string>();
+    const pushValue = (value: unknown) => {
+      if (typeof value === "string" && value.length >= 6) values.add(value);
+    };
+    const secretPaths = new Set<string>();
+    for (const field of fields) {
+      if (!field.secret && field.type !== "secret") continue;
+      secretPaths.add(field.path);
+      keys.add(field.path);
+      const leaf = field.segments.at(-1);
+      if (typeof leaf === "string" && leaf.trim()) keys.add(leaf);
+      pushValue(field.value);
+    }
+    for (const change of savePreview.changes) {
+      if (!secretPaths.has(change.path)) continue;
+      pushValue(change.before);
+      pushValue(change.after);
+    }
+    return { secretKeys: [...keys], secretValues: [...values] };
+  }, [fields, savePreview.changes]);
 
   return (
     <Modal
@@ -49,27 +77,40 @@ export function SaveConfirmModal({
         </div>
       ))}
 
-      <div class="save-diff-tabs" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "fields"}
-          class={tab === "fields" ? "active" : ""}
-          onClick={() => setTab("fields")}
-        >
-          <Icon name="layers" size={14}/>
-          <span>{t("saveModal.tabFields", { count: savePreview.changes.length })}</span>
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "unified"}
-          class={tab === "unified" ? "active" : ""}
-          onClick={() => setTab("unified")}
-        >
-          <Icon name="code" size={14}/>
-          <span>{t("saveModal.tabUnified")}</span>
-        </button>
+      <div class="save-diff-toolbar">
+        <div class="save-diff-tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "fields"}
+            class={tab === "fields" ? "active" : ""}
+            onClick={() => setTab("fields")}
+          >
+            <Icon name="layers" size={14}/>
+            <span>{t("saveModal.tabFields", { count: savePreview.changes.length })}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "unified"}
+            class={tab === "unified" ? "active" : ""}
+            onClick={() => setTab("unified")}
+          >
+            <Icon name="code" size={14}/>
+            <span>{t("saveModal.tabUnified")}</span>
+          </button>
+        </div>
+        {tab === "unified" && (
+          <button
+            type="button"
+            class="save-diff-secret-btn"
+            aria-pressed={revealSecrets}
+            onClick={() => setRevealSecrets((current) => !current)}
+          >
+            <Icon name={revealSecrets ? "eye-off" : "eye"} size={14}/>
+            <span>{revealSecrets ? t("diff.hideSecrets") : t("diff.showSecrets")}</span>
+          </button>
+        )}
       </div>
 
       {tab === "fields" ? (
@@ -110,6 +151,9 @@ export function SaveConfirmModal({
           oldText={schema?.rawText ?? ""}
           newText={savePreview.output}
           fileName={savePreview.file}
+          maskSecrets={!revealSecrets}
+          secretKeys={secretKeys}
+          secretValues={secretValues}
         />
       )}
     </Modal>

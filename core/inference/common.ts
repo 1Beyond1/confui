@@ -1,41 +1,8 @@
 import type { FieldType, PathSegment } from "../../shared/schema.ts";
-import { isHexColor, setSafeProperty } from "../../shared/validation.ts";
+import { isHexColor, SECRET_KEY_FRAGMENT, SECRET_KEY_PATTERN, setSafeProperty } from "../../shared/validation.ts";
 import { formatPath } from "../paths.ts";
 
-export const SECRET_KEY_FRAGMENT = [
-  "password",
-  "passwd",
-  "pwd",
-  "passphrase",
-  "secret",
-  "token",
-  "api[\\s_-]?key",
-  "private[\\s_-]?key",
-  "app[\\s_-]?key",
-  "master[\\s_-]?key",
-  "encryption[\\s_-]?key",
-  "cipher[\\s_-]?key",
-  "hmac[\\s_-]?key",
-  "aes[\\s_-]?key",
-  "ssh[\\s_-]?key",
-  "tls[\\s_-]?key",
-  "ssl[\\s_-]?key",
-  "credential",
-  "auth(?:orization)?",
-  "cookie",
-  "jwt",
-  "session[\\s_-]?key",
-  "signing[\\s_-]?key",
-  "client[\\s_-]?secret",
-  "access[\\s_-]?key",
-  "database[\\s_-]?url",
-  "connection[\\s_-]?string",
-  "dsn",
-  "webhook[\\s_-]?(?:url|secret)",
-  "(?:openai|anthropic|google|gemini|stripe|slack)[\\s_-]?key",
-].join("|");
-
-const SECRET_KEY_PATTERN = new RegExp(SECRET_KEY_FRAGMENT, "i");
+export { SECRET_KEY_FRAGMENT };
 
 export function humanize(value: string): string {
   const spaced = value

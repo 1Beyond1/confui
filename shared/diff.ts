@@ -1,4 +1,22 @@
+import { SECRET_KEY_FRAGMENT } from "./validation.ts";
+
 export type DiffLineKind = "context" | "add" | "remove";
+
+export const DIFF_SECRET_MASK = "••••••••";
+
+export interface MaskUnifiedDiffOptions {
+  /** Extra key names (e.g. leaf names or paths of schema-marked secret fields). */
+  secretKeys?: readonly string[];
+  /** Explicit known secret values (length >= 6) used as fallback redaction for multi-line values. */
+  secretValues?: readonly string[];
+  /** Replacement mask string (defaults to `••••••••`). */
+  mask?: string;
+}
+
+export interface MaskedUnifiedDiffResult {
+  diff: UnifiedDiffResult;
+  maskedLineCount: number;
+}
 
 export interface DiffLine {
   kind: DiffLineKind;
@@ -204,4 +222,204 @@ function groupIntoHunks(ops: readonly DiffLine[], contextLines: number): DiffHun
       lines: slice,
     };
   });
+}
+
+const DEFAULT_SECRET_KEY_RE = new RegExp(SECRET_KEY_FRAGMENT, "i");
+const PEM_BEGIN_RE = /-----BEGIN (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----/;
+const PEM_END_RE = /-----END (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----/;
+const URL_CREDENTIALS_RE = /(\b[a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^/\s]+)@/gi;
+const AUTH_SCHEME_RE = /(\b(?:Bearer|Basic|Digest)\s+)[^\s"',;]+/gi;
+const INLINE_KEY_VALUE_SECRET_RE = new RegExp(
+  `(["']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*[=:]\\s*)("[^"\\\\]*(?:\\\\.[^"\\\\]*)*"|'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'|\`[^\`]*\`|[^\\s,;}\\]#]+)`,
+  "gi",
+);
+const VENDOR_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]{12,}|sk_(?:live|test)_[A-Za-z0-9]{12,}|gsk_[A-Za-z0-9_-]{12,}|g2a_[A-Za-z0-9_-]{12,}|ark-[A-Za-z0-9-]{16,}|xai-[A-Za-z0-9_-]{12,}|pplx-[A-Za-z0-9_-]{12,}|gh[opsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|hf_[A-Za-z0-9]{12,}|r8_[A-Za-z0-9]{12,}|npm_[A-Za-z0-9]{20,})\b/g;
+const SLACK_WEBHOOK_RE = /\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/gi;
+const JWT_TOKEN_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+const YAML_BLOCK_SCALAR_RE = /^[|>](?:[-+]?\d*|\d*[-+])?(?:\s+#.*)?$/;
+const KV_LINE_RE = /^(\s*(?:export\s+|-\s+)?)((?:"[^"]*"|'[^']*'|[^:=#\r\n]+?))(\s*[:=]\s*)(.*)$/;
+
+/**
+ * Redacts sensitive values inside computed Unified Diff hunks AFTER diffing, so
+ * changed secret lines remain visible as `-` / `+` hunks without exposing
+ * plaintext credentials during screen sharing or review.
+ */
+export function maskUnifiedDiff(
+  diff: UnifiedDiffResult,
+  options: MaskUnifiedDiffOptions = {},
+): MaskedUnifiedDiffResult {
+  const mask = options.mask ?? DIFF_SECRET_MASK;
+  const extraKeys = new Set(
+    (options.secretKeys ?? [])
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const extraValues = [...new Set((options.secretValues ?? []).filter((v) => v.length >= 6))]
+    .sort((left, right) => right.length - left.length);
+
+  let maskedLineCount = 0;
+  const hunks: DiffHunk[] = diff.hunks.map((hunk) => {
+    let yamlBlockIndent: number | undefined;
+    let inPemBlock = false;
+    const lines = hunk.lines.map((line) => {
+      const result = maskDiffLine(line.text, {
+        mask,
+        extraKeys,
+        extraValues,
+        yamlBlockIndent,
+        inPemBlock,
+      });
+      yamlBlockIndent = result.yamlBlockIndent;
+      inPemBlock = result.inPemBlock;
+      if (result.masked) maskedLineCount += 1;
+      return result.text === line.text ? line : { ...line, text: result.text };
+    });
+    return { ...hunk, lines };
+  });
+
+  return {
+    diff: { ...diff, hunks },
+    maskedLineCount,
+  };
+}
+
+interface LineMaskContext {
+  mask: string;
+  extraKeys: ReadonlySet<string>;
+  extraValues: readonly string[];
+  yamlBlockIndent: number | undefined;
+  inPemBlock: boolean;
+}
+
+function maskDiffLine(
+  text: string,
+  context: LineMaskContext,
+): { text: string; masked: boolean; yamlBlockIndent: number | undefined; inPemBlock: boolean } {
+  const { mask, extraKeys, extraValues } = context;
+  let { yamlBlockIndent, inPemBlock } = context;
+
+  if (PEM_BEGIN_RE.test(text)) {
+    return { text, masked: false, yamlBlockIndent: undefined, inPemBlock: true };
+  }
+  if (PEM_END_RE.test(text)) {
+    return { text, masked: false, yamlBlockIndent: undefined, inPemBlock: false };
+  }
+  if (inPemBlock) {
+    const indent = text.match(/^\s*/)?.[0] ?? "";
+    const maskedText = text.trim() ? `${indent}${mask}` : text;
+    return { text: maskedText, masked: maskedText !== text, yamlBlockIndent: undefined, inPemBlock: true };
+  }
+
+  const indentLen = text.match(/^\s*/)?.[0].length ?? 0;
+  if (yamlBlockIndent !== undefined && text.trim()) {
+    if (indentLen > yamlBlockIndent) {
+      const maskedText = `${text.slice(0, indentLen)}${mask}`;
+      return { text: maskedText, masked: maskedText !== text, yamlBlockIndent, inPemBlock };
+    }
+    yamlBlockIndent = undefined;
+  }
+
+  let output = text;
+  const kvMatch = text.match(KV_LINE_RE);
+  if (kvMatch) {
+    const [, prefix = "", rawKey = "", separator = "", rest = ""] = kvMatch;
+    const unquotedKey = rawKey.trim().replace(/^["']|["']$/g, "");
+    const lowerKey = unquotedKey.toLowerCase();
+    const isExplicitKey = extraKeys.has(lowerKey);
+    const isPatternKey = DEFAULT_SECRET_KEY_RE.test(unquotedKey);
+
+    if (isExplicitKey || isPatternKey) {
+      const trimmedRest = rest.trim();
+      if (YAML_BLOCK_SCALAR_RE.test(trimmedRest)) {
+        yamlBlockIndent = indentLen;
+      } else if (trimmedRest && !trimmedRest.startsWith("{") && !trimmedRest.startsWith("[")) {
+        const maskedRest = maskAssignedValue(rest, mask);
+        output = `${prefix}${rawKey}${separator}${maskedRest}`;
+      }
+    }
+  }
+
+  output = applyPatternRedactions(output, mask);
+
+  for (const secretValue of extraValues) {
+    if (output.includes(secretValue)) {
+      output = output.split(secretValue).join(mask);
+    }
+  }
+
+  return {
+    text: output,
+    masked: output !== text,
+    yamlBlockIndent,
+    inPemBlock,
+  };
+}
+
+function maskAssignedValue(rest: string, mask: string): string {
+  const trimmed = rest.trim();
+  if (!trimmed || trimmed === "null" || trimmed === "~") return rest;
+
+  // Preserve leading Authorization scheme (Bearer / Basic / Digest)
+  const authMatch = rest.match(/^(\s*(?:["'])?(?:Bearer|Basic|Digest)\s+)([^\s"',;#]+)(.*)$/i);
+  if (authMatch) {
+    return `${authMatch[1]}${mask}${authMatch[3]}`;
+  }
+
+  // Quoted scalar value ("...", '...', `...`) preserving quotes, commas and comments
+  const quote = rest.charAt(0);
+  if (quote === '"' || quote === "'" || quote === "`") {
+    let end = -1;
+    for (let index = 1; index < rest.length; index += 1) {
+      const ch = rest[index];
+      if (ch === "\\" && quote !== "`") {
+        index += 1;
+        continue;
+      }
+      if (ch === quote) {
+        end = index;
+        break;
+      }
+    }
+    if (end === 1) return rest; // Empty quoted string "" or ''
+    if (end > 1) {
+      return `${quote}${mask}${quote}${rest.slice(end + 1)}`;
+    }
+    return `${quote}${mask}${quote}`;
+  }
+
+  // Unquoted scalar value: preserve trailing comma and inline comments (# / //)
+  const commentIdx = findInlineCommentIndex(rest);
+  const valuePart = commentIdx >= 0 ? rest.slice(0, commentIdx) : rest;
+  const commentPart = commentIdx >= 0 ? rest.slice(commentIdx) : "";
+  const trailingMatch = valuePart.match(/^(.+?)(\s*,?\s*)$/);
+  if (!trailingMatch) return rest;
+  const coreValue = trailingMatch[1]!.trim();
+  if (!coreValue || coreValue === "null" || coreValue === "~") return rest;
+  return `${mask}${trailingMatch[2]}${commentPart}`;
+}
+
+function findInlineCommentIndex(text: string): number {
+  const hashIdx = text.search(/\s+#/);
+  const slashIdx = text.search(/\s+\/\//);
+  if (hashIdx >= 0 && slashIdx >= 0) return Math.min(hashIdx, slashIdx);
+  return Math.max(hashIdx, slashIdx);
+}
+
+function applyPatternRedactions(line: string, mask: string): string {
+  return line
+    .replace(URL_CREDENTIALS_RE, `$1${mask}:${mask}@`)
+    .replace(AUTH_SCHEME_RE, `$1${mask}`)
+    .replace(INLINE_KEY_VALUE_SECRET_RE, (_match, prefix: string, value: string) => {
+      if (value.includes(mask)) return `${prefix}${value}`;
+      if (/auth(?:orization)?/i.test(prefix) && /^(?:Bearer|Basic|Digest)$/i.test(value)) {
+        return `${prefix}${value}`;
+      }
+      if (/^(?:[|>])(?:[-+]\d*|\d*[-+]?)?$/.test(value.trim())) return `${prefix}${value}`;
+      if (value === '""' || value === "''" || value === "null" || value === "~") return `${prefix}${value}`;
+      const quote = value.at(0);
+      return `${prefix}${quote === '"' || quote === "'" || quote === "`" ? `${quote}${mask}${quote}` : mask}`;
+    })
+    .replace(VENDOR_TOKEN_RE, mask)
+    .replace(SLACK_WEBHOOK_RE, `https://hooks.slack.com/services/${mask}`)
+    .replace(JWT_TOKEN_RE, mask);
 }

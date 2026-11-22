@@ -1,3 +1,4 @@
+import { useEffect, useState } from "preact/hooks";
 import type { RestoreBackupPreview } from "../../../shared/schema.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
@@ -16,6 +17,10 @@ export function RestoreBackupModal({
   onConfirm: () => void;
 }) {
   const { locale, t } = useI18n();
+  const [revealSecrets, setRevealSecrets] = useState(false);
+  useEffect(() => {
+    setRevealSecrets(false);
+  }, [preview]);
   const backupTime = new Date(preview.backupModifiedAt).toLocaleString(locale);
   const identical = preview.currentText === preview.backupText;
 
@@ -50,6 +55,8 @@ export function RestoreBackupModal({
           oldText={preview.currentText}
           newText={preview.backupText}
           fileName={`${preview.file} ← ${preview.file}.bak`}
+          maskSecrets={!revealSecrets}
+          onToggleRevealSecrets={() => setRevealSecrets((current) => !current)}
         />
       )}
     </Modal>

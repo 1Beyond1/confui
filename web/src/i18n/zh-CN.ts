@@ -208,6 +208,10 @@ export const zhCN = {
   "saveModal.badgeModified": "修改",
   "saveModal.badgeRemoved": "删除",
   "diff.empty": "文本内容无变化",
+  "diff.showSecrets": "显示敏感值",
+  "diff.hideSecrets": "隐藏敏感值",
+  "diff.secretsMaskedBadge": "已脱敏",
+  "diff.secretsMaskedHint": "敏感字段的值默认以掩码显示，防止投屏或录屏泄露",
 
   "restoreModal.title": "从 .bak 备份恢复",
   "restoreModal.desc": "将用 {file}.bak（备份于 {time}）原子替换当前文件，并把当前内容暂存为新的 .bak。",

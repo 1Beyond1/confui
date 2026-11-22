@@ -1,20 +1,35 @@
 import { useMemo } from "preact/hooks";
-import { computeUnifiedDiff } from "../../../shared/diff.ts";
+import { computeUnifiedDiff, maskUnifiedDiff } from "../../../shared/diff.ts";
 import { useI18n } from "../i18n/index.tsx";
+import { Icon } from "../icons.tsx";
 
 export function UnifiedDiffView({
   oldText,
   newText,
   fileName,
   emptyLabel,
+  maskSecrets = false,
+  secretKeys,
+  secretValues,
+  onToggleRevealSecrets,
 }: {
   oldText: string;
   newText: string;
   fileName: string;
   emptyLabel?: string;
+  maskSecrets?: boolean;
+  secretKeys?: readonly string[];
+  secretValues?: readonly string[];
+  onToggleRevealSecrets?: () => void;
 }) {
   const { t } = useI18n();
-  const diff = useMemo(() => computeUnifiedDiff(oldText, newText, 3), [oldText, newText]);
+  const rawDiff = useMemo(() => computeUnifiedDiff(oldText, newText, 3), [oldText, newText]);
+  const maskedResult = useMemo(
+    () => maskUnifiedDiff(rawDiff, { secretKeys, secretValues }),
+    [rawDiff, secretKeys, secretValues],
+  );
+  const diff = maskSecrets ? maskedResult.diff : rawDiff;
+  const hasSensitiveLines = maskedResult.maskedLineCount > 0 || Boolean(secretKeys?.length);
 
   if (!diff.hunks.length) {
     return <div class="udiff-empty">{emptyLabel ?? t("diff.empty")}</div>;
@@ -23,11 +38,32 @@ export function UnifiedDiffView({
   return (
     <div class="udiff">
       <div class="udiff__header">
-        <code>{fileName}</code>
-        <span class="udiff__stats">
-          <em class="udiff__stat-add">+{diff.added}</em>
-          <em class="udiff__stat-remove">-{diff.removed}</em>
-        </span>
+        <div class="udiff__title">
+          <code>{fileName}</code>
+          {maskSecrets && maskedResult.maskedLineCount > 0 && (
+            <span class="udiff__masked-pill" title={t("diff.secretsMaskedHint")}>
+              <Icon name="shield" size={12}/>
+              <span>{t("diff.secretsMaskedBadge")}</span>
+            </span>
+          )}
+        </div>
+        <div class="udiff__header-right">
+          {onToggleRevealSecrets && hasSensitiveLines && (
+            <button
+              type="button"
+              class="udiff__secret-toggle"
+              aria-pressed={!maskSecrets}
+              onClick={onToggleRevealSecrets}
+            >
+              <Icon name={maskSecrets ? "eye" : "eye-off"} size={13}/>
+              <span>{maskSecrets ? t("diff.showSecrets") : t("diff.hideSecrets")}</span>
+            </button>
+          )}
+          <span class="udiff__stats">
+            <em class="udiff__stat-add">+{diff.added}</em>
+            <em class="udiff__stat-remove">-{diff.removed}</em>
+          </span>
+        </div>
       </div>
       <div class="udiff__scroll">
         <div class="udiff__table" role="region" aria-label={`Unified diff: ${fileName}`}>

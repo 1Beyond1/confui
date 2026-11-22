@@ -34,6 +34,7 @@ import {
   fieldKey,
   initialFieldEditorValue,
   initializeEditorValues,
+  isEditableKeyboardTarget,
   needsJsonEditor,
   validationErrors,
 } from "./editor-state.ts";
@@ -177,22 +178,24 @@ export function App() {
     }
   }), [schema, project]);
 
-  useEffect(() => {
+  const keydownHandlerRef = useRef<(event: KeyboardEvent) => void>();
+  keydownHandlerRef.current = (event: KeyboardEvent) => {
     const anyModalOpen = Boolean(savePreview || restorePreview || addKeyOpen || pendingAction || pendingSettingsAction);
-    const listener = (event: KeyboardEvent) => {
-      const mod = event.ctrlKey || event.metaKey;
-      const lower = event.key.toLowerCase();
-      if (mod && lower === "s") {
-        event.preventDefault();
-        if (view === "editor" && dirty && busy === null && !anyModalOpen) void beginSave();
-        return;
-      }
-      if (mod && lower === "o") {
-        event.preventDefault();
-        requestAction({ kind: "browse" });
-        return;
-      }
-      if (view === "editor" && editorTab === "form" && busy === null && !anyModalOpen && mod) {
+    const mod = event.ctrlKey || event.metaKey;
+    const lower = event.key.toLowerCase();
+    if (mod && lower === "s") {
+      event.preventDefault();
+      if (view === "editor" && dirty && busy === null && !anyModalOpen) void beginSave();
+      return;
+    }
+    if (mod && lower === "o") {
+      event.preventDefault();
+      requestAction({ kind: "browse" });
+      return;
+    }
+    if (view === "editor" && editorTab === "form" && busy === null && !anyModalOpen && mod) {
+      const inEditable = isEditableKeyboardTarget(event.target) || isEditableKeyboardTarget(document.activeElement);
+      if (!inEditable) {
         if (lower === "z" && !event.shiftKey && canUndo) {
           event.preventDefault();
           history.undo();
@@ -204,17 +207,21 @@ export function App() {
           return;
         }
       }
-      if (event.key === "Escape") {
-        if (savePreview) closeSavePreview();
-        else if (restorePreview && busy !== "restore") setRestorePreview(undefined);
-        else if (addKeyOpen) setAddKeyOpen(false);
-        else if (pendingAction) setPendingAction(undefined);
-        else if (pendingSettingsAction) setPendingSettingsAction(undefined);
-      }
-    };
+    }
+    if (event.key === "Escape") {
+      if (savePreview) closeSavePreview();
+      else if (restorePreview && busy !== "restore") setRestorePreview(undefined);
+      else if (addKeyOpen) setAddKeyOpen(false);
+      else if (pendingAction) setPendingAction(undefined);
+      else if (pendingSettingsAction) setPendingSettingsAction(undefined);
+    }
+  };
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => keydownHandlerRef.current?.(event);
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  });
+  }, []);
 
   useEffect(() => {
     window.confui.setDirtyState(dirty || settingsDirty);
@@ -615,7 +622,7 @@ export function App() {
       secret: field.secret,
       group: field.group,
     };
-    const result = await window.confui.explainField(project.root, schema.file, request, githubInput || undefined);
+    const result = await window.confui.explainField(project.root, schema.file, request, githubInput || undefined, locale);
     if (!result.ok) throw new Error(result.error.detail || result.error.message);
     return result.data;
   }

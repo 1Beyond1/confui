@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import type { AppSettings, RecentProject } from "../shared/schema.ts";
 import { DEFAULT_SETTINGS } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
+import { renameWithRetry } from "./save.ts";
 import { normalizeGithubUrl } from "./scanner.ts";
 import { readLimitedUtf8File } from "./inference/limited-text.ts";
 
@@ -28,12 +29,19 @@ interface PersistedSettings extends Omit<AppSettings, "ai" | "github"> {
   github: AppSettings["github"];
 }
 
+export interface SettingsStoreOptions {
+  renameFn?: (src: string, dst: string) => Promise<void>;
+  retryDelaysMs?: readonly number[];
+  platform?: NodeJS.Platform;
+}
+
 export class SettingsStore {
   private writeTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly filePath: string,
     private readonly codec: SecretCodec,
+    private readonly options: SettingsStoreOptions = {},
   ) {}
 
   async load(): Promise<AppSettings> {
@@ -175,7 +183,13 @@ export class SettingsStore {
     const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await writeFile(temporary, `${JSON.stringify(persisted, null, 2)}\n`, { encoding: "utf8", flag: "w" });
-      await rename(temporary, this.filePath);
+      await renameWithRetry(
+        temporary,
+        this.filePath,
+        this.options.renameFn ?? rename,
+        this.options.retryDelaysMs,
+        this.options.platform,
+      );
     } catch (error) {
       await unlink(temporary).catch(() => undefined);
       throw new ConfuiError("SAVE_ERROR", "无法保存 Confui 设置", error instanceof Error ? error.message : String(error));

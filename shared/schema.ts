@@ -335,7 +335,7 @@ export interface ConfuiAPI {
   selectFolder(): Promise<Result<string | null>>;
   scanProject(root: string, githubUrl?: string): Promise<Result<ProjectScanResult>>;
   inferSchema(root: string, file: string, options?: InferOptions): Promise<Result<ConfigFormSchema>>;
-  explainField(root: string, file: string, field: FieldAssistField, githubUrl?: string): Promise<Result<FieldAssistResult>>;
+  explainField(root: string, file: string, field: FieldAssistField, githubUrl?: string, locale?: Locale): Promise<Result<FieldAssistResult>>;
   previewSave(root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion): Promise<Result<SavePreview>>;
   saveConfig(root: string, preview: SavePreview): Promise<Result<SaveResult>>;
   getBackupStatus(root: string, file: string): Promise<Result<BackupStatus>>;

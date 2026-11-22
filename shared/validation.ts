@@ -25,6 +25,46 @@ export function isForbiddenKey(key: string): boolean {
   return FORBIDDEN_OBJECT_KEYS.has(key);
 }
 
+/**
+ * Shared key-name fragment matching sensitive configuration keys (passwords,
+ * tokens, API keys, private keys, DSNs, webhooks). Single source of truth
+ * shared between inference masking, cross-file search, and Unified Diff masking.
+ */
+export const SECRET_KEY_FRAGMENT = [
+  "password",
+  "passwd",
+  "pwd",
+  "passphrase",
+  "secret",
+  "token",
+  "api[\\s_-]?key",
+  "private[\\s_-]?key",
+  "app[\\s_-]?key",
+  "master[\\s_-]?key",
+  "encryption[\\s_-]?key",
+  "cipher[\\s_-]?key",
+  "hmac[\\s_-]?key",
+  "aes[\\s_-]?key",
+  "ssh[\\s_-]?key",
+  "tls[\\s_-]?key",
+  "ssl[\\s_-]?key",
+  "credential",
+  "auth(?:orization)?",
+  "cookie",
+  "jwt",
+  "session[\\s_-]?key",
+  "signing[\\s_-]?key",
+  "client[\\s_-]?secret",
+  "access[\\s_-]?key",
+  "database[\\s_-]?url",
+  "connection[\\s_-]?string",
+  "dsn",
+  "webhook[\\s_-]?(?:url|secret)",
+  "(?:openai|anthropic|google|gemini|stripe|slack)[\\s_-]?key",
+].join("|");
+
+export const SECRET_KEY_PATTERN = new RegExp(SECRET_KEY_FRAGMENT, "i");
+
 export function isSafePathSegment(segment: unknown): segment is PathSegment {
   if (typeof segment === "number") return Number.isSafeInteger(segment) && segment >= 0;
   return typeof segment === "string" && !isForbiddenKey(segment);

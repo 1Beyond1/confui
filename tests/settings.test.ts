@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SettingsStore, maskSecretHint, normalizeSettings, type SecretCodec } from "../core/settings.ts";
 import { DEFAULT_SETTINGS } from "../shared/schema.ts";
 
@@ -310,5 +310,32 @@ describe("settings store", () => {
       theme: "light",
       ai: { apiKey: "sk-locked-secret-9999" },
     });
+  });
+
+  it("retries transient Windows EPERM/EBUSY errors when persisting settings", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-settings-retry-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "settings.json");
+    const eperm = Object.assign(new Error("antivirus lock"), { code: "EPERM" });
+    const ebusy = Object.assign(new Error("busy"), { code: "EBUSY" });
+    let attempts = 0;
+    const flakyRename = vi.fn(async (src: string, dst: string) => {
+      attempts += 1;
+      if (attempts === 1) throw eperm;
+      if (attempts === 2) throw ebusy;
+      await rename(src, dst);
+    });
+    const store = new SettingsStore(path, keychainCodec({ unlocked: true }), {
+      renameFn: flakyRename,
+      retryDelaysMs: [1, 1, 1],
+      platform: "win32",
+    });
+
+    const input = structuredClone(DEFAULT_SETTINGS);
+    input.theme = "dark";
+    await store.save(input);
+
+    expect(flakyRename).toHaveBeenCalledTimes(3);
+    await expect(store.load()).resolves.toMatchObject({ theme: "dark" });
   });
 });

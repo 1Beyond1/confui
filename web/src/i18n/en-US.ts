@@ -210,6 +210,10 @@ export const enUS: TranslationDict = {
   "saveModal.badgeModified": "Modified",
   "saveModal.badgeRemoved": "Removed",
   "diff.empty": "No textual differences",
+  "diff.showSecrets": "Show secrets",
+  "diff.hideSecrets": "Hide secrets",
+  "diff.secretsMaskedBadge": "Redacted",
+  "diff.secretsMaskedHint": "Sensitive values are masked by default to prevent accidental screen-share exposure",
 
   "restoreModal.title": "Restore from .bak Backup",
   "restoreModal.desc": "Atomically replaces {file} with {file}.bak (from {time}), saving current content into .bak.",
