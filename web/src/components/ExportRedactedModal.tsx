@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import type { PathSegment, RedactedExportPreview } from "../../../shared/schema.ts";
+import type { PathSegment, RedactedExportOptions, RedactedExportPreview, ScopedSecretPath } from "../../../shared/schema.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button, Modal } from "../ui.tsx";
@@ -9,12 +9,16 @@ export function ExportRedactedModal({
   projectRoot,
   file,
   secretPaths,
+  documentIndex,
+  scopedSecretPaths,
   onClose,
   onToast,
 }: {
   projectRoot: string;
   file: string;
   secretPaths: PathSegment[][];
+  documentIndex?: number;
+  scopedSecretPaths?: ScopedSecretPath[];
   onClose: () => void;
   onToast: (message: string, type?: "success" | "error" | "info") => void;
 }) {
@@ -25,11 +29,19 @@ export function ExportRedactedModal({
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string>();
 
+  const exportOptions: RedactedExportOptions | undefined =
+    documentIndex !== undefined || (scopedSecretPaths && scopedSecretPaths.length > 0)
+      ? {
+        ...(documentIndex !== undefined ? { documentIndex } : {}),
+        ...(scopedSecretPaths && scopedSecretPaths.length > 0 ? { scopedSecretPaths } : {}),
+      }
+      : undefined;
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(undefined);
-    void window.confui.previewRedactedExport(projectRoot, file, secretPaths).then((response) => {
+    void window.confui.previewRedactedExport(projectRoot, file, secretPaths, exportOptions).then((response) => {
       if (cancelled) return;
       setLoading(false);
       if (!response.ok) {
@@ -39,7 +51,7 @@ export function ExportRedactedModal({
       setPreview(response.data);
     });
     return () => { cancelled = true; };
-  }, [projectRoot, file, secretPaths]);
+  }, [projectRoot, file, secretPaths, documentIndex, scopedSecretPaths]);
 
   async function handleCopy(): Promise<void> {
     if (!preview) return;
@@ -57,7 +69,7 @@ export function ExportRedactedModal({
     if (!preview || saving) return;
     setSaving(true);
     try {
-      const result = await window.confui.saveRedactedExport(projectRoot, file, secretPaths);
+      const result = await window.confui.saveRedactedExport(projectRoot, file, secretPaths, exportOptions);
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       if (result.data.savedPath) {
         const savedName = result.data.savedPath.split(/[\\/]/).at(-1) ?? preview.suggestedFileName;

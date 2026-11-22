@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import { collectSecretsFromFields, maskDocumentLines } from "../../../shared/diff.ts";
+import { collectSecretsFromFields, maskDocumentLines, type DocumentLineSecrets } from "../../../shared/diff.ts";
 import type { ConfigFormSchema, FieldSpec } from "../../../shared/schema.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
@@ -23,10 +23,12 @@ export function RawViewer({
   schema,
   fields,
   focusLine,
+  onConsumeFocusLine,
 }: {
   schema: ConfigFormSchema;
   fields?: readonly FieldSpec[];
   focusLine?: { line: number; token: number };
+  onConsumeFocusLine?: (token: number) => void;
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
@@ -39,24 +41,57 @@ export function RawViewer({
   const viewportHeightRef = useRef(viewportHeight);
   viewportHeightRef.current = viewportHeight;
   const codeContainerRef = useRef<HTMLDivElement>(null);
+  const handledFocusTokenRef = useRef<number>();
+  const highlightTimerRef = useRef<number>();
 
   const rawLines = useMemo(
     () => schema.rawText.replace(/\r\n/g, "\n").split("\n"),
     [schema.rawText],
   );
 
-  const { secretKeys, secretValues } = useMemo(
+  const activeSecrets = useMemo(
     () => collectSecretsFromFields(fields ?? schema.fields),
     [fields, schema.fields],
   );
 
+  const documentSecrets = useMemo<DocumentLineSecrets[] | undefined>(() => {
+    if (schema.format !== "yaml" || !schema.yamlDocuments || schema.yamlDocuments.length <= 1) {
+      return undefined;
+    }
+    const activeDocIdx = schema.activeDocumentIndex ?? 0;
+    const byDoc = new Map((schema.documentSecrets ?? []).map((entry) => [entry.documentIndex, entry]));
+    return schema.yamlDocuments.map((doc, idx) => {
+      const nextDoc = schema.yamlDocuments![idx + 1];
+      const meta = byDoc.get(doc.index);
+      const keys = new Set<string>(meta?.secretKeys ?? []);
+      const vals = new Set<string>(meta?.secretValues ?? []);
+      if (doc.index === activeDocIdx) {
+        for (const k of activeSecrets.secretKeys) keys.add(k);
+        for (const v of activeSecrets.secretValues) vals.add(v);
+      }
+      return {
+        startLine: idx === 0 ? 1 : doc.startLine,
+        endLine: nextDoc?.startLine,
+        secretKeys: [...keys],
+        secretValues: [...vals],
+      };
+    });
+  }, [schema.format, schema.yamlDocuments, schema.activeDocumentIndex, schema.documentSecrets, activeSecrets]);
+
   const maskedDoc = useMemo(
-    () => maskDocumentLines(schema.rawText, { format: schema.format, secretKeys, secretValues }),
-    [schema.rawText, schema.format, secretKeys, secretValues],
+    () => maskDocumentLines(
+      schema.rawText,
+      documentSecrets
+        ? { format: schema.format, documentSecrets }
+        : { format: schema.format, secretKeys: activeSecrets.secretKeys, secretValues: activeSecrets.secretValues },
+    ),
+    [schema.rawText, schema.format, documentSecrets, activeSecrets],
   );
 
   const displayLines = revealSecrets ? rawLines : maskedDoc.lines;
-  const hasSensitiveContent = maskedDoc.maskedLineCount > 0 || secretKeys.length > 0;
+  const hasSensitiveContent = maskedDoc.maskedLineCount > 0
+    || activeSecrets.secretKeys.length > 0
+    || Boolean(documentSecrets?.some((sec) => (sec.secretKeys?.length ?? 0) > 0 || (sec.secretValues?.length ?? 0) > 0));
   const maxLineChars = useMemo(() => computeMaxLineCharWidth(displayLines), [displayLines]);
 
   useEffect(() => {
@@ -158,8 +193,20 @@ export function RawViewer({
     return () => window.cancelAnimationFrame(frame);
   }, [activeMatch, totalMatches, matchLines, displayLines.length]);
 
+  useEffect(() => () => {
+    if (highlightTimerRef.current !== undefined) {
+      window.clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = undefined;
+    }
+  }, []);
+
   useEffect(() => {
-    if (!focusLine?.line) return;
+    if (!focusLine?.line || focusLine.token === handledFocusTokenRef.current) return;
+    handledFocusTokenRef.current = focusLine.token;
+    if (highlightTimerRef.current !== undefined) {
+      window.clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = undefined;
+    }
     const targetLineIdx = Math.max(0, Math.min(displayLines.length - 1, focusLine.line - 1));
     setHighlightedLine(targetLineIdx + 1);
     const container = codeContainerRef.current;
@@ -174,11 +221,12 @@ export function RawViewer({
     );
     if (container) container.scrollTop = nextTop;
     setScrollTop(nextTop);
-    const timer = window.setTimeout(() => {
+    onConsumeFocusLine?.(focusLine.token);
+    highlightTimerRef.current = window.setTimeout(() => {
+      highlightTimerRef.current = undefined;
       setHighlightedLine((current) => (current === targetLineIdx + 1 ? undefined : current));
     }, 2_600);
-    return () => window.clearTimeout(timer);
-  }, [focusLine?.line, focusLine?.token, displayLines.length]);
+  }, [focusLine?.line, focusLine?.token, displayLines.length, onConsumeFocusLine]);
 
   const virtualWindow = useMemo(
     () => computeVirtualWindow(

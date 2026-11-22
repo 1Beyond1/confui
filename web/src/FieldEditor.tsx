@@ -36,6 +36,7 @@ export function FieldEditor({
   onExplain,
   disabled = false,
   focusRequest,
+  onConsumeFocusRequest,
 }: {
   fileKey?: string;
   fields: FieldSpec[];
@@ -53,7 +54,8 @@ export function FieldEditor({
   aiAvailable?: boolean;
   onExplain?: (field: FieldSpec) => Promise<FieldAssistResult>;
   disabled?: boolean;
-  focusRequest?: { path: string; segments?: readonly PathSegment[]; token: number };
+  focusRequest?: { path: string; segments?: readonly PathSegment[]; documentIndex?: number; token: number };
+  onConsumeFocusRequest?: (token: number) => void;
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
@@ -62,9 +64,23 @@ export function FieldEditor({
   const [highlightedPath, setHighlightedPath] = useState<string>();
   const [deepFocusTarget, setDeepFocusTarget] = useState<DeepFocusTarget>();
   const editorRef = useRef<HTMLDivElement>(null);
+  const handledFocusTokenRef = useRef<number>();
+  const focusTimersRef = useRef<{ scroll?: number; clear?: number }>({});
   const defaultGroupName = t("common.generalGroup");
 
+  function clearFocusTimers(): void {
+    if (focusTimersRef.current.scroll !== undefined) {
+      window.clearTimeout(focusTimersRef.current.scroll);
+      focusTimersRef.current.scroll = undefined;
+    }
+    if (focusTimersRef.current.clear !== undefined) {
+      window.clearTimeout(focusTimersRef.current.clear);
+      focusTimersRef.current.clear = undefined;
+    }
+  }
+
   useEffect(() => {
+    clearFocusTimers();
     setQuery("");
     setStatusFilter("all");
     setCollapsedGroups({});
@@ -72,8 +88,12 @@ export function FieldEditor({
     setDeepFocusTarget(undefined);
   }, [fileKey]);
 
+  useEffect(() => () => clearFocusTimers(), []);
+
   useEffect(() => {
-    if (!focusRequest?.path) return;
+    if (!focusRequest?.path || focusRequest.token === handledFocusTokenRef.current) return;
+    handledFocusTokenRef.current = focusRequest.token;
+    clearFocusTimers();
     setQuery("");
     setStatusFilter("all");
     const targetField = resolveFocusField(fields, focusRequest.path, focusRequest.segments);
@@ -87,26 +107,28 @@ export function FieldEditor({
     setDeepFocusTarget(isDeepJump
       ? { path: focusRequest.path, segments: focusRequest.segments, token: focusRequest.token }
       : undefined);
-    const scrollTimer = window.setTimeout(() => {
+
+    const requestPath = focusRequest.path;
+    const requestToken = focusRequest.token;
+    focusTimersRef.current.scroll = window.setTimeout(() => {
+      focusTimersRef.current.scroll = undefined;
       const deepNodes = editorRef.current?.querySelectorAll<HTMLElement>("[data-deep-path]");
-      const deepEl = deepNodes ? [...deepNodes].find((el) => el.dataset.deepPath === focusRequest.path) : undefined;
+      const deepEl = deepNodes ? findDeepestMatchingElement([...deepNodes], requestPath) : undefined;
       const rows = editorRef.current?.querySelectorAll<HTMLElement>("[data-field-path]");
       const fieldEl = rows ? [...rows].find((el) => el.dataset.fieldPath === resolvedPath) : undefined;
       const target = deepEl ?? fieldEl;
       if (target) {
         target.scrollIntoView({ behavior: "smooth", block: "center" });
-        const focusable = target.querySelector<HTMLElement>("input, select, textarea, button[role='switch']");
+        const focusable = target.querySelector<HTMLElement>("input, select, textarea, button[role='switch'], button.structured-mode-toggle");
         focusable?.focus({ preventScroll: true });
       }
+      onConsumeFocusRequest?.(requestToken);
     }, isDeepJump ? 70 : 30);
-    const clearTimer = window.setTimeout(() => {
+    focusTimersRef.current.clear = window.setTimeout(() => {
+      focusTimersRef.current.clear = undefined;
       setHighlightedPath((current) => (current === resolvedPath ? undefined : current));
     }, 2_600);
-    return () => {
-      window.clearTimeout(scrollTimer);
-      window.clearTimeout(clearTimer);
-    };
-  }, [focusRequest?.path, focusRequest?.segments, focusRequest?.token, fields, defaultGroupName]);
+  }, [focusRequest?.path, focusRequest?.segments, focusRequest?.token, fields, defaultGroupName, onConsumeFocusRequest]);
 
   const statusCounts = useMemo(() => {
     let modified = 0;
@@ -895,4 +917,35 @@ function cloneDefault(value: unknown): unknown {
 
 function formatNumberInput(value: unknown): string {
   return typeof value === "number" || typeof value === "string" ? String(value) : "";
+}
+
+/**
+ * Finds the exact `[data-deep-path]` element matching `targetPath` (preferring
+ * the innermost node such as `DeepJsonFallbackBlock`), or falls back to the
+ * deepest matching ancestor `[data-deep-path]` when the target lives inside a
+ * 4-level depth fallback JSON block.
+ */
+function findDeepestMatchingElement(
+  elements: readonly HTMLElement[],
+  targetPath: string,
+): HTMLElement | undefined {
+  let exact: HTMLElement | undefined;
+  let deepestAncestor: HTMLElement | undefined;
+  let deepestLen = -1;
+  for (const el of elements) {
+    const path = el.dataset.deepPath;
+    if (!path) continue;
+    if (path === targetPath) {
+      exact = el;
+      continue;
+    }
+    if (
+      (targetPath.startsWith(`${path}.`) || targetPath.startsWith(`${path}[`))
+      && path.length >= deepestLen
+    ) {
+      deepestAncestor = el;
+      deepestLen = path.length;
+    }
+  }
+  return exact ?? deepestAncestor;
 }

@@ -2,6 +2,7 @@ import type { PathSegment } from "../../shared/schema.ts";
 import {
   AUTH_BEARER_BASIC_RE,
   AUTH_DIGEST_RE,
+  AUTH_TOKEN_HEADER_RE,
   JWT_TOKEN_RE,
   setSafeProperty,
   SLACK_WEBHOOK_RE,
@@ -27,6 +28,22 @@ const MAX_MASK_DEPTH = 32;
 
 const MARKDOWN_TABLE_SECRET_RE = new RegExp(
   `(\\|\\s*[\`"']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*[\`"']?\\s*\\|\\s*)([^|\\r\\n]*?)(\\s*\\|)`,
+  "gi",
+);
+const PASSWORD_KEY_FRAGMENT = [
+  "password",
+  "passwd",
+  "pwd",
+  "passphrase",
+  "passcode",
+  "(?:smtp|mail|db|redis|mongo(?:db)?|mysql|postgres(?:ql)?|pg|amqp|rabbitmq|kafka|proxy|ftp|ldap|ssh|admin|root|user|basic|vault|keystore|truststore)[\\s_.-]?pass",
+].join("|");
+const NPMRC_SECRET_LINE_RE = new RegExp(
+  `^(\\s*\\/\\/[^\\s=\\r\\n]+:[^=\\r\\n]*(?:${SECRET_KEY_FRAGMENT})[^=\\r\\n]*=\\s*)(.+)$`,
+  "gim",
+);
+const MULTI_WORD_PASSWORD_RE = new RegExp(
+  `(["']?[\\w.-]*(?:${PASSWORD_KEY_FRAGMENT})[\\w.-]*["']?[ \\t]*[=:][ \\t]*)(?![ \\t"'\`{\\[|>]|\\*{3}(?:[ \\t]|$)|null\\b|~)([^\\r\\n,;}\\]]+)`,
   "gi",
 );
 const KEY_VALUE_SECRET_RE = new RegExp(
@@ -159,20 +176,31 @@ export function maskDocumentSecrets(text: string): string {
       /-----BEGIN ((?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----[\s\S]*?-----END \1-----/g,
       "-----BEGIN $1-----\n***\n-----END $1-----",
     )
+    // `.npmrc` scoped credentials (`//host/:_authToken=...`, `//host/:_password=...`)
+    // may contain spaces, commas, or semicolons; mask their entire value span.
+    .replace(NPMRC_SECRET_LINE_RE, "$1***")
     // `@` is legal inside a userinfo password in several DSN spellings, and the
     // username may be empty (e.g. `redis://:pass@host:6379`).
     .replace(URL_CREDENTIALS_RE, "$1***:***@")
-    // Authorization headers (Bearer / Basic / Digest) are often written in
-    // README examples or config values rather than as `token: value` pairs.
+    // Authorization headers (Bearer / Basic / Digest / Token / ApiKey / JWT / OAuth)
+    // are often written in README examples or config comments rather than as `token: value`.
     .replace(AUTH_DIGEST_RE, "$1***")
     .replace(AUTH_BEARER_BASIC_RE, "$1***")
+    .replace(AUTH_TOKEN_HEADER_RE, "$1***")
     // Markdown tables do not use `:` or `=` between a sensitive key and its
     // value, so the key/value expression below would otherwise miss them.
     .replace(MARKDOWN_TABLE_SECRET_RE, "$1***$3")
+    // Multi-word unquoted password/passphrase values in comments or plain lines.
+    .replace(MULTI_WORD_PASSWORD_RE, (_match, prefix: string, value: string) => {
+      const trimmed = value.trim();
+      if (!trimmed || trimmed === "***") return `${prefix}${value}`;
+      const trailingWs = value.match(/\s*$/)?.[0] ?? "";
+      return `${prefix}***${trailingWs}`;
+    })
     .replace(
       KEY_VALUE_SECRET_RE,
       (_match, prefix: string, value: string) => {
-        if (/auth(?:orization)?/i.test(prefix) && /^(?:Bearer|Basic|Digest)$/i.test(value)) return `${prefix}${value}`;
+        if (/auth(?:orization)?/i.test(prefix) && /^(?:Bearer|Basic|Digest|Token|ApiKey|API-Key|JWT|OAuth)$/i.test(value)) return `${prefix}${value}`;
         if (/^(?:[|>])(?:[-+]\d*|\d*[-+]?)?$/.test(value.trim())) return `${prefix}${value}`;
         if (value === '""' || value === "''" || value === '""""""' || value === "''''''") return `${prefix}${value}`;
         if (value.startsWith('"""') && value.endsWith('"""')) return `${prefix}"""***"""`;

@@ -283,6 +283,8 @@ export const zhCN = {
   "compare.envGroupsLabel": "同组环境：",
   "compare.sourceLabel": "源配置（读取值）",
   "compare.targetLabel": "目标配置（写入补齐）",
+  "compare.sourceDocLabel": "源 YAML 文档",
+  "compare.targetDocLabel": "目标 YAML 文档",
   "compare.swap": "交换源和目标",
   "compare.sameFileHint": "请选择两个不同的配置文件进行对比。",
   "compare.targetDirtyBlocked": "当前文件「{file}」有未保存的更改。请先保存或放弃当前更改后再向本文件补齐，或切换目标文件以同步到其他未修改的配置。",

@@ -1,16 +1,19 @@
 import { basename } from "node:path";
 import type {
   ConfigFormSchema,
+  DocumentSecretMeta,
   FieldSpec,
   InferOptions,
   Locale,
+  PathSegment,
   YamlDocumentSummary,
 } from "../../shared/schema.ts";
-import { collectSecretStrings } from "../../shared/validation.ts";
+import { collectSecretStrings, containsSecretValuePattern, isSensitiveKey } from "../../shared/validation.ts";
 import type { AIProvider } from "../ai/provider.ts";
 import { AI_FILE_LIMIT, readTextSnapshot } from "../files.ts";
-import { assertEditableSyntax, detectFormat, parseConfig, parseYamlDocuments } from "../formats.ts";
-import { getAtPath, resolveExistingProjectPath } from "../paths.ts";
+import { assertEditableSyntax, detectFormat, parseConfig, parseYamlDocuments, type ParsedYamlDocument } from "../formats.ts";
+import { stripBom } from "../formats/common.ts";
+import { formatPath, getAtPath, resolveExistingProjectPath } from "../paths.ts";
 import { inferAIFields } from "./ai.ts";
 import { inferCommentFields } from "./comments.ts";
 import { isSecretPath, toEditorValue } from "./common.ts";
@@ -45,15 +48,18 @@ export async function inferConfig(
   if (!format) throw new Error("不支持这个配置文件格式");
   const { text, version } = await readTextSnapshot(absolutePath);
   assertEditableSyntax(relativeFile, text);
+  const cleanText = stripBom(text);
 
   let parsed: unknown;
   let yamlDocuments: YamlDocumentSummary[] | undefined;
+  let parsedYamlDocs: ParsedYamlDocument[] | undefined;
   let activeDocumentIndex: number | undefined;
-  let schemaDirectiveText = text;
+  let schemaDirectiveText = cleanText;
 
   if (format === "yaml") {
     const docs = parseYamlDocuments(text);
     if (docs.length > 1) {
+      parsedYamlDocs = docs;
       const requested = options.documentIndex ?? 0;
       const clamped = Number.isSafeInteger(requested) && requested >= 0 && requested < docs.length
         ? requested
@@ -70,10 +76,10 @@ export async function inferConfig(
       }));
       const activeDoc = docs[clamped]!;
       parsed = activeDoc.value;
-      const docSlice = text.slice(activeDoc.spanStart, activeDoc.spanEnd);
+      const docSlice = cleanText.slice(activeDoc.spanStart, activeDoc.spanEnd);
       // Prefer a document-specific `# yaml-language-server: $schema=...` directive,
       // falling back to a file-header directive when absent.
-      schemaDirectiveText = extractSchemaDirective(docSlice, "yaml") ? docSlice : text;
+      schemaDirectiveText = extractSchemaDirective(docSlice, "yaml") ? docSlice : cleanText;
     } else {
       parsed = docs[0]!.value;
     }
@@ -121,10 +127,14 @@ export async function inferConfig(
 
   // Local AST/CST comment extraction across all 6 formats (strictly sanitized via maskDocumentSecrets).
   const secretValuesSet = new Set<string>();
+  collectNestedSecretValues(parsed, secretValuesSet);
   for (const candidate of candidates) {
+    const actual = candidate.value !== undefined ? candidate.value : getAtPath(parsed, candidate.segments);
+    if (actual === undefined) continue;
     if (candidate.secret === true || candidate.type === "secret" || isSecretPath(candidate.segments)) {
-      const actual = candidate.value !== undefined ? candidate.value : getAtPath(parsed, candidate.segments);
-      if (actual !== undefined) collectSecretStrings(actual, secretValuesSet);
+      collectSecretStrings(actual, secretValuesSet);
+    } else if (candidate.itemFields?.length && Array.isArray(actual)) {
+      collectItemFieldSecrets(actual, candidate.itemFields, secretValuesSet);
     }
   }
   const existingPaths = uniquePaths(candidates.map((candidate) => candidate.segments));
@@ -186,6 +196,44 @@ export async function inferConfig(
     warnings.push(`字段数量较多（共 ${merged.totalFieldCount} 项），仅展示优先级最高的前 ${MAX_FORM_FIELDS} 项；其余内容仍保留在原始文件中。`);
   }
   if (!fields.length) warnings.push("没有发现可转换为表单的字段，可在原始内容中检查文件");
+
+  let documentSecrets: DocumentSecretMeta[] | undefined;
+  if (format === "yaml" && parsedYamlDocs && parsedYamlDocs.length > 1) {
+    const fileHasHeaderDirective = Boolean(extractSchemaDirective(cleanText, "yaml"));
+    const activeHadSchema = schema.fields.length > 0 || Boolean(schema.schemaStore);
+    documentSecrets = await Promise.all(
+      parsedYamlDocs.map(async (doc) => {
+        if (doc.index === activeDocumentIndex) {
+          return buildDocumentSecretMeta(doc.index, doc.startLine, doc.value, fields);
+        }
+        const docSlice = cleanText.slice(doc.spanStart, doc.spanEnd);
+        const docDirective = extractSchemaDirective(docSlice, "yaml");
+        const hasInlineSchema = doc.value !== null
+          && typeof doc.value === "object"
+          && typeof (doc.value as Record<string, unknown>).$schema === "string";
+        let docSchemaFields: FieldCandidate[] = [];
+        if (docDirective || hasInlineSchema || fileHasHeaderDirective || activeHadSchema || options.enableSchemaStore === true) {
+          const siblingSchema = await inferJsonSchemaFields(
+            absolutePath,
+            projectRoot,
+            doc.value,
+            options.schemaFetcher ?? fetch,
+            {
+              format: "yaml",
+              rawText: docDirective ? docSlice : cleanText,
+              relativeFile: normalizedRelative,
+              enableSchemaStore: options.enableSchemaStore === true,
+              schemaStoreCacheDir: options.schemaStoreCacheDir,
+              locale,
+            },
+          );
+          docSchemaFields = siblingSchema.fields;
+        }
+        return buildDocumentSecretMeta(doc.index, doc.startLine, doc.value, docSchemaFields);
+      }),
+    );
+  }
+
   return {
     file: normalizedRelative,
     kind: basename(relativeFile),
@@ -199,9 +247,121 @@ export async function inferConfig(
     schemaStore: schema.schemaStore,
     yamlDocuments,
     activeDocumentIndex,
+    ...(documentSecrets ? { documentSecrets } : {}),
     version,
     rawText: text,
   };
+}
+
+function buildDocumentSecretMeta(
+  documentIndex: number,
+  startLine: number,
+  parsed: unknown,
+  docFields: readonly {
+    segments: PathSegment[];
+    secret?: boolean;
+    type?: FieldSpec["type"];
+    itemFields?: FieldSpec["itemFields"];
+  }[],
+): DocumentSecretMeta {
+  const pathList: PathSegment[][] = [];
+  const seenPaths = new Set<string>();
+  const keySet = new Set<string>();
+  const valueSet = new Set<string>();
+
+  const addSecretPath = (segments: readonly PathSegment[], value?: unknown): void => {
+    if (!segments.length) return;
+    const key = JSON.stringify(segments);
+    if (!seenPaths.has(key)) {
+      seenPaths.add(key);
+      pathList.push([...segments]);
+    }
+    keySet.add(formatPath(segments));
+    const leaf = segments.at(-1);
+    if (typeof leaf === "string" && leaf.trim()) keySet.add(leaf);
+    if (value !== undefined) collectSecretStrings(value, valueSet);
+  };
+
+  for (const field of docFields) {
+    const actual = getAtPath(parsed, field.segments);
+    if (field.secret === true || field.type === "secret") {
+      addSecretPath(field.segments, actual);
+    } else if (field.itemFields?.length && Array.isArray(actual)) {
+      for (let i = 0; i < actual.length; i += 1) {
+        const item = actual[i];
+        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+        for (const itemSpec of field.itemFields) {
+          if (itemSpec.secret === true || itemSpec.type === "secret") {
+            const propVal = (item as Record<string, unknown>)[itemSpec.key];
+            if (propVal !== undefined) {
+              addSecretPath([...field.segments, i, itemSpec.key], propVal);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  collectNestedSecretValues(parsed, valueSet);
+  return {
+    documentIndex,
+    startLine,
+    secretPaths: pathList,
+    secretKeys: [...keySet],
+    secretValues: [...valueSet],
+  };
+}
+
+export function collectNestedSecretValues(
+  value: unknown,
+  out: Set<string>,
+  insideSecret = false,
+  depth = 0,
+  state = { nodes: 0 },
+): void {
+  if (depth > 16 || state.nodes >= 4_000 || value === undefined || value === null) return;
+  state.nodes += 1;
+  if (typeof value === "string") {
+    if (insideSecret || containsSecretValuePattern(value)) {
+      collectSecretStrings(value, out);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (insideSecret) {
+      collectSecretStrings(value, out);
+      return;
+    }
+    for (const item of value) {
+      if (state.nodes >= 4_000) return;
+      collectNestedSecretValues(item, out, false, depth + 1, state);
+    }
+    return;
+  }
+  if (typeof value === "object" && !(value instanceof Date)) {
+    for (const [k, item] of Object.entries(value as Record<string, unknown>)) {
+      if (state.nodes >= 4_000) return;
+      const keySecret = insideSecret || isSensitiveKey(k);
+      collectNestedSecretValues(item, out, keySecret, depth + 1, state);
+    }
+  }
+}
+
+function collectItemFieldSecrets(
+  items: readonly unknown[],
+  itemFields: readonly NonNullable<FieldSpec["itemFields"]>[number][],
+  out: Set<string>,
+): void {
+  const secretKeys = itemFields.filter((spec) => spec.secret === true || spec.type === "secret").map((spec) => spec.key);
+  if (!secretKeys.length) return;
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    for (const key of secretKeys) {
+      const val = record[key];
+      if (val !== undefined) collectSecretStrings(val, out);
+    }
+  }
 }
 
 function hydrateFieldValues(fields: readonly FieldSpec[], parsed: unknown): FieldSpec[] {

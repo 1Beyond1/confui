@@ -273,6 +273,7 @@ export async function writeCachedSchemaStore(
   schema: Record<string, unknown>,
   now = Date.now(),
 ): Promise<void> {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return;
   const target = cacheFilePath(cacheDir, url);
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
   try {

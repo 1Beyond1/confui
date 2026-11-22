@@ -10,12 +10,16 @@ import type {
   ProjectSearchResult,
   SearchMatchKind,
 } from "../shared/schema.ts";
+import { maskDocumentLines } from "../shared/diff.ts";
 import { isForbiddenKey } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { HARD_FILE_LIMIT, readTextSnapshot } from "./files.ts";
 import { assertEditableSyntax, parseConfig, parseYamlDocuments } from "./formats.ts";
+import { stripBom } from "./formats/common.ts";
+import { matchIniAssignment, matchIniSectionHeader, parseIniSection } from "./formats/ini.ts";
 import { isSecretPath, toEditorValue } from "./inference/common.ts";
 import { maskDocumentSecrets } from "./inference/heuristic.ts";
+import { collectNestedSecretValues } from "./inference/index.ts";
 import { formatPath, resolveExistingProjectPath, safeJoin } from "./paths.ts";
 import { scanProject } from "./scanner.ts";
 
@@ -129,18 +133,21 @@ export async function searchProjectConfigs(
         if (signal?.aborted) return;
 
         assertEditableSyntax(file.path, snapshot.text);
+        const cleanText = stripBom(snapshot.text);
         const needComments = pathHits.length + valueHits.length <= limit;
         let fileHits: ProjectSearchHit[];
         if (file.format === "yaml") {
-          const yamlDocs = parseYamlDocuments(snapshot.text);
+          const yamlDocs = parseYamlDocuments(cleanText);
           searchedFiles += 1;
           if (yamlDocs.length > 1) {
             fileHits = [];
+            const fileSecretValues = new Set<string>();
             for (const doc of yamlDocs) {
-              const docSlice = snapshot.text.slice(doc.spanStart, doc.spanEnd);
+              collectNestedSecretValues(doc.value, fileSecretValues);
+              const docSlice = cleanText.slice(doc.spanStart, doc.spanEnd);
               let spanLineOffset = 0;
-              for (let pos = 0; pos < doc.spanStart && pos < snapshot.text.length; pos += 1) {
-                if (snapshot.text.charCodeAt(pos) === 10) spanLineOffset += 1;
+              for (let pos = 0; pos < doc.spanStart && pos < cleanText.length; pos += 1) {
+                if (cleanText.charCodeAt(pos) === 10) spanLineOffset += 1;
               }
               fileHits.push(
                 ...searchSingleFile(
@@ -158,15 +165,17 @@ export async function searchProjectConfigs(
               );
             }
             if (needComments) {
-              fileHits.push(...searchFileComments(file, snapshot.text.replace(/\r\n/g, "\n"), needle));
+              fileHits.push(
+                ...searchFileComments(file, cleanText.replace(/\r\n/g, "\n"), needle, [...fileSecretValues]),
+              );
             }
           } else {
-            fileHits = searchSingleFile(file, snapshot.text, yamlDocs[0]!.value, needle, needComments);
+            fileHits = searchSingleFile(file, cleanText, yamlDocs[0]!.value, needle, needComments);
           }
         } else {
-          const parsed = parseConfig(snapshot.text, file.format);
+          const parsed = parseConfig(cleanText, file.format);
           searchedFiles += 1;
-          fileHits = searchSingleFile(file, snapshot.text, parsed, needle, needComments);
+          fileHits = searchSingleFile(file, cleanText, parsed, needle, needComments);
         }
         for (const hit of fileHits) {
           if (hit.matchKind === "path") {
@@ -356,7 +365,9 @@ function searchSingleFile(
   visit(parsed, [], 0);
 
   if (includeComments) {
-    hits.push(...searchFileComments(file, normalizedText, needle));
+    const fileSecretValues = new Set<string>();
+    collectNestedSecretValues(parsed, fileSecretValues);
+    hits.push(...searchFileComments(file, normalizedText, needle, [...fileSecretValues]));
   }
 
   return hits;
@@ -366,21 +377,44 @@ function searchFileComments(
   file: ConfigFile,
   normalizedText: string,
   needle: string,
+  secretValues: readonly string[] = [],
 ): ProjectSearchHit[] {
   const hits: ProjectSearchHit[] = [];
   const comments = extractFileComments(normalizedText, file.format);
+  if (!comments.length) return hits;
+
+  // Group contiguous comment lines into blocks and mask each block with full
+  // multi-line state so multi-line PEM private keys (including body lines) and
+  // echoed secret values can never leak into cross-file search hits.
+  const blocks: Array<Array<{ line: number; text: string }>> = [];
   for (const comment of comments) {
-    const sanitized = maskDocumentSecrets(comment.text).trim();
-    if (!sanitized) continue;
-    if (sanitized.toLowerCase().includes(needle)) {
-      hits.push({
-        file: file.path,
-        format: file.format,
-        line: comment.line,
-        matchKind: "comment",
-        preview: truncateSnippet(sanitized, 140),
-        secret: false,
-      });
+    const current = blocks.at(-1);
+    if (current && comment.line <= current.at(-1)!.line + 1) {
+      current.push(comment);
+    } else {
+      blocks.push([comment]);
+    }
+  }
+
+  for (const block of blocks) {
+    const lineMasked = maskDocumentLines(block.map((item) => item.text).join("\n"), {
+      mask: "***",
+      secretValues,
+    }).lines;
+    for (let i = 0; i < block.length; i += 1) {
+      const comment = block[i]!;
+      const sanitized = maskDocumentSecrets(lineMasked[i] ?? "").trim();
+      if (!sanitized) continue;
+      if (sanitized.toLowerCase().includes(needle)) {
+        hits.push({
+          file: file.path,
+          format: file.format,
+          line: comment.line,
+          matchKind: "comment",
+          preview: truncateSnippet(sanitized, 140),
+          secret: false,
+        });
+      }
     }
   }
   return hits;
@@ -770,14 +804,14 @@ function findSectionedLineForPath(
     }
 
     // INI
-    const iniSection = trimmed.match(/^\[([^\]]+)\]\s*(?:[#;].*)?$/);
-    if (iniSection?.[1]) {
-      currentSection = iniSection[1].split(".").map((part) => part.trim()).filter(Boolean);
+    const iniSection = matchIniSectionHeader(line);
+    if (iniSection) {
+      currentSection = parseIniSection(iniSection.rawSection);
       continue;
     }
-    const iniAssign = line.match(/^\s*([^:=#;\r\n]+?)\s*[:=]/);
-    if (iniAssign?.[1]) {
-      const rawKey = iniAssign[1].trim();
+    const iniAssign = matchIniAssignment(line);
+    if (iniAssign) {
+      const rawKey = iniAssign.rawKey.trim();
       const key = rawKey.endsWith("[]") ? rawKey.slice(0, -2) : rawKey;
       const full = [...currentSection, key];
       if (full.length === target.length && full.every((part, idx) => part === target[idx])) {

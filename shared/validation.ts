@@ -81,6 +81,7 @@ export const PEM_BEGIN_RE = /-----BEGIN (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:EN
 export const PEM_END_RE = /-----END (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----/;
 export const URL_CREDENTIALS_RE = /(\b[a-z][a-z0-9+.-]*:\/\/)([^/\s:@"'<>]*):([^/\s"'<>]+)@/gi;
 export const AUTH_BEARER_BASIC_RE = /(\b(?:Bearer|Basic)\s+)[^\s"',;#]+/gi;
+export const AUTH_TOKEN_HEADER_RE = /(\b[\w.-]*auth(?:orization)?[\w.-]*\s*[:=]\s*["']?(?:Token|ApiKey|API-Key|JWT|OAuth)\s+)[^\s"',;#]+/gi;
 const DIGEST_VALUE_FRAGMENT = `(?:\\\\"(?:[^"\\\\]|\\\\(?!").)*\\\\"|"(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[^\\s,;#"']+)`;
 const DIGEST_PARAM_FRAGMENT = `[A-Za-z0-9_-]+\\s*=\\s*${DIGEST_VALUE_FRAGMENT}`;
 export const AUTH_DIGEST_RE = new RegExp(
@@ -94,7 +95,12 @@ export const JWT_TOKEN_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0
 // Non-global copies for stateless `.test()` calls.
 const URL_CREDENTIALS_TEST_RE = new RegExp(URL_CREDENTIALS_RE.source, "i");
 const AUTH_BEARER_BASIC_TEST_RE = new RegExp(AUTH_BEARER_BASIC_RE.source, "i");
+const AUTH_TOKEN_HEADER_TEST_RE = new RegExp(AUTH_TOKEN_HEADER_RE.source, "i");
 const AUTH_DIGEST_TEST_RE = new RegExp(AUTH_DIGEST_RE.source, "i");
+const INLINE_SECRET_KV_TEST_RE = new RegExp(
+  `(?:^|[\\s,;(\\[{"'])["']?(?:--)?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*[=:]\\s*(?!["']?(?:\\*{3}|•+|null|~)(?:["']|[\\s,;}\\]]|$))(?:"(?:[^"\\\\]|\\\\.)+"|'(?:[^'\\\\]|\\\\.)+'|[^\\s,;}\\]"']+)`,
+  "i",
+);
 const VENDOR_TOKEN_TEST_RE = new RegExp(VENDOR_TOKEN_RE.source);
 const SLACK_WEBHOOK_TEST_RE = new RegExp(SLACK_WEBHOOK_RE.source, "i");
 const JWT_TOKEN_TEST_RE = new RegExp(JWT_TOKEN_RE.source);
@@ -105,7 +111,9 @@ export function containsSecretValuePattern(text: string): boolean {
   return PEM_BEGIN_RE.test(text)
     || URL_CREDENTIALS_TEST_RE.test(text)
     || AUTH_BEARER_BASIC_TEST_RE.test(text)
+    || AUTH_TOKEN_HEADER_TEST_RE.test(text)
     || AUTH_DIGEST_TEST_RE.test(text)
+    || INLINE_SECRET_KV_TEST_RE.test(text)
     || VENDOR_TOKEN_TEST_RE.test(text)
     || SLACK_WEBHOOK_TEST_RE.test(text)
     || JWT_TOKEN_TEST_RE.test(text);

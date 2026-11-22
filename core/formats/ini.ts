@@ -1,6 +1,6 @@
 import * as ini from "ini";
 import type { ConfigChange, PathSegment } from "../../shared/schema.ts";
-import { isForbiddenKey } from "../../shared/validation.ts";
+import { isForbiddenKey, isSensitiveKey, setSafeProperty } from "../../shared/validation.ts";
 import { ConfuiError } from "../errors.ts";
 import { getAtPath } from "../paths.ts";
 import { assertAppendable, detectEol, escapeRegExp, isScalarValue, stripBom } from "./common.ts";
@@ -26,7 +26,7 @@ export function looksLikeIni(text: string): boolean {
   for (const rawLine of stripBom(text).split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#") || line.startsWith(";")) continue;
-    if (/^\[[^\]]+]$/.test(line) || isIniAssignmentLine(line)) assignments += 1;
+    if (matchIniSectionHeader(line) || isIniAssignmentLine(line)) assignments += 1;
     else others += 1;
   }
   const total = assignments + others;
@@ -44,11 +44,36 @@ export function looksLikeIni(text: string): boolean {
  */
 export function parseIni(text: string): Record<string, unknown> {
   // The `ini` package accepts `=` but treats the equally common `key: value`
-  // spelling as a bare boolean key. Normalize only the first unescaped
-  // separator for parsing, while keeping the original text for quote
-  // restoration and source-preserving edits.
-  const normalized = text.split(/\r?\n/).map(normalizeIniLine).join("\n");
-  const parsed = ini.parse(normalized) as Record<string, unknown>;
+  // spelling as a bare boolean key, and rejects section headers with trailing
+  // comments (`[*.md] # comment`) or nested character-class brackets (`[*.[ch]]`).
+  // Normalize those lines for parsing while keeping the original text intact
+  // for quote restoration and source-preserving edits.
+  let rightBracketToken: string | undefined;
+  const ensureRightBracketToken = (): string => {
+    if (!rightBracketToken) {
+      let candidate = "\uE001";
+      while (text.includes(candidate)) candidate += "\uE001";
+      rightBracketToken = candidate;
+    }
+    return rightBracketToken;
+  };
+  const normalized = text
+    .split(/\r?\n/)
+    .map((line) => {
+      const header = matchIniSectionHeader(line);
+      if (header) {
+        const encoded = header.rawSection.includes("]")
+          ? header.rawSection.replace(/]/g, ensureRightBracketToken())
+          : header.rawSection;
+        return `[${encoded}]`;
+      }
+      return normalizeIniLine(line);
+    })
+    .join("\n");
+  const rawParsed = ini.parse(normalized) as Record<string, unknown>;
+  const parsed = rightBracketToken
+    ? restoreSectionBracketTokens(rawParsed, rightBracketToken)
+    : rawParsed;
   restoreQuotedIniStrings(text, parsed);
   return parsed;
 }
@@ -94,9 +119,9 @@ export function patchIni(text: string, changes: readonly ConfigChange[]): string
   let section: string[] = [];
   const next: string[] = [];
   for (const line of lines) {
-    const sectionMatch = line.match(/^\s*\[([^\]]+)]\s*$/);
-    if (sectionMatch?.[1]) {
-      section = parseIniSection(sectionMatch[1]);
+    const sectionHeader = matchIniSectionHeader(line);
+    if (sectionHeader) {
+      section = parseIniSection(sectionHeader.rawSection);
       next.push(line);
       continue;
     }
@@ -131,14 +156,14 @@ export function patchIni(text: string, changes: readonly ConfigChange[]): string
         if (change.value !== undefined) {
           const rawAssignmentKey = keyMatch.rawKey;
           const assignmentKey = isArrayAssignment ? rawAssignmentKey : `${rawAssignmentKey}[]`;
-          const comment = splitIniValueAndComment(keyMatch.rawValue).comment;
+          const comment = preservedIniComment(keyMatch, key, section);
           next.push(...formatIniArrayAssignments(keyMatch, assignmentKey, change.value, comment));
         }
       }
       continue;
     }
     if (change.value === undefined) continue;
-    const comment = splitIniValueAndComment(keyMatch.rawValue).comment;
+    const comment = preservedIniComment(keyMatch, key, section);
     next.push(`${keyMatch.indent}${keyMatch.rawKey}${keyMatch.separator}${formatIniValue(change.value)}${comment}`);
   }
   for (const [id, change] of updates) {
@@ -155,11 +180,11 @@ export function patchIni(text: string, changes: readonly ConfigChange[]): string
     const assignments = formatIniAssignments(key, change.value);
     if (sectionSegments.length) {
       const headerIndex = next.findIndex((line) => {
-        const match = line.match(/^\s*\[([^\]]+)]\s*$/);
-        return Boolean(match?.[1] && sameStringPath(parseIniSection(match[1]), sectionSegments));
+        const header = matchIniSectionHeader(line);
+        return Boolean(header && sameStringPath(parseIniSection(header.rawSection), sectionSegments));
       });
       if (headerIndex >= 0) {
-        let insertionIndex = next.findIndex((line, index) => index > headerIndex && /^\s*\[[^\]]+]\s*$/.test(line));
+        let insertionIndex = next.findIndex((line, index) => index > headerIndex && Boolean(matchIniSectionHeader(line)));
         if (insertionIndex < 0) insertionIndex = next.length;
         while (insertionIndex > headerIndex + 1 && !next[insertionIndex - 1]?.trim()) insertionIndex -= 1;
         next.splice(insertionIndex, 0, ...assignments);
@@ -169,7 +194,7 @@ export function patchIni(text: string, changes: readonly ConfigChange[]): string
         next.push(`[${formatIniSection(sectionSegments)}]`, ...assignments);
       }
     } else {
-      const firstSection = next.findIndex((line) => /^\s*\[[^\]]+]\s*$/.test(line));
+      const firstSection = next.findIndex((line) => Boolean(matchIniSectionHeader(line)));
       const insertionIndex = firstSection >= 0
         ? firstSection
         : next.findIndex((line, index) => index === next.length - 1 && !line.trim());
@@ -245,9 +270,9 @@ function restoreQuotedIniStrings(text: string, parsed: Record<string, unknown>):
   const states = new Map<string, IniParseState>();
   let section: string[] = [];
   for (const line of text.split(/\r?\n/)) {
-    const sectionMatch = line.match(/^\s*\[([^\]]+)]\s*$/);
-    if (sectionMatch?.[1]) {
-      section = parseIniSection(sectionMatch[1]);
+    const sectionHeader = matchIniSectionHeader(line);
+    if (sectionHeader) {
+      section = parseIniSection(sectionHeader.rawSection);
       continue;
     }
     if (/^\s*[#;]/.test(line)) continue;
@@ -371,6 +396,83 @@ export function splitIniValueAndComment(raw: string): { value: string; comment: 
     }
   }
   return { value: raw, comment: "" };
+}
+
+/**
+ * Matches an INI / `.editorconfig` section header line such as `[section]`,
+ * `[*.md] # markdown`, or `[*.[ch]] ; C headers`, balancing nested character-class
+ * brackets (`[...]`) and allowing optional trailing `#` / `;` comments.
+ */
+export function matchIniSectionHeader(line: string): { rawSection: string; comment: string } | undefined {
+  const trimmedStart = line.trimStart();
+  if (!trimmedStart.startsWith("[")) return undefined;
+  let bracketDepth = 0;
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let closeIdx = -1;
+  for (let index = 0; index < trimmedStart.length; index += 1) {
+    const ch = trimmedStart[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "[") {
+      bracketDepth += 1;
+    } else if (ch === "]") {
+      bracketDepth -= 1;
+      if (bracketDepth === 0) {
+        closeIdx = index;
+        break;
+      }
+    }
+  }
+  if (closeIdx <= 1) return undefined;
+  const tail = trimmedStart.slice(closeIdx + 1);
+  if (!/^\s*(?:[#;].*)?$/.test(tail)) return undefined;
+  const rawSection = trimmedStart.slice(1, closeIdx);
+  if (!rawSection.trim()) return undefined;
+  return { rawSection, comment: tail };
+}
+
+function restoreSectionBracketTokens(obj: Record<string, unknown>, token: string): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const restoredKey = key.includes(token) ? key.split(token).join("]") : key;
+    const restoredValue = value !== null && typeof value === "object" && !Array.isArray(value)
+      ? restoreSectionBracketTokens(value as Record<string, unknown>, token)
+      : value;
+    setSafeProperty(result, restoredKey, restoredValue);
+  }
+  return result;
+}
+
+function preservedIniComment(keyMatch: IniAssignment, key: string, section: readonly string[]): string {
+  const parsedComment = splitIniValueAndComment(keyMatch.rawValue).comment;
+  if (!parsedComment) return "";
+  const isSecretLine = isSensitiveKey(key) || section.some(isSensitiveKey);
+  if (!isSecretLine) return parsedComment;
+  // Never carry over unquoted `;` / `#` tails from a secret value (e.g. `.npmrc`
+  // `//host/:_authToken=part1;part2` or passwords containing `;`/`#`).
+  if (
+    keyMatch.rawKey.startsWith("//")
+    || parsedComment.trimStart().startsWith(";")
+    || !/^\s/.test(parsedComment)
+  ) {
+    return "";
+  }
+  return parsedComment;
 }
 
 export function parseIniSection(raw: string): string[] {

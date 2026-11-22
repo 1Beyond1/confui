@@ -146,6 +146,20 @@ export interface YamlDocumentSummary {
   keyCount: number;
 }
 
+/** Per-document secret metadata for multi-document YAML scoping in RawViewer & redacted export. */
+export interface ScopedSecretPath {
+  documentIndex?: number;
+  segments: PathSegment[];
+}
+
+export interface DocumentSecretMeta {
+  documentIndex: number;
+  startLine: number;
+  secretPaths: PathSegment[][];
+  secretKeys: string[];
+  secretValues: string[];
+}
+
 export interface SchemaStoreOrigin {
   name: string;
   url: string;
@@ -168,6 +182,8 @@ export interface ConfigFormSchema {
   yamlDocuments?: YamlDocumentSummary[];
   /** Zero-based index of the active document in a multi-document YAML file. */
   activeDocumentIndex?: number;
+  /** Per-document secret metadata aggregated across all YAML documents (including schema `writeOnly` / `format: password`). */
+  documentSecrets?: DocumentSecretMeta[];
   version: FileVersion;
   rawText: string;
 }
@@ -232,11 +248,27 @@ export interface ConfigCompareEntry {
   targetValue?: unknown;
 }
 
+export interface CompareConfigOptions {
+  sourceDocumentIndex?: number;
+  targetDocumentIndex?: number;
+}
+
+export interface RedactedExportOptions {
+  /** Zero-based YAML document index scoping legacy flat `extraSecretPaths`. */
+  documentIndex?: number;
+  /** Document-scoped secret paths (prevents cross-document over-redaction in multi-doc YAML). */
+  scopedSecretPaths?: ScopedSecretPath[];
+}
+
 export interface ConfigCompareResult {
   sourceFile: string;
   targetFile: string;
   sourceFormat: ConfigFormat;
   targetFormat: ConfigFormat;
+  sourceDocumentIndex?: number;
+  targetDocumentIndex?: number;
+  sourceYamlDocuments?: YamlDocumentSummary[];
+  targetYamlDocuments?: YamlDocumentSummary[];
   targetVersion: FileVersion;
   entries: ConfigCompareEntry[];
   summary: {
@@ -323,6 +355,8 @@ export interface SavePreview {
   expectedVersion: FileVersion;
   /** Zero-based document index when saving one document of a multi-document YAML file. */
   documentIndex?: number;
+  /** Updated multi-document YAML summaries computed from `output` so UI metadata stays in sync after save. */
+  yamlDocuments?: YamlDocumentSummary[];
 }
 
 export interface SaveResult {
@@ -496,16 +530,17 @@ export interface ConfuiAPI {
   previewRestoreBackup(root: string, file: string, expectedVersion: FileVersion): Promise<Result<RestoreBackupPreview>>;
   restoreBackup(root: string, preview: RestoreBackupPreview): Promise<Result<SaveResult>>;
   createFromExample(root: string, exampleFile: string, targetFile?: string): Promise<Result<CreateFromExampleResult>>;
-  compareConfigs(root: string, sourceFile: string, targetFile: string): Promise<Result<ConfigCompareResult>>;
+  compareConfigs(root: string, sourceFile: string, targetFile: string, options?: CompareConfigOptions): Promise<Result<ConfigCompareResult>>;
   previewSyncConfig(
     root: string,
     sourceFile: string,
     targetFile: string,
     selectedSegments: PathSegment[][],
     expectedTargetVersion: FileVersion,
+    options?: CompareConfigOptions,
   ): Promise<Result<SavePreview>>;
-  previewRedactedExport(root: string, file: string, secretPaths?: PathSegment[][]): Promise<Result<RedactedExportPreview>>;
-  saveRedactedExport(root: string, file: string, secretPaths?: PathSegment[][]): Promise<Result<RedactedExportSaveResult>>;
+  previewRedactedExport(root: string, file: string, secretPaths?: PathSegment[][], options?: RedactedExportOptions): Promise<Result<RedactedExportPreview>>;
+  saveRedactedExport(root: string, file: string, secretPaths?: PathSegment[][], options?: RedactedExportOptions): Promise<Result<RedactedExportSaveResult>>;
   searchProject(root: string, query: string, options?: ProjectSearchOptions): Promise<Result<ProjectSearchResult>>;
   getSettings(): Promise<Result<AppSettings>>;
   setSettings(settings: AppSettings): Promise<Result<AppSettings>>;
