@@ -5,29 +5,45 @@ import {
   effectiveValue,
   enumValueEqual,
   fieldKey,
+  isFieldModified,
   isInactiveExamplePlaceholder,
-  isJsonDraft,
-  parseJsonDraft,
   type EditorValues,
 } from "./editor-state.ts";
+import { StructuredArrayControl, StructuredObjectControl } from "./components/StructuredControls.tsx";
 import { Icon } from "./icons.tsx";
 import { SourceBadge } from "./ui.tsx";
 
 export function FieldEditor({
   fileKey,
   fields,
+  customKeys,
   values,
   errors,
   onChange,
+  onResetField,
+  onDeleteField,
+  onOpenAddKey,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
   aiAvailable = false,
   onExplain,
   disabled = false,
 }: {
   fileKey?: string;
   fields: FieldSpec[];
+  customKeys?: ReadonlySet<string>;
   values: EditorValues;
   errors: Map<string, string>;
-  onChange: (field: FieldSpec, value: unknown) => void;
+  onChange: (field: FieldSpec, value: unknown, options?: { coalesce?: boolean }) => void;
+  onResetField?: (field: FieldSpec) => void;
+  onDeleteField?: (field: FieldSpec) => void;
+  onOpenAddKey?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
   aiAvailable?: boolean;
   onExplain?: (field: FieldSpec) => Promise<FieldAssistResult>;
   disabled?: boolean;
@@ -60,9 +76,46 @@ export function FieldEditor({
           />
           {query && <button type="button" class="icon-button" disabled={disabled} onClick={() => setQuery("")} aria-label="清空字段筛选"><Icon name="x" size={14}/></button>}
         </label>
-        <span class="field-toolbar__count">
-          {visibleFields.length === fields.length ? `${fields.length} 个配置项` : `${visibleFields.length} / ${fields.length} 个配置项`}
-        </span>
+        <div class="field-toolbar__actions">
+          <span class="field-toolbar__count">
+            {visibleFields.length === fields.length ? `${fields.length} 个配置项` : `${visibleFields.length} / ${fields.length} 个配置项`}
+          </span>
+          {onUndo && onRedo && (
+            <div class="toolbar-history">
+              <button
+                type="button"
+                class="icon-button"
+                disabled={disabled || !canUndo}
+                onClick={onUndo}
+                aria-label="撤销"
+                title="撤销 (Ctrl+Z)"
+              >
+                <Icon name="undo" size={15}/>
+              </button>
+              <button
+                type="button"
+                class="icon-button"
+                disabled={disabled || !canRedo}
+                onClick={onRedo}
+                aria-label="重做"
+                title="重做 (Ctrl+Y)"
+              >
+                <Icon name="redo" size={15}/>
+              </button>
+            </div>
+          )}
+          {onOpenAddKey && (
+            <button
+              type="button"
+              class="toolbar-add-key"
+              disabled={disabled}
+              onClick={onOpenAddKey}
+            >
+              <Icon name="plus" size={14}/>
+              <span>新增配置项</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {groups.length ? <div class="field-groups">
@@ -81,13 +134,16 @@ export function FieldEditor({
                   <FieldRow
                     key={key}
                     field={field}
+                    isCustom={Boolean(customKeys?.has(key))}
                     value={values[key]}
                     error={errors.get(key)}
                     controlId={controlIds.get(key) ?? `field-${key}`.replace(/[^\w-]/g, "-")}
                     disabled={disabled}
                     aiAvailable={aiAvailable}
                     onExplain={onExplain ? () => onExplain(field) : undefined}
-                    onChange={(value) => onChange(field, value)}
+                    onChange={(value, coalesce) => onChange(field, value, { coalesce })}
+                    onReset={onResetField ? () => onResetField(field) : undefined}
+                    onDelete={onDeleteField ? () => onDeleteField(field) : undefined}
                   />
                 );
               })}
@@ -107,6 +163,7 @@ export function FieldEditor({
 
 function FieldRow({
   field,
+  isCustom,
   value,
   error,
   controlId,
@@ -114,15 +171,20 @@ function FieldRow({
   aiAvailable,
   onExplain,
   onChange,
+  onReset,
+  onDelete,
 }: {
   field: FieldSpec;
+  isCustom: boolean;
   value: unknown;
   error?: string;
   controlId: string;
   disabled: boolean;
   aiAvailable: boolean;
   onExplain?: () => Promise<FieldAssistResult>;
-  onChange: (value: unknown) => void;
+  onChange: (value: unknown, coalesce?: boolean) => void;
+  onReset?: () => void;
+  onDelete?: () => void;
 }) {
   const [assist, setAssist] = useState<
     | { status: "idle" }
@@ -143,20 +205,26 @@ function FieldRow({
     }
   }
 
-  function handleChange(nextValue: unknown): void {
-    // Keep any existing AI explanation visible while the user edits the field
-    // so they can follow the guidance without it disappearing on the first keystroke.
-    onChange(nextValue);
+  function handleChange(nextValue: unknown, coalesce = false): void {
+    onChange(nextValue, coalesce);
   }
 
-  const inactiveExampleRequired = isInactiveExamplePlaceholder(field, effectiveValue(value));
+  const currentEffective = effectiveValue(value);
+  const modified = isCustom || isFieldModified(field, value);
+  const markedDeleted = !isCustom && field.value !== undefined && currentEffective === undefined;
+  const canDelete = isCustom || field.value !== undefined;
+  const inactiveExampleRequired = isInactiveExamplePlaceholder(field, currentEffective);
 
   return (
-    <div class={`field-row ${field.confidence < 0.7 ? "field-row--suggested" : ""} ${error ? "field-row--error" : ""}`}>
+    <div
+      class={`field-row ${field.confidence < 0.7 ? "field-row--suggested" : ""} ${error ? "field-row--error" : ""} ${modified && !error ? "field-row--modified" : ""} ${markedDeleted ? "field-row--deleted" : ""}`}
+    >
       <div class="field-row__meta">
         <div class="field-row__title">
           <label for={controlId}>{field.label}</label>
-          {field.required && (
+          {isCustom && <span class="field-badge field-badge--added">新增</span>}
+          {markedDeleted && <span class="field-badge field-badge--deleted">待删除</span>}
+          {field.required && !markedDeleted && (
             <span
               class="required-mark"
               title={inactiveExampleRequired ? "来自示例文件的建议必填项，未在当前配置中启用" : "必填"}
@@ -166,23 +234,55 @@ function FieldRow({
           )}
         </div>
         <code>{field.path}</code>
-        <div title={evidenceTitle}><SourceBadge source={field.source} confidence={field.confidence}/></div>
+        <div class="field-row__meta-bottom">
+          <div title={evidenceTitle}><SourceBadge source={field.source} confidence={field.confidence}/></div>
+        </div>
       </div>
       <div class="field-row__content">
         <div class="field-description-line">
-          {field.description && <p id={`${controlId}-description`} class="field-description">{field.description}</p>}
-          {aiAvailable && onExplain && (
-            <button
-              type="button"
-              class="field-ai-button"
-              disabled={disabled || assist.status === "loading"}
-              onClick={() => void requestAssist()}
-              title="让已配置的 AI 解释这个字段并给出填写建议"
-            >
-              <Icon name={assist.status === "loading" ? "loader" : "sparkles"} class={assist.status === "loading" ? "spin" : undefined} size={13}/>
-              <span>{assist.status === "loading" ? "分析中" : assist.status === "success" ? "再次询问" : "AI 解读"}</span>
-            </button>
+          {field.description ? (
+            <p id={`${controlId}-description`} class="field-description">{field.description}</p>
+          ) : (
+            <span class="field-description-spacer"/>
           )}
+          <div class="field-row__quick-actions">
+            {modified && !isCustom && onReset && (
+              <button
+                type="button"
+                class="field-action-btn"
+                disabled={disabled}
+                onClick={onReset}
+                title={markedDeleted ? "取消删除并恢复原值" : "恢复此字段原始值"}
+              >
+                <Icon name="undo" size={12}/>
+                <span>{markedDeleted ? "取消删除" : "恢复原值"}</span>
+              </button>
+            )}
+            {canDelete && !markedDeleted && onDelete && (
+              <button
+                type="button"
+                class="field-action-btn field-action-btn--danger"
+                disabled={disabled}
+                onClick={onDelete}
+                title={isCustom ? "移除此新增配置项" : "标记删除此配置项"}
+              >
+                <Icon name="trash" size={12}/>
+                <span>删除</span>
+              </button>
+            )}
+            {aiAvailable && onExplain && !isCustom && (
+              <button
+                type="button"
+                class="field-ai-button"
+                disabled={disabled || assist.status === "loading"}
+                onClick={() => void requestAssist()}
+                title="让已配置的 AI 解释这个字段并给出填写建议"
+              >
+                <Icon name={assist.status === "loading" ? "loader" : "sparkles"} class={assist.status === "loading" ? "spin" : undefined} size={13}/>
+                <span>{assist.status === "loading" ? "分析中" : assist.status === "success" ? "再次询问" : "AI 解读"}</span>
+              </button>
+            )}
+          </div>
         </div>
         <FieldControl
           id={controlId}
@@ -236,7 +336,7 @@ function FieldControl({
   error?: string;
   descriptionId?: string;
   disabled: boolean;
-  onChange: (value: unknown) => void;
+  onChange: (value: unknown, coalesce?: boolean) => void;
 }) {
   const [revealed, setRevealed] = useState(false);
   const [numberText, setNumberText] = useState(() => formatNumberInput(value));
@@ -328,24 +428,31 @@ function FieldControl({
     );
   }
 
-  if (field.type === "array" || field.type === "json") {
-    const draft = isJsonDraft(value) ? value : { text: value === undefined ? "" : JSON.stringify(value, null, 2) };
+  if (field.type === "array") {
     return (
-      <div class="code-control">
-        <div class="code-control__bar"><span>JSON</span><small>{field.type === "array" ? "数组" : "对象"}</small></div>
-        <textarea
-          id={id}
-          class={`control control--code ${error ? "control--error" : ""}`}
-          value={draft.text}
-          rows={Math.min(14, Math.max(4, draft.text.split("\n").length + 1))}
-          spellcheck={false}
-          aria-describedby={describedBy}
-          aria-invalid={Boolean(error)}
-          aria-required={field.required}
-          disabled={disabled}
-          onInput={(event) => onChange(parseJsonDraft(event.currentTarget.value))}
-        />
-      </div>
+      <StructuredArrayControl
+        id={id}
+        field={field}
+        value={value}
+        error={error}
+        describedBy={describedBy}
+        disabled={disabled}
+        onChange={(next) => onChange(next, false)}
+      />
+    );
+  }
+
+  if (field.type === "json") {
+    return (
+      <StructuredObjectControl
+        id={id}
+        field={field}
+        value={value}
+        error={error}
+        describedBy={describedBy}
+        disabled={disabled}
+        onChange={(next) => onChange(next, false)}
+      />
     );
   }
 
@@ -377,7 +484,7 @@ function FieldControl({
           aria-invalid={Boolean(error)}
           aria-required={field.required}
           disabled={disabled}
-          onInput={(event) => onChange(event.currentTarget.value)}
+          onInput={(event) => onChange(event.currentTarget.value, true)}
         />
         <button type="button" class="icon-button" disabled={disabled} onClick={() => setRevealed(!revealed)} aria-label={revealed ? "隐藏内容" : "显示内容"}>
           <Icon name={revealed ? "eye-off" : "eye"}/>
@@ -456,7 +563,7 @@ function FieldControl({
             && (field.type !== "integer" || Number.isSafeInteger(parsed))
             && (field.type !== "number" || !Number.isInteger(parsed) || Number.isSafeInteger(parsed));
           lastNumberValue.current = valid ? parsed : raw;
-          onChange(valid ? parsed : raw);
+          onChange(valid ? parsed : raw, true);
         }}
         onBlur={() => {
           const parsed = Number(numberText);
@@ -483,7 +590,7 @@ function FieldControl({
       aria-invalid={Boolean(error)}
       aria-required={field.required}
       disabled={disabled}
-      onInput={(event) => onChange(event.currentTarget.value)}
+      onInput={(event) => onChange(event.currentTarget.value, true)}
     />
   );
 }

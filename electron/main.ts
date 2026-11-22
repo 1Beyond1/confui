@@ -24,7 +24,13 @@ import { maskDocumentSecrets, maskSecrets } from "../core/inference/heuristic.ts
 import { isSecretPath } from "../core/inference/common.ts";
 import { assertEditableSyntax, detectFormat, parseConfig } from "../core/formats.ts";
 import { getAtPath, resolveExistingProjectPath } from "../core/paths.ts";
-import { commitSave, previewSave } from "../core/save.ts";
+import {
+  commitRestoreBackup,
+  commitSave,
+  getBackupStatus,
+  previewRestoreBackup,
+  previewSave,
+} from "../core/save.ts";
 import { isForbiddenKey, normalizeGithubUrl } from "../shared/validation.ts";
 import { scanProject } from "../core/scanner.ts";
 import { SettingsStore, type SecretCodec } from "../core/settings.ts";
@@ -38,6 +44,7 @@ import type {
   FieldType,
   InferOptions,
   Result,
+  RestoreBackupPreview,
   SavePreview,
   TestAIRequest,
   ThemePreference,
@@ -337,6 +344,35 @@ function registerIpcHandlers(): void {
     }
   });
 
+  handle("confui:getBackupStatus", async (_event, root: unknown, file: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
+    return getBackupStatus(root, file);
+  });
+
+  handle("confui:previewRestoreBackup", async (_event, root: unknown, file: unknown, expectedVersion: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
+    if (!isFileVersion(expectedVersion)) throw new ConfuiError("INVALID_INPUT", "文件版本参数无效");
+    return previewRestoreBackup(root, file, expectedVersion);
+  });
+
+  handle("confui:restoreBackup", async (_event, root: unknown, preview: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    if (!isRestoreBackupPreview(preview)) throw new ConfuiError("INVALID_INPUT", "备份恢复预览无效");
+    const absolutePath = (await resolveExistingProjectPath(root, preview.file)).path;
+    suppressChange = { absolutePath, until: Date.now() + 2_000 };
+    try {
+      const result = await commitRestoreBackup(root, preview);
+      suppressChange.hash = result.version.hash;
+      suppressChange.until = Date.now() + 1_000;
+      return result;
+    } catch (error) {
+      suppressChange = undefined;
+      throw error;
+    }
+  });
+
   handle("confui:getSettings", async () => settingsStore.loadForRenderer());
 
   handle("confui:setSettings", async (_event, settings: unknown) => {
@@ -528,6 +564,21 @@ function isSavePreview(value: unknown): value is SavePreview {
     && Array.isArray(preview.operations)
     && preview.operations.length <= MAX_SAVE_OPERATIONS
     && isFileVersion(preview.expectedVersion);
+}
+
+function isRestoreBackupPreview(value: unknown): value is RestoreBackupPreview {
+  if (value === null || typeof value !== "object") return false;
+  const preview = value as RestoreBackupPreview;
+  return boundedString(preview.projectRoot, MAX_PROJECT_PATH_CHARS)
+    && boundedString(preview.file, MAX_CONFIG_PATH_CHARS)
+    && typeof preview.format === "string"
+    && SUPPORTED_FORMATS.has(preview.format)
+    && boundedString(preview.currentText, HARD_FILE_LIMIT)
+    && boundedString(preview.backupText, HARD_FILE_LIMIT)
+    && isFileVersion(preview.expectedVersion)
+    && isFileVersion(preview.backupVersion)
+    && typeof preview.backupModifiedAt === "number"
+    && Number.isFinite(preview.backupModifiedAt);
 }
 
 function isAiSettings(value: unknown): value is AppSettings["ai"] {

@@ -1,31 +1,42 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type {
   AppSettings,
+  BackupStatus,
   ConfigFile,
   ConfigFormat,
   ConfigFormSchema,
   FieldAssistField,
   FieldAssistResult,
   FieldSpec,
+  FieldType,
+  PathSegment,
   ProjectScanResult,
   RecentProject,
+  RestoreBackupPreview,
   SavePreview,
 } from "../../shared/schema.ts";
+import { normalizeGithubUrl } from "../../shared/validation.ts";
+import { AddKeyModal } from "./components/AddKeyModal.tsx";
 import { EditorSkeleton, EditorSummary } from "./components/EditorSummary.tsx";
 import { HomePage } from "./components/HomePage.tsx";
 import { RawViewer } from "./components/RawViewer.tsx";
+import { RestoreBackupModal } from "./components/RestoreBackupModal.tsx";
 import { SaveConfirmModal } from "./components/SaveConfirmModal.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { UnsavedConfigModal, UnsavedSettingsModal } from "./components/UnsavedModals.tsx";
 import { FieldEditor } from "./FieldEditor.tsx";
 import {
   collectChanges,
+  createCustomFieldSpec,
+  createJsonDraft,
   effectiveValue,
   fieldKey,
+  initialFieldEditorValue,
   initializeEditorValues,
+  needsJsonEditor,
   validationErrors,
-  type EditorValues,
 } from "./editor-state.ts";
+import { useEditorHistory } from "./hooks/useEditorHistory.ts";
 import { Icon } from "./icons.tsx";
 import { SettingsPage } from "./SettingsPage.tsx";
 import { Button, EmptyIllustration, Logo } from "./ui.tsx";
@@ -35,12 +46,11 @@ import {
   errorMessage,
   sameProjectRoot,
 } from "./utils/format.ts";
-import { normalizeGithubUrl } from "../../shared/validation.ts";
 import "./styles.css";
 
 type View = "home" | "editor" | "settings";
 type EditorTab = "form" | "raw";
-type BusyState = "scan" | "infer" | "preview" | "save" | null;
+type BusyState = "scan" | "infer" | "preview" | "save" | "restore" | null;
 type ToastType = "success" | "error" | "info";
 type PendingAction =
   | { kind: "file"; file: ConfigFile }
@@ -71,13 +81,15 @@ export function App() {
   const [formatFilter, setFormatFilter] = useState<ConfigFormat | "all">("all");
   const [activeFile, setActiveFile] = useState<ConfigFile>();
   const [schema, setSchema] = useState<ConfigFormSchema>();
-  const [values, setValues] = useState<EditorValues>({});
   const [editorTab, setEditorTab] = useState<EditorTab>("form");
   const [busy, setBusy] = useState<BusyState>(null);
   const [toast, setToast] = useState<ToastState>();
   const [externalChange, setExternalChange] = useState(false);
   const [loadError, setLoadError] = useState<LoadErrorState>();
   const [savePreview, setSavePreview] = useState<SavePreview>();
+  const [backupStatus, setBackupStatus] = useState<BackupStatus>();
+  const [restorePreview, setRestorePreview] = useState<RestoreBackupPreview>();
+  const [addKeyOpen, setAddKeyOpen] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsPageRevision, setSettingsPageRevision] = useState(0);
@@ -89,12 +101,23 @@ export function App() {
   const openSequence = useRef(0);
   const mainContentRef = useRef<HTMLDivElement>(null);
 
-  const changes = useMemo(() => schema ? collectChanges(schema.fields, values) : [], [schema, values]);
-  const errors = useMemo(
-    () => schema ? validationErrors(schema.fields, values, schema.format) : new Map<string, string>(),
-    [schema, values],
+  const history = useEditorHistory();
+  const { values, customFields, canUndo, canRedo } = history;
+
+  const allFields = useMemo(
+    () => (schema ? [...schema.fields, ...customFields] : []),
+    [schema, customFields],
   );
-  const dirty = changes.length > 0;
+  const customKeys = useMemo(
+    () => new Set(customFields.map((field) => fieldKey(field))),
+    [customFields],
+  );
+  const changes = useMemo(() => schema ? collectChanges(allFields, values) : [], [schema, allFields, values]);
+  const errors = useMemo(
+    () => schema ? validationErrors(allFields, values, schema.format) : new Map<string, string>(),
+    [schema, allFields, values],
+  );
+  const dirty = changes.length > 0 || customFields.length > 0;
 
   const filteredFiles = useMemo(() => {
     const query = fileQuery.trim().toLowerCase();
@@ -143,17 +166,36 @@ export function App() {
   }), [schema, project]);
 
   useEffect(() => {
+    const anyModalOpen = Boolean(savePreview || restorePreview || addKeyOpen || pendingAction || pendingSettingsAction);
     const listener = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      const mod = event.ctrlKey || event.metaKey;
+      const lower = event.key.toLowerCase();
+      if (mod && lower === "s") {
         event.preventDefault();
-        if (view === "editor" && dirty && busy === null && !savePreview && !pendingAction) void beginSave();
+        if (view === "editor" && dirty && busy === null && !anyModalOpen) void beginSave();
+        return;
       }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
+      if (mod && lower === "o") {
         event.preventDefault();
         requestAction({ kind: "browse" });
+        return;
+      }
+      if (view === "editor" && editorTab === "form" && busy === null && !anyModalOpen && mod) {
+        if (lower === "z" && !event.shiftKey && canUndo) {
+          event.preventDefault();
+          history.undo();
+          return;
+        }
+        if ((lower === "y" || (lower === "z" && event.shiftKey)) && canRedo) {
+          event.preventDefault();
+          history.redo();
+          return;
+        }
       }
       if (event.key === "Escape") {
         if (savePreview) closeSavePreview();
+        else if (restorePreview && busy !== "restore") setRestorePreview(undefined);
+        else if (addKeyOpen) setAddKeyOpen(false);
         else if (pendingAction) setPendingAction(undefined);
         else if (pendingSettingsAction) setPendingSettingsAction(undefined);
       }
@@ -175,6 +217,13 @@ export function App() {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
     setToast({ id: Date.now(), message, type });
     toastTimer.current = window.setTimeout(() => setToast(undefined), 3_600);
+  }
+
+  async function refreshBackupStatus(root: string, filePath: string, sequence?: number): Promise<void> {
+    const status = await window.confui.getBackupStatus(root, filePath);
+    if (sequence !== undefined && sequence !== openSequence.current) return;
+    if (status.ok) setBackupStatus(status.data);
+    else setBackupStatus({ exists: false });
   }
 
   async function browseForProject(): Promise<void> {
@@ -202,7 +251,7 @@ export function App() {
     const sequence = ++openSequence.current;
     setBusy("scan");
     try {
-      const result = await window.confui.scanProject(root.trim(), githubUrl.trim() || undefined);
+      const result = await window.confui.scanProject(root.trim(), trimmedGithub || undefined);
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       if (sequence !== openSequence.current) return;
       const scanned = result.data;
@@ -210,11 +259,12 @@ export function App() {
       setProject(scanned);
       setExternalChange(false);
       setLoadError(undefined);
+      setBackupStatus(undefined);
       setRootInput(scanned.root);
       setGithubInput(resolvedGithub);
       setActiveFile(undefined);
       setSchema(undefined);
-      setValues({});
+      history.reset({ values: {}, customFields: [] });
       setView("editor");
       const refreshedSettings = await window.confui.getSettings();
       if (sequence !== openSequence.current) return;
@@ -258,7 +308,8 @@ export function App() {
     setBusy("infer");
     setActiveFile(file);
     setSchema(undefined);
-    setValues({});
+    setBackupStatus(undefined);
+    history.reset({ values: {}, customFields: [] });
     setExternalChange(false);
     setLoadError(undefined);
     setView("editor");
@@ -269,8 +320,9 @@ export function App() {
       if (sequence !== openSequence.current) return;
       setActiveFile(file);
       setSchema(result.data);
-      setValues(initializeEditorValues(result.data.fields));
+      history.reset({ values: initializeEditorValues(result.data.fields), customFields: [] });
       setExternalChange(false);
+      void refreshBackupStatus(root, file.path, sequence);
     } catch (error) {
       if (sequence === openSequence.current) {
         const message = errorMessage(error);
@@ -283,7 +335,7 @@ export function App() {
   }
 
   function requestAction(action: PendingAction): void {
-    if (busy !== null || savePreview || pendingAction || pendingSettingsAction) return;
+    if (busy !== null || savePreview || restorePreview || addKeyOpen || pendingAction || pendingSettingsAction) return;
     if (view === "settings" && settingsDirty && action.kind !== "settings") {
       setPendingSettingsAction(action);
       return;
@@ -338,7 +390,7 @@ export function App() {
       if (!result.data.changes.length) {
         const nextFields = schema.fields.map((field) => ({ ...field, value: effectiveValue(values[fieldKey(field)]) }));
         setSchema({ ...schema, fields: nextFields });
-        setValues(initializeEditorValues(nextFields));
+        history.reset({ values: initializeEditorValues(nextFields), customFields: [] });
         setAfterSaveAction(undefined);
         if (continuation) await performAction(continuation);
         return;
@@ -362,12 +414,17 @@ export function App() {
       const savedValues = new Map(
         savePreview.operations.map((operation) => [JSON.stringify(operation.segments), operation.value]),
       );
-      const nextFields = schema.fields.map((field) => ({
-        ...field,
-        value: savedValues.has(fieldKey(field))
-          ? savedValues.get(fieldKey(field))
-          : effectiveValue(values[fieldKey(field)]),
-      }));
+      const nextFields: FieldSpec[] = [
+        ...schema.fields.map((field) => ({
+          ...field,
+          value: savedValues.has(fieldKey(field))
+            ? savedValues.get(fieldKey(field))
+            : effectiveValue(values[fieldKey(field)]),
+        })),
+        ...customFields
+          .filter((field) => savedValues.get(fieldKey(field)) !== undefined)
+          .map((field) => ({ ...field, value: savedValues.get(fieldKey(field)) })),
+      ];
       const nextSchema = {
         ...schema,
         fields: nextFields,
@@ -375,9 +432,10 @@ export function App() {
         version: result.data.version,
       };
       setSchema(nextSchema);
-      setValues(initializeEditorValues(nextFields));
+      history.reset({ values: initializeEditorValues(nextFields), customFields: [] });
       setSavePreview(undefined);
       setExternalChange(false);
+      void refreshBackupStatus(project.root, schema.file);
       notify(`已保存，并创建 ${result.data.backupPath.split(/[\\/]/).at(-1)}`, "success");
       const action = afterSaveAction;
       setAfterSaveAction(undefined);
@@ -389,10 +447,40 @@ export function App() {
     }
   }
 
+  async function beginRestoreBackup(): Promise<void> {
+    if (!project || !schema || busy !== null) return;
+    setBusy("preview");
+    try {
+      const result = await window.confui.previewRestoreBackup(project.root, schema.file, schema.version);
+      if (!result.ok) throw new Error(result.error.detail || result.error.message);
+      setRestorePreview(result.data);
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirmRestoreBackup(): Promise<void> {
+    if (!project || !activeFile || !restorePreview) return;
+    setBusy("restore");
+    try {
+      const result = await window.confui.restoreBackup(project.root, restorePreview);
+      if (!result.ok) throw new Error(result.error.detail || result.error.message);
+      setRestorePreview(undefined);
+      setBusy(null);
+      notify(`已从 ${restorePreview.file}.bak 恢复`, "success");
+      await loadFile(activeFile, project.root, githubInput);
+    } catch (error) {
+      notify(errorMessage(error), "error");
+      setBusy(null);
+    }
+  }
+
   function discardAndContinue(): void {
     const action = pendingAction;
     setPendingAction(undefined);
-    if (schema) setValues(initializeEditorValues(schema.fields));
+    if (schema) history.reset({ values: initializeEditorValues(schema.fields), customFields: [] });
     if (action) window.setTimeout(() => void performAction(action), 0);
   }
 
@@ -424,8 +512,55 @@ export function App() {
     applyTheme(result.data.theme);
   }
 
-  function updateField(field: FieldSpec, value: unknown): void {
-    setValues((current) => ({ ...current, [fieldKey(field)]: value }));
+  function updateField(field: FieldSpec, value: unknown, options?: { coalesce?: boolean }): void {
+    const key = fieldKey(field);
+    history.commit(
+      (current) => ({
+        ...current,
+        values: { ...current.values, [key]: value },
+      }),
+      options?.coalesce ? { coalesceKey: key } : undefined,
+    );
+  }
+
+  function resetField(field: FieldSpec): void {
+    const key = fieldKey(field);
+    history.commit((current) => ({
+      ...current,
+      values: { ...current.values, [key]: initialFieldEditorValue(field) },
+    }));
+  }
+
+  function deleteField(field: FieldSpec): void {
+    const key = fieldKey(field);
+    if (customKeys.has(key)) {
+      history.commit((current) => {
+        const nextValues = { ...current.values };
+        delete nextValues[key];
+        return {
+          values: nextValues,
+          customFields: current.customFields.filter((item) => fieldKey(item) !== key),
+        };
+      });
+      return;
+    }
+    history.commit((current) => ({
+      ...current,
+      values: {
+        ...current.values,
+        [key]: needsJsonEditor(field) ? createJsonDraft(undefined) : undefined,
+      },
+    }));
+  }
+
+  function addCustomField(segments: PathSegment[], type: FieldType, initialValue: unknown): void {
+    const spec = createCustomFieldSpec(segments, type);
+    const key = fieldKey(spec);
+    const editorVal = needsJsonEditor(spec) ? createJsonDraft(initialValue) : initialValue;
+    history.commit((current) => ({
+      customFields: [...current.customFields, spec],
+      values: { ...current.values, [key]: editorVal },
+    }));
   }
 
   async function askAiAboutField(field: FieldSpec): Promise<FieldAssistResult> {
@@ -546,11 +681,11 @@ export function App() {
                 <Button
                   variant="primary"
                   icon="save"
-                  disabled={!dirty || errors.size > 0 || busy !== null}
+                  disabled={!changes.length || errors.size > 0 || busy !== null}
                   busy={busy === "preview" || busy === "save"}
                   onClick={() => void beginSave()}
                 >
-                  {dirty ? `保存 ${changes.length} 项` : "已保存"}
+                  {changes.length ? `保存 ${changes.length} 项` : "已保存"}
                 </Button>
               </>
             )}
@@ -630,15 +765,29 @@ export function App() {
 
           {view === "editor" && schema && editorTab === "form" && (
             <div id="editor-panel-form" class="editor-page page-wide" role="tabpanel" aria-labelledby="editor-tab-form">
-              <EditorSummary schema={schema}/>
-              {schema.fields.length ? (
+              <EditorSummary
+                schema={schema}
+                fieldCount={allFields.length}
+                backupStatus={backupStatus}
+                busy={busy !== null}
+                onRestoreBackup={() => void beginRestoreBackup()}
+              />
+              {allFields.length ? (
                 <FieldEditor
                   key={fieldEditorRevision}
                   fileKey={`${project?.root ?? ""}:${schema.file}`}
-                  fields={schema.fields}
+                  fields={allFields}
+                  customKeys={customKeys}
                   values={values}
                   errors={errors}
                   disabled={busy !== null}
+                  canUndo={canUndo}
+                  canRedo={canRedo}
+                  onUndo={history.undo}
+                  onRedo={history.redo}
+                  onOpenAddKey={() => setAddKeyOpen(true)}
+                  onResetField={resetField}
+                  onDeleteField={deleteField}
                   aiAvailable={settings.ai.enabled && Boolean(settings.ai.baseUrl.trim() && settings.ai.model.trim())}
                   onExplain={askAiAboutField}
                   onChange={updateField}
@@ -648,7 +797,10 @@ export function App() {
                   <Icon name="info"/>
                   <div>
                     <h2>暂时无法生成表单</h2>
-                    <p>这个文件没有可识别的键值字段。你仍然可以在“原始内容”中查看它。</p>
+                    <p>这个文件没有可识别的键值字段。你可以点击下方新增配置项，或在“原始内容”中查看它。</p>
+                    <Button variant="primary" icon="plus" onClick={() => setAddKeyOpen(true)} class="empty-card__action">
+                      新增配置项
+                    </Button>
                   </div>
                 </div>
               )}
@@ -659,7 +811,7 @@ export function App() {
           {view === "editor" && schema && editorTab === "raw" && <RawViewer schema={schema}/>}
         </div>
 
-        {view === "editor" && schema && dirty && (
+        {view === "editor" && schema && changes.length > 0 && (
           <div class="editor-savebar">
             <div>
               <i/>
@@ -667,7 +819,11 @@ export function App() {
               {errors.size > 0 && <span>{errors.size} 个字段需要修正</span>}
             </div>
             <div>
-              <Button variant="ghost" disabled={busy !== null} onClick={() => setValues(initializeEditorValues(schema.fields))}>
+              <Button
+                variant="ghost"
+                disabled={busy !== null}
+                onClick={() => history.commit(() => ({ values: initializeEditorValues(schema.fields), customFields: [] }))}
+              >
                 全部撤销
               </Button>
               <Button
@@ -702,9 +858,28 @@ export function App() {
         <SaveConfirmModal
           savePreview={savePreview}
           schema={schema}
+          allFields={allFields}
           saving={busy === "save"}
           onClose={closeSavePreview}
           onConfirm={() => void confirmSave()}
+        />
+      )}
+
+      {restorePreview && (
+        <RestoreBackupModal
+          preview={restorePreview}
+          restoring={busy === "restore"}
+          onClose={() => { if (busy !== "restore") setRestorePreview(undefined); }}
+          onConfirm={() => void confirmRestoreBackup()}
+        />
+      )}
+
+      {addKeyOpen && schema && (
+        <AddKeyModal
+          format={schema.format}
+          existingFields={allFields}
+          onClose={() => setAddKeyOpen(false)}
+          onAdd={addCustomField}
         />
       )}
 

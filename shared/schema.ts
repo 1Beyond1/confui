@@ -179,6 +179,23 @@ export interface SaveResult {
   backupPath: string;
 }
 
+export interface BackupStatus {
+  exists: boolean;
+  size?: number;
+  modifiedAt?: number;
+}
+
+export interface RestoreBackupPreview {
+  projectRoot: string;
+  file: string;
+  format: ConfigFormat;
+  currentText: string;
+  backupText: string;
+  expectedVersion: FileVersion;
+  backupVersion: FileVersion;
+  backupModifiedAt: number;
+}
+
 export interface FileChangedEvent {
   projectRoot?: string;
   file: string;
@@ -316,6 +333,9 @@ export interface ConfuiAPI {
   explainField(root: string, file: string, field: FieldAssistField, githubUrl?: string): Promise<Result<FieldAssistResult>>;
   previewSave(root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion): Promise<Result<SavePreview>>;
   saveConfig(root: string, preview: SavePreview): Promise<Result<SaveResult>>;
+  getBackupStatus(root: string, file: string): Promise<Result<BackupStatus>>;
+  previewRestoreBackup(root: string, file: string, expectedVersion: FileVersion): Promise<Result<RestoreBackupPreview>>;
+  restoreBackup(root: string, preview: RestoreBackupPreview): Promise<Result<SaveResult>>;
   getSettings(): Promise<Result<AppSettings>>;
   setSettings(settings: AppSettings): Promise<Result<AppSettings>>;
   removeRecentProject(projectPath: string): Promise<Result<AppSettings>>;

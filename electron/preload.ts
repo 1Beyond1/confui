@@ -7,6 +7,7 @@ import type {
   FieldAssistField,
   FileVersion,
   InferOptions,
+  RestoreBackupPreview,
   SavePreview,
   TestAIRequest,
 } from "../shared/schema.ts";
@@ -22,6 +23,12 @@ const api: ConfuiAPI = {
     ipcRenderer.invoke("confui:previewSave", root, file, changes, expectedVersion),
   saveConfig: (root: string, preview: SavePreview) =>
     ipcRenderer.invoke("confui:saveConfig", root, preview),
+  getBackupStatus: (root: string, file: string) =>
+    ipcRenderer.invoke("confui:getBackupStatus", root, file),
+  previewRestoreBackup: (root: string, file: string, expectedVersion: FileVersion) =>
+    ipcRenderer.invoke("confui:previewRestoreBackup", root, file, expectedVersion),
+  restoreBackup: (root: string, preview: RestoreBackupPreview) =>
+    ipcRenderer.invoke("confui:restoreBackup", root, preview),
   getSettings: () => ipcRenderer.invoke("confui:getSettings"),
   setSettings: (settings: AppSettings) => ipcRenderer.invoke("confui:setSettings", settings),
   removeRecentProject: (projectPath: string) => ipcRenderer.invoke("confui:removeRecentProject", projectPath),

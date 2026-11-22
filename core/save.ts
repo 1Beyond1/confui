@@ -3,10 +3,12 @@ import { chmod, copyFile, lstat, open, rename, stat, unlink } from "node:fs/prom
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
+  BackupStatus,
   ConfigChange,
   ConfigFormat,
   FileVersion,
   PathSegment,
+  RestoreBackupPreview,
   SavePreview,
   SaveResult,
 } from "../shared/schema.ts";
@@ -162,6 +164,155 @@ async function commitSaveExclusive(
       mtimeMs,
       size: Buffer.byteLength(generated.output, "utf8"),
       hash: hashText(generated.output),
+    },
+    backupPath: effectiveBackupPath,
+  };
+}
+
+export async function getBackupStatus(root: string, relativeFile: string): Promise<BackupStatus> {
+  const { root: projectRoot, path: absolutePath } = await resolveExistingProjectPath(root, relativeFile);
+  const backupPath = `${absolutePath}.bak`;
+  try {
+    const info = await lstat(backupPath);
+    if (info.isSymbolicLink() || !info.isFile() || info.size > HARD_FILE_LIMIT) {
+      return { exists: false };
+    }
+    const resolvedBackup = await ensurePathInsideProject(projectRoot, backupPath);
+    if (!samePath(resolvedBackup, backupPath)) return { exists: false };
+    return {
+      exists: true,
+      size: info.size,
+      modifiedAt: info.mtimeMs,
+    };
+  } catch {
+    return { exists: false };
+  }
+}
+
+export async function previewRestoreBackup(
+  root: string,
+  relativeFile: string,
+  expectedVersion: FileVersion,
+): Promise<RestoreBackupPreview> {
+  const { root: projectRoot, path: absolutePath } = await resolveExistingProjectPath(root, relativeFile);
+  const format = detectFormat(relativeFile);
+  if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
+  const currentSnapshot = await readTextSnapshot(absolutePath);
+  assertSameVersion(currentSnapshot.version, expectedVersion);
+
+  const backupPath = `${absolutePath}.bak`;
+  await assertStableTarget(projectRoot, backupPath);
+  const backupSnapshot = await readTextSnapshot(backupPath);
+  assertEditableSyntax(relativeFile, backupSnapshot.text);
+  parseConfig(backupSnapshot.text, format);
+
+  return {
+    projectRoot,
+    file: relativeFile.replace(/\\/g, "/"),
+    format,
+    currentText: currentSnapshot.text,
+    backupText: backupSnapshot.text,
+    expectedVersion: currentSnapshot.version,
+    backupVersion: backupSnapshot.version,
+    backupModifiedAt: backupSnapshot.version.mtimeMs,
+  };
+}
+
+export async function commitRestoreBackup(
+  root: string,
+  preview: RestoreBackupPreview,
+): Promise<SaveResult> {
+  const resolved = await resolveExistingProjectPath(root, preview.file);
+  if (!samePath(resolved.root, preview.projectRoot)) {
+    throw new ConfuiError("FILE_CONFLICT", "恢复预览属于另一个项目，已拒绝写入");
+  }
+  const { path: absolutePath } = resolved;
+  const format = detectFormat(preview.file);
+  if (!format || format !== preview.format) {
+    throw new ConfuiError("INVALID_INPUT", "恢复请求中的文件格式不一致");
+  }
+  if (activeSavePaths.has(absolutePath)) {
+    throw new ConfuiError("FILE_CONFLICT", "这个配置文件正在保存或恢复，请稍后再试");
+  }
+  activeSavePaths.add(absolutePath);
+  try {
+    return await commitRestoreExclusive(resolved.root, absolutePath, preview, format);
+  } finally {
+    activeSavePaths.delete(absolutePath);
+  }
+}
+
+async function commitRestoreExclusive(
+  projectRoot: string,
+  absolutePath: string,
+  preview: RestoreBackupPreview,
+  format: ConfigFormat,
+): Promise<SaveResult> {
+  const backupPath = `${absolutePath}.bak`;
+  await assertStableTarget(projectRoot, absolutePath);
+  await assertStableTarget(projectRoot, backupPath);
+
+  const currentSnapshot = await readTextSnapshot(absolutePath);
+  assertSameVersion(currentSnapshot.version, preview.expectedVersion);
+
+  const backupSnapshot = await readTextSnapshot(backupPath);
+  assertSameVersion(backupSnapshot.version, preview.backupVersion);
+  if (backupSnapshot.text !== preview.backupText) {
+    throw new ConfuiError("FILE_CONFLICT", "备份文件已发生变化，请重新预览后再恢复");
+  }
+  assertEditableSyntax(preview.file, backupSnapshot.text);
+  parseConfig(backupSnapshot.text, format);
+  assertWritableSize(backupSnapshot.text);
+
+  const temporaryPath = join(dirname(absolutePath), `.${basename(absolutePath)}.confui-${process.pid}-${randomUUID()}.tmp`);
+  const backupTemporaryPath = join(dirname(absolutePath), `.${basename(absolutePath)}.confui-${process.pid}-${randomUUID()}.bak.tmp`);
+  let mainReplaced = false;
+  let effectiveBackupPath = backupPath;
+
+  try {
+    const mode = (await stat(absolutePath)).mode;
+    const handle = await open(temporaryPath, "wx");
+    try {
+      await handle.writeFile(backupSnapshot.text, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await chmod(temporaryPath, mode);
+
+    await assertStableTarget(projectRoot, absolutePath);
+    assertSameVersion(await currentVersion(absolutePath), preview.expectedVersion);
+
+    await copyFile(absolutePath, backupTemporaryPath);
+    await assertStableTarget(projectRoot, absolutePath);
+    assertSameVersion(await currentVersion(absolutePath), preview.expectedVersion);
+
+    await renameWithRetry(temporaryPath, absolutePath);
+    mainReplaced = true;
+  } catch (error) {
+    await safeUnlink(temporaryPath);
+    if (!mainReplaced) await safeUnlink(backupTemporaryPath);
+    if (error instanceof ConfuiError) throw error;
+    throw new ConfuiError(
+      "SAVE_ERROR",
+      "从备份恢复失败，原文件没有被覆盖",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
+  try {
+    await promoteBackup(backupTemporaryPath, backupPath);
+  } catch {
+    effectiveBackupPath = backupTemporaryPath;
+  }
+
+  const mtimeMs = await stat(absolutePath).then((info) => info.mtimeMs).catch(() => Date.now());
+  return {
+    file: preview.file,
+    version: {
+      mtimeMs,
+      size: Buffer.byteLength(backupSnapshot.text, "utf8"),
+      hash: hashText(backupSnapshot.text),
     },
     backupPath: effectiveBackupPath,
   };

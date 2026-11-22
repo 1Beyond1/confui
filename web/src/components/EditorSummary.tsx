@@ -1,17 +1,43 @@
-import type { ConfigFormSchema } from "../../../shared/schema.ts";
+import type { BackupStatus, ConfigFormSchema } from "../../../shared/schema.ts";
 import { Icon } from "../icons.tsx";
-import { SourceBadge } from "../ui.tsx";
+import { Button, SourceBadge } from "../ui.tsx";
 import { FORMAT_LABELS, FORMAT_SHORT_LABELS, formatBytes } from "../utils/format.ts";
 
-export function EditorSummary({ schema }: { schema: ConfigFormSchema }) {
+export function EditorSummary({
+  schema,
+  fieldCount,
+  backupStatus,
+  busy,
+  onRestoreBackup,
+}: {
+  schema: ConfigFormSchema;
+  fieldCount?: number;
+  backupStatus?: BackupStatus;
+  busy?: boolean;
+  onRestoreBackup?: () => void;
+}) {
+  const totalFields = fieldCount ?? schema.fields.length;
   return (
     <section class="editor-summary">
-      <div class="editor-summary__main">
-        <span class={`format-icon format-icon--${schema.format}`}>{FORMAT_SHORT_LABELS[schema.format]}</span>
-        <div>
-          <h1>{schema.kind}</h1>
-          <p>{schema.fields.length} 个字段 · {FORMAT_LABELS[schema.format]} · {formatBytes(schema.version.size)}</p>
+      <div class="editor-summary__top">
+        <div class="editor-summary__main">
+          <span class={`format-icon format-icon--${schema.format}`}>{FORMAT_SHORT_LABELS[schema.format]}</span>
+          <div>
+            <h1>{schema.kind}</h1>
+            <p>{totalFields} 个字段 · {FORMAT_LABELS[schema.format]} · {formatBytes(schema.version.size)}</p>
+          </div>
         </div>
+        {backupStatus?.exists && onRestoreBackup && (
+          <Button
+            variant="ghost"
+            icon="history"
+            disabled={busy}
+            onClick={onRestoreBackup}
+            title={backupStatus.modifiedAt ? `上次备份时间：${new Date(backupStatus.modifiedAt).toLocaleString()}` : undefined}
+          >
+            从 .bak 恢复
+          </Button>
+        )}
       </div>
       <div class="source-pipeline">
         {schema.sources.map((source) => (

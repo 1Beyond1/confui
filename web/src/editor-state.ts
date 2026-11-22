@@ -1,5 +1,5 @@
-import type { ConfigChange, ConfigFormat, FieldSpec } from "../../shared/schema.ts";
-import { isHexColor } from "../../shared/validation.ts";
+import type { ConfigChange, ConfigFormat, FieldSpec, FieldType, PathSegment } from "../../shared/schema.ts";
+import { isForbiddenKey, isHexColor } from "../../shared/validation.ts";
 
 export interface JsonDraft {
   __confuiJsonDraft: true;
@@ -187,6 +187,130 @@ function normalizeEditorValue(field: Pick<FieldSpec, "type" | "enum">, value: un
       && (field.type === "integer" || !Number.isInteger(number) || Number.isSafeInteger(number))) return number;
   }
   return value;
+}
+
+export function initialFieldEditorValue(field: FieldSpec): unknown {
+  const value = normalizeEditorValue(field, field.value);
+  return needsJsonEditor(field) ? createJsonDraft(value) : value;
+}
+
+export function isFieldModified(field: FieldSpec, editorValue: unknown): boolean {
+  if (isJsonDraft(editorValue) && editorValue.error) return true;
+  const value = effectiveValue(editorValue);
+  const original = normalizeEditorValue(field, field.value);
+  return !deepEqual(value, original);
+}
+
+export function isEditableScalar(value: unknown): value is string | number | boolean | null {
+  return value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value));
+}
+
+export function isScalarArray(value: unknown): value is Array<string | number | boolean | null> {
+  return Array.isArray(value) && value.every(isEditableScalar);
+}
+
+export function isFlatScalarObject(value: unknown): value is Record<string, string | number | boolean | null> {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.values(value as Record<string, unknown>).every(isEditableScalar);
+}
+
+export function allowedCustomFieldTypes(format: ConfigFormat): FieldType[] {
+  if (format === "env" || format === "properties") {
+    return ["string", "integer", "number", "boolean", "secret"];
+  }
+  if (format === "ini") {
+    return ["string", "integer", "number", "boolean", "secret", "array"];
+  }
+  return ["string", "integer", "number", "boolean", "secret", "array", "json"];
+}
+
+export function defaultValueForType(type: FieldType): unknown {
+  switch (type) {
+    case "boolean": return false;
+    case "integer":
+    case "number": return 0;
+    case "array": return [];
+    case "json": return {};
+    case "color": return "#2563eb";
+    default: return "";
+  }
+}
+
+export function validateNewKeyPath(
+  rawPath: string,
+  format: ConfigFormat,
+  existingFields: readonly FieldSpec[],
+): { segments: PathSegment[]; error?: string } {
+  const trimmed = rawPath.trim();
+  if (!trimmed) return { segments: [], error: "请输入配置项键名" };
+  if (trimmed.includes("\0") || trimmed.length > 512) {
+    return { segments: [], error: "键名包含无效字符或长度超限" };
+  }
+
+  let segments: string[];
+  if (format === "env") {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
+      return { segments: [], error: "ENV 键名只允许字母、数字和下划线，且不能以数字开头" };
+    }
+    segments = [trimmed];
+  } else if (format === "properties") {
+    segments = [trimmed];
+  } else {
+    segments = trimmed.split(".").map((part) => part.trim());
+    if (segments.some((part) => !part)) {
+      return { segments: [], error: "路径中不能包含空白段，例如连续的点号" };
+    }
+  }
+
+  if (segments.length > 32) {
+    return { segments: [], error: "嵌套层级过多" };
+  }
+  if (segments.some(isForbiddenKey)) {
+    return { segments: [], error: "键名不能使用 __proto__、prototype 或 constructor" };
+  }
+
+  const candidateKey = JSON.stringify(segments);
+  for (const existing of existingFields) {
+    if (fieldKey(existing) === candidateKey) {
+      return { segments: [], error: "该配置项已存在" };
+    }
+    if (isStrictSegmentPrefix(existing.segments, segments) || isStrictSegmentPrefix(segments, existing.segments)) {
+      return { segments: [], error: `与已有路径 ${existing.path} 存在父子冲突` };
+    }
+  }
+  return { segments };
+}
+
+export function createCustomFieldSpec(
+  segments: readonly PathSegment[],
+  type: FieldType,
+  group = "自定义",
+): FieldSpec {
+  const path = segments
+    .map((segment, index) => (typeof segment === "number" ? `[${segment}]` : `${index ? "." : ""}${segment}`))
+    .join("");
+  const leaf = String(segments.at(-1) ?? path);
+  return {
+    path,
+    segments: [...segments],
+    label: leaf,
+    type,
+    secret: type === "secret" || undefined,
+    group,
+    value: undefined,
+    source: "heuristic",
+    confidence: 1,
+    evidence: [],
+  };
+}
+
+function isStrictSegmentPrefix(prefix: readonly PathSegment[], full: readonly PathSegment[]): boolean {
+  return prefix.length < full.length && prefix.every((part, idx) => part === full[idx]);
 }
 
 function deepEqual(left: unknown, right: unknown): boolean {
