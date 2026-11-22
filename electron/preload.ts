@@ -8,6 +8,7 @@ import type {
   FileVersion,
   InferOptions,
   Locale,
+  PathSegment,
   RestoreBackupPreview,
   SavePreview,
   TestAIRequest,
@@ -30,6 +31,21 @@ const api: ConfuiAPI = {
     ipcRenderer.invoke("confui:previewRestoreBackup", root, file, expectedVersion),
   restoreBackup: (root: string, preview: RestoreBackupPreview) =>
     ipcRenderer.invoke("confui:restoreBackup", root, preview),
+  createFromExample: (root: string, exampleFile: string, targetFile?: string) =>
+    ipcRenderer.invoke("confui:createFromExample", root, exampleFile, targetFile),
+  compareConfigs: (root: string, sourceFile: string, targetFile: string) =>
+    ipcRenderer.invoke("confui:compareConfigs", root, sourceFile, targetFile),
+  previewSyncConfig: (
+    root: string,
+    sourceFile: string,
+    targetFile: string,
+    selectedSegments: PathSegment[][],
+    expectedTargetVersion: FileVersion,
+  ) => ipcRenderer.invoke("confui:previewSyncConfig", root, sourceFile, targetFile, selectedSegments, expectedTargetVersion),
+  previewRedactedExport: (root: string, file: string, secretPaths?: PathSegment[][]) =>
+    ipcRenderer.invoke("confui:previewRedactedExport", root, file, secretPaths),
+  saveRedactedExport: (root: string, file: string, secretPaths?: PathSegment[][]) =>
+    ipcRenderer.invoke("confui:saveRedactedExport", root, file, secretPaths),
   getSettings: () => ipcRenderer.invoke("confui:getSettings"),
   setSettings: (settings: AppSettings) => ipcRenderer.invoke("confui:setSettings", settings),
   removeRecentProject: (projectPath: string) => ipcRenderer.invoke("confui:removeRecentProject", projectPath),

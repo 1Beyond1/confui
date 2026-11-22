@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import type { ConfigFormSchema, FieldSpec, SavePreview } from "../../../shared/schema.ts";
+import { SECRET_KEY_PATTERN } from "../../../shared/validation.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button, Modal } from "../ui.tsx";
@@ -26,9 +27,11 @@ export function SaveConfirmModal({
   const { locale, t } = useI18n();
   const [tab, setTab] = useState<DiffTab>("fields");
   const [revealSecrets, setRevealSecrets] = useState(false);
-  const fields = allFields ?? schema?.fields ?? [];
+  const matchesActiveSchema = Boolean(schema && schema.file === savePreview.file);
+  const fields = matchesActiveSchema ? (allFields ?? schema?.fields ?? []) : [];
 
   useEffect(() => {
+    setTab("fields");
     setRevealSecrets(false);
   }, [savePreview]);
 
@@ -89,18 +92,20 @@ export function SaveConfirmModal({
             <Icon name="layers" size={14}/>
             <span>{t("saveModal.tabFields", { count: savePreview.changes.length })}</span>
           </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "unified"}
-            class={tab === "unified" ? "active" : ""}
-            onClick={() => setTab("unified")}
-          >
-            <Icon name="code" size={14}/>
-            <span>{t("saveModal.tabUnified")}</span>
-          </button>
+          {matchesActiveSchema && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "unified"}
+              class={tab === "unified" ? "active" : ""}
+              onClick={() => setTab("unified")}
+            >
+              <Icon name="code" size={14}/>
+              <span>{t("saveModal.tabUnified")}</span>
+            </button>
+          )}
         </div>
-        {tab === "unified" && (
+        {tab === "unified" && matchesActiveSchema && (
           <button
             type="button"
             class="save-diff-secret-btn"
@@ -117,7 +122,7 @@ export function SaveConfirmModal({
         <div class="diff-list">
           {savePreview.changes.map((change) => {
             const field = fields.find((item) => item.path === change.path);
-            const secret = field?.secret || field?.type === "secret";
+            const secret = field?.secret || field?.type === "secret" || SECRET_KEY_PATTERN.test(change.path);
             const kind = change.before === undefined
               ? "added"
               : change.after === undefined

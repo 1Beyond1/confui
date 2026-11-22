@@ -27,9 +27,14 @@ import { getAtPath, resolveExistingProjectPath } from "../core/paths.ts";
 import {
   commitRestoreBackup,
   commitSave,
+  compareConfigFiles,
+  createConfigFromExample,
+  generateRedactedExport,
   getBackupStatus,
   previewRestoreBackup,
   previewSave,
+  previewSyncFromFile,
+  writeRedactedExportToChosenPath,
 } from "../core/save.ts";
 import { isForbiddenKey, normalizeGithubUrl } from "../shared/validation.ts";
 import { scanProject } from "../core/scanner.ts";
@@ -44,6 +49,7 @@ import type {
   FieldType,
   InferOptions,
   Locale,
+  PathSegment,
   Result,
   RestoreBackupPreview,
   SavePreview,
@@ -405,6 +411,69 @@ function registerIpcHandlers(): void {
     }
   });
 
+  handle("confui:createFromExample", async (_event, root: unknown, exampleFile: unknown, targetFile?: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertString(exampleFile, "示例模板路径", MAX_CONFIG_PATH_CHARS);
+    assertOptionalString(targetFile, "目标配置文件路径", MAX_CONFIG_PATH_CHARS);
+    return createConfigFromExample(root, exampleFile, targetFile);
+  });
+
+  handle("confui:compareConfigs", async (_event, root: unknown, sourceFile: unknown, targetFile: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertString(sourceFile, "源配置文件路径", MAX_CONFIG_PATH_CHARS);
+    assertString(targetFile, "目标配置文件路径", MAX_CONFIG_PATH_CHARS);
+    return compareConfigFiles(root, sourceFile, targetFile);
+  });
+
+  handle(
+    "confui:previewSyncConfig",
+    async (
+      _event,
+      root: unknown,
+      sourceFile: unknown,
+      targetFile: unknown,
+      selectedSegments: unknown,
+      expectedTargetVersion: unknown,
+    ) => {
+      assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+      assertString(sourceFile, "源配置文件路径", MAX_CONFIG_PATH_CHARS);
+      assertString(targetFile, "目标配置文件路径", MAX_CONFIG_PATH_CHARS);
+      if (!isPathSegmentList(selectedSegments) || !isFileVersion(expectedTargetVersion)) {
+        throw new ConfuiError("INVALID_INPUT", "配置补齐参数无效");
+      }
+      return previewSyncFromFile(root, sourceFile, targetFile, selectedSegments, expectedTargetVersion);
+    },
+  );
+
+  handle("confui:previewRedactedExport", async (_event, root: unknown, file: unknown, secretPaths?: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
+    const paths = secretPaths === undefined ? [] : parseOptionalSecretPaths(secretPaths);
+    return generateRedactedExport(root, file, paths);
+  });
+
+  handle("confui:saveRedactedExport", async (_event, root: unknown, file: unknown, secretPaths?: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
+    const paths = secretPaths === undefined ? [] : parseOptionalSecretPaths(secretPaths);
+    const resolved = await resolveExistingProjectPath(root, file);
+    const preview = await generateRedactedExport(root, file, paths);
+    const isEn = currentLocale === "en-US";
+    const saveOptions = {
+      title: isEn ? "Export Redacted Copy" : "导出脱敏副本",
+      defaultPath: join(dirname(resolved.path), preview.suggestedFileName),
+      buttonLabel: isEn ? "Export" : "导出",
+    };
+    const chosen = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, saveOptions)
+      : await dialog.showSaveDialog(saveOptions);
+    if (chosen.canceled || !chosen.filePath) {
+      return { savedPath: null, redactedCount: preview.redactedCount };
+    }
+    await writeRedactedExportToChosenPath(chosen.filePath, resolved.path, preview.content);
+    return { savedPath: chosen.filePath, redactedCount: preview.redactedCount };
+  });
+
   handle("confui:getSettings", async () => settingsStore.loadForRenderer());
 
   handle("confui:setSettings", async (_event, settings: unknown) => {
@@ -685,4 +754,19 @@ function isSafeAssistSegment(segment: unknown): segment is string | number {
       && segment.length <= 512
       && !segment.includes("\0")
       && !isForbiddenKey(segment);
+}
+
+function isPathSegmentList(value: unknown): value is PathSegment[][] {
+  return Array.isArray(value)
+    && value.length <= MAX_SAVE_OPERATIONS
+    && value.every(
+      (item) => Array.isArray(item) && item.length >= 1 && item.length <= 32 && item.every(isSafeAssistSegment),
+    );
+}
+
+function parseOptionalSecretPaths(value: unknown): PathSegment[][] {
+  if (!isPathSegmentList(value)) {
+    throw new ConfuiError("INVALID_INPUT", "敏感字段路径列表无效");
+  }
+  return value;
 }

@@ -211,6 +211,11 @@ describe("UI state, diff, validation & i18n integration", () => {
       "confui:getBackupStatus",
       "confui:previewRestoreBackup",
       "confui:restoreBackup",
+      "confui:createFromExample",
+      "confui:compareConfigs",
+      "confui:previewSyncConfig",
+      "confui:previewRedactedExport",
+      "confui:saveRedactedExport",
     ]) {
       expect(preloadSource).toContain(channel);
       expect(mainSource).toContain(channel);

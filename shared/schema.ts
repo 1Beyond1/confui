@@ -136,14 +136,79 @@ export interface ConfigFile {
   warning?: string;
 }
 
+export interface ExampleTemplate {
+  examplePath: string;
+  targetPath: string;
+  format: ConfigFormat;
+  size: number;
+  modifiedAt: number;
+}
+
+export interface ConfigEnvGroup {
+  id: string;
+  label: string;
+  format: ConfigFormat;
+  files: string[];
+}
+
 export interface ProjectScanResult {
   root: string;
   name: string;
   files: ConfigFile[];
+  templates?: ExampleTemplate[];
+  envGroups?: ConfigEnvGroup[];
   detectedGithubUrl?: string;
   scannedAt: number;
   skippedCount: number;
   warnings: string[];
+}
+
+export interface CreateFromExampleResult {
+  file: string;
+  exampleFile: string;
+  format: ConfigFormat;
+  size: number;
+}
+
+export type CompareEntryStatus = "missing-in-target" | "only-in-target" | "different" | "same";
+
+export interface ConfigCompareEntry {
+  path: string;
+  segments: PathSegment[];
+  status: CompareEntryStatus;
+  secret: boolean;
+  hasSource: boolean;
+  hasTarget: boolean;
+  sourceValue?: unknown;
+  targetValue?: unknown;
+}
+
+export interface ConfigCompareResult {
+  sourceFile: string;
+  targetFile: string;
+  sourceFormat: ConfigFormat;
+  targetFormat: ConfigFormat;
+  targetVersion: FileVersion;
+  entries: ConfigCompareEntry[];
+  summary: {
+    missingInTarget: number;
+    onlyInTarget: number;
+    different: number;
+    same: number;
+  };
+}
+
+export interface RedactedExportPreview {
+  sourceFile: string;
+  format: ConfigFormat;
+  suggestedFileName: string;
+  content: string;
+  redactedCount: number;
+}
+
+export interface RedactedExportSaveResult {
+  savedPath: string | null;
+  redactedCount: number;
 }
 
 export type Locale = "zh-CN" | "en-US";
@@ -341,6 +406,17 @@ export interface ConfuiAPI {
   getBackupStatus(root: string, file: string): Promise<Result<BackupStatus>>;
   previewRestoreBackup(root: string, file: string, expectedVersion: FileVersion): Promise<Result<RestoreBackupPreview>>;
   restoreBackup(root: string, preview: RestoreBackupPreview): Promise<Result<SaveResult>>;
+  createFromExample(root: string, exampleFile: string, targetFile?: string): Promise<Result<CreateFromExampleResult>>;
+  compareConfigs(root: string, sourceFile: string, targetFile: string): Promise<Result<ConfigCompareResult>>;
+  previewSyncConfig(
+    root: string,
+    sourceFile: string,
+    targetFile: string,
+    selectedSegments: PathSegment[][],
+    expectedTargetVersion: FileVersion,
+  ): Promise<Result<SavePreview>>;
+  previewRedactedExport(root: string, file: string, secretPaths?: PathSegment[][]): Promise<Result<RedactedExportPreview>>;
+  saveRedactedExport(root: string, file: string, secretPaths?: PathSegment[][]): Promise<Result<RedactedExportSaveResult>>;
   getSettings(): Promise<Result<AppSettings>>;
   setSettings(settings: AppSettings): Promise<Result<AppSettings>>;
   removeRecentProject(projectPath: string): Promise<Result<AppSettings>>;

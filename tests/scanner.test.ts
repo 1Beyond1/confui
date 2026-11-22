@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { normalizeGithubUrl, scanProject } from "../core/scanner.ts";
+import { deriveTargetFromExample, normalizeGithubUrl, scanProject } from "../core/scanner.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -60,5 +60,51 @@ describe("project scanner", () => {
     expect(normalizeGithubUrl("git@github.com:owner/repo.git")).toBe("https://github.com/owner/repo");
     expect(normalizeGithubUrl("https://user:password@github.com/owner/repo")).toBeUndefined();
     expect(normalizeGithubUrl("https://github.com.attacker.example/owner/repo")).toBeUndefined();
+  });
+
+  it("reports unpaired example templates and multi-environment config groups", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-scan-tpl-env-"));
+    temporaryDirectories.push(root);
+    await mkdir(join(root, "config"));
+    await Promise.all([
+      // Unpaired templates (targets do not exist yet)
+      writeFile(join(root, ".env.example"), "PORT=3000\n"),
+      writeFile(join(root, ".env.sample"), "PORT=4000\n"),
+      writeFile(join(root, "config", "service.example.yaml"), "port: 8080\n"),
+      writeFile(join(root, "settings.toml.template"), "port = 9000\n"),
+      // Already paired template (should NOT appear in templates)
+      writeFile(join(root, "config.json"), "{}"),
+      writeFile(join(root, "config.example.json"), "{}"),
+      // Multi-environment groups
+      writeFile(join(root, "config.prod.json"), '{"port":80}'),
+      writeFile(join(root, "config", "app.yaml"), "env: base\n"),
+      writeFile(join(root, "config", "app-dev.yaml"), "env: dev\n"),
+      writeFile(join(root, "config", "app-prod.yaml"), "env: prod\n"),
+    ]);
+
+    expect(deriveTargetFromExample(".env.example")).toEqual({ targetPath: ".env", format: "env" });
+    expect(deriveTargetFromExample("config/app.example.jsonc")).toEqual({ targetPath: "config/app.jsonc", format: "jsonc" });
+    expect(deriveTargetFromExample("README.example.md")).toBeNull();
+
+    const result = await scanProject(root);
+    expect(result.templates?.map((t) => `${t.examplePath}->${t.targetPath}`)).toEqual([
+      ".env.example->.env",
+      "config/service.example.yaml->config/service.yaml",
+      "settings.toml.template->settings.toml",
+    ]);
+    expect(result.envGroups).toEqual([
+      {
+        id: "config.json",
+        label: "config.json",
+        format: "json",
+        files: ["config.json", "config.prod.json"],
+      },
+      {
+        id: "config/app.yaml",
+        label: "config/app.yaml",
+        format: "yaml",
+        files: ["config/app.yaml", "config/app-dev.yaml", "config/app-prod.yaml"],
+      },
+    ]);
   });
 });

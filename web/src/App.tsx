@@ -5,6 +5,7 @@ import type {
   ConfigFile,
   ConfigFormat,
   ConfigFormSchema,
+  ExampleTemplate,
   FieldAssistField,
   FieldAssistResult,
   FieldSpec,
@@ -18,7 +19,9 @@ import type {
 } from "../../shared/schema.ts";
 import { normalizeGithubUrl } from "../../shared/validation.ts";
 import { AddKeyModal } from "./components/AddKeyModal.tsx";
+import { CompareSyncModal } from "./components/CompareSyncModal.tsx";
 import { EditorSkeleton, EditorSummary } from "./components/EditorSummary.tsx";
+import { ExportRedactedModal } from "./components/ExportRedactedModal.tsx";
 import { HomePage } from "./components/HomePage.tsx";
 import { RawViewer } from "./components/RawViewer.tsx";
 import { RestoreBackupModal } from "./components/RestoreBackupModal.tsx";
@@ -61,7 +64,8 @@ type PendingAction =
   | { kind: "settings" }
   | { kind: "reload" }
   | { kind: "rescan" }
-  | { kind: "browse" };
+  | { kind: "browse" }
+  | { kind: "init-template"; template: ExampleTemplate };
 
 interface ToastState {
   id: number;
@@ -94,6 +98,8 @@ export function App() {
   const [backupStatus, setBackupStatus] = useState<BackupStatus>();
   const [restorePreview, setRestorePreview] = useState<RestoreBackupPreview>();
   const [addKeyOpen, setAddKeyOpen] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsPageRevision, setSettingsPageRevision] = useState(0);
@@ -134,6 +140,23 @@ export function App() {
       && (!query || file.path.toLowerCase().includes(query)),
     );
   }, [project, fileQuery, formatFilter]);
+
+  const openableFiles = useMemo(
+    () => (project?.files ?? []).filter((file) => file.status === "ready" || file.status === "large"),
+    [project],
+  );
+
+  const activeFileHasEnvGroup = useMemo(
+    () => Boolean(activeFile && (project?.envGroups ?? []).some((group) => group.files.includes(activeFile.path))),
+    [project, activeFile],
+  );
+
+  const secretPathsForExport = useMemo<PathSegment[][]>(
+    () => allFields
+      .filter((field) => field.secret || field.type === "secret")
+      .map((field) => [...field.segments]),
+    [allFields],
+  );
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -180,7 +203,9 @@ export function App() {
 
   const keydownHandlerRef = useRef<(event: KeyboardEvent) => void>();
   keydownHandlerRef.current = (event: KeyboardEvent) => {
-    const anyModalOpen = Boolean(savePreview || restorePreview || addKeyOpen || pendingAction || pendingSettingsAction);
+    const anyModalOpen = Boolean(
+      savePreview || restorePreview || addKeyOpen || compareOpen || exportOpen || pendingAction || pendingSettingsAction,
+    );
     const mod = event.ctrlKey || event.metaKey;
     const lower = event.key.toLowerCase();
     if (mod && lower === "s") {
@@ -212,6 +237,8 @@ export function App() {
       if (savePreview) closeSavePreview();
       else if (restorePreview && busy !== "restore") setRestorePreview(undefined);
       else if (addKeyOpen) setAddKeyOpen(false);
+      else if (compareOpen) setCompareOpen(false);
+      else if (exportOpen) setExportOpen(false);
       else if (pendingAction) setPendingAction(undefined);
       else if (pendingSettingsAction) setPendingSettingsAction(undefined);
     }
@@ -358,7 +385,7 @@ export function App() {
   }
 
   function requestAction(action: PendingAction): void {
-    if (busy !== null || savePreview || restorePreview || addKeyOpen || pendingAction || pendingSettingsAction) return;
+    if (busy !== null || savePreview || restorePreview || addKeyOpen || compareOpen || exportOpen || pendingAction || pendingSettingsAction) return;
     if (view === "settings" && settingsDirty && action.kind !== "settings") {
       setPendingSettingsAction(action);
       return;
@@ -370,6 +397,33 @@ export function App() {
     }
     if (dirty) setPendingAction(action);
     else void performAction(action);
+  }
+
+  async function initTemplate(template: ExampleTemplate): Promise<void> {
+    if (!project) return;
+    setBusy("scan");
+    try {
+      const created = await window.confui.createFromExample(
+        project.root,
+        template.examplePath,
+        template.targetPath,
+      );
+      if (!created.ok) throw new Error(created.error.detail || created.error.message);
+      const scanned = await window.confui.scanProject(project.root, githubInput || undefined);
+      if (!scanned.ok) throw new Error(scanned.error.detail || scanned.error.message);
+      setProject(scanned.data);
+      setBusy(null);
+      notify(t("toast.templateCreated", { file: created.data.file }), "success");
+      const createdFile = scanned.data.files.find(
+        (file) => file.path.toLowerCase() === created.data.file.toLowerCase(),
+      );
+      if (createdFile) {
+        await loadFile(createdFile, scanned.data.root, githubInput);
+      }
+    } catch (error) {
+      notify(errorMessage(error, t("common.actionFailed")), "error");
+      setBusy(null);
+    }
   }
 
   async function performAction(action: PendingAction): Promise<void> {
@@ -397,6 +451,9 @@ export function App() {
         return;
       case "browse":
         await browseForProject();
+        return;
+      case "init-template":
+        await initTemplate(action.template);
     }
   }
 
@@ -432,37 +489,50 @@ export function App() {
   }
 
   async function confirmSave(): Promise<void> {
-    if (!savePreview || !schema || !project) return;
+    if (!savePreview || !project) return;
     setBusy("save");
     try {
       const result = await window.confui.saveConfig(project.root, savePreview);
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
+      const isActiveTarget = Boolean(schema && savePreview.file === schema.file);
       const savedValues = new Map(
         savePreview.operations.map((operation) => [JSON.stringify(operation.segments), operation.value]),
       );
-      const nextFields: FieldSpec[] = [
-        ...schema.fields.map((field) => ({
-          ...field,
-          value: savedValues.has(fieldKey(field))
-            ? savedValues.get(fieldKey(field))
-            : effectiveValue(values[fieldKey(field)]),
-        })),
-        ...customFields
-          .filter((field) => savedValues.get(fieldKey(field)) !== undefined)
-          .map((field) => ({ ...field, value: savedValues.get(fieldKey(field)) })),
-      ];
-      const nextSchema = {
-        ...schema,
-        fields: nextFields,
-        rawText: savePreview.output,
-        version: result.data.version,
-      };
-      setSchema(nextSchema);
-      history.reset({ values: initializeEditorValues(nextFields), customFields: [] });
+      const hasUnlistedKeys = isActiveTarget && savePreview.operations.some(
+        (operation) => !allFields.some((field) => fieldKey(field) === JSON.stringify(operation.segments)),
+      );
       setSavePreview(undefined);
-      setExternalChange(false);
-      void refreshBackupStatus(project.root, schema.file);
-      notify(t("toast.savedWithBackup", { backup: result.data.backupPath.split(/[\\/]/).at(-1) ?? ".bak" }), "success");
+      const backupName = result.data.backupPath.split(/[\\/]/).at(-1) ?? ".bak";
+      if (isActiveTarget && schema && !hasUnlistedKeys) {
+        const nextFields: FieldSpec[] = [
+          ...schema.fields.map((field) => ({
+            ...field,
+            value: savedValues.has(fieldKey(field))
+              ? savedValues.get(fieldKey(field))
+              : effectiveValue(values[fieldKey(field)]),
+          })),
+          ...customFields
+            .filter((field) => savedValues.get(fieldKey(field)) !== undefined)
+            .map((field) => ({ ...field, value: savedValues.get(fieldKey(field)) })),
+        ];
+        const nextSchema = {
+          ...schema,
+          fields: nextFields,
+          rawText: savePreview.output,
+          version: result.data.version,
+        };
+        setSchema(nextSchema);
+        history.reset({ values: initializeEditorValues(nextFields), customFields: [] });
+        setExternalChange(false);
+        void refreshBackupStatus(project.root, schema.file);
+        notify(t("toast.savedWithBackup", { backup: backupName }), "success");
+      } else if (isActiveTarget && activeFile) {
+        setBusy(null);
+        notify(t("toast.savedWithBackup", { backup: backupName }), "success");
+        await loadFile(activeFile, project.root, githubInput);
+      } else {
+        notify(t("toast.savedWithBackup", { backup: backupName }), "success");
+      }
       const action = afterSaveAction;
       setAfterSaveAction(undefined);
       if (action) await performAction(action);
@@ -681,6 +751,7 @@ export function App() {
           onSettings={() => requestAction({ kind: "settings" })}
           onRescan={() => requestAction({ kind: "rescan" })}
           onSelectFile={(file) => requestAction({ kind: "file", file })}
+          onInitTemplate={(template) => requestAction({ kind: "init-template", template })}
         />
 
         <main class="main-shell" onWheel={forwardMainWheel}>
@@ -813,6 +884,10 @@ export function App() {
                   fieldCount={allFields.length}
                   backupStatus={backupStatus}
                   busy={busy !== null}
+                  canCompare={openableFiles.length >= 2}
+                  hasEnvGroup={activeFileHasEnvGroup}
+                  onOpenCompare={() => setCompareOpen(true)}
+                  onOpenExportRedacted={() => setExportOpen(true)}
                   onRestoreBackup={() => void beginRestoreBackup()}
                 />
                 {allFields.length ? (
@@ -923,6 +998,30 @@ export function App() {
             existingFields={allFields}
             onClose={() => setAddKeyOpen(false)}
             onAdd={addCustomField}
+          />
+        )}
+
+        {compareOpen && project && openableFiles.length >= 2 && (
+          <CompareSyncModal
+            projectRoot={project.root}
+            openableFiles={openableFiles}
+            envGroups={project.envGroups ?? []}
+            activeFilePath={activeFile?.path}
+            onClose={() => setCompareOpen(false)}
+            onPreviewReady={(preview) => {
+              setCompareOpen(false);
+              setSavePreview(preview);
+            }}
+          />
+        )}
+
+        {exportOpen && project && schema && (
+          <ExportRedactedModal
+            projectRoot={project.root}
+            file={schema.file}
+            secretPaths={secretPathsForExport}
+            onClose={() => setExportOpen(false)}
+            onToast={notify}
           />
         )}
 

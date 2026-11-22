@@ -1,5 +1,5 @@
 import { useRef } from "preact/hooks";
-import type { ConfigFile, ConfigFormat, ProjectScanResult } from "../../../shared/schema.ts";
+import type { ConfigFile, ConfigFormat, ExampleTemplate, ProjectScanResult } from "../../../shared/schema.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Logo } from "../ui.tsx";
@@ -21,6 +21,7 @@ export interface SidebarProps {
   onSettings: () => void;
   onRescan: () => void;
   onSelectFile: (file: ConfigFile) => void;
+  onInitTemplate?: (template: ExampleTemplate) => void;
 }
 
 export function Sidebar({
@@ -39,9 +40,11 @@ export function Sidebar({
   onSettings,
   onRescan,
   onSelectFile,
+  onInitTemplate,
 }: SidebarProps) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
+  const templates = project?.templates ?? [];
 
   const activeIndex = filteredFiles.findIndex((file) => activeFile?.path === file.path && view === "editor");
 
@@ -157,6 +160,35 @@ export function Sidebar({
               <div class="file-list__empty"><Icon name="search"/><span>{t("sidebar.noMatchingFiles")}</span></div>
             )}
           </div>
+          {templates.length > 0 && onInitTemplate && (
+            <div class="sidebar-templates" aria-label={t("sidebar.templatesTitle")}>
+              <div class="sidebar-templates__head">
+                <span>{t("sidebar.templatesTitle")}</span>
+                <small>{templates.length}</small>
+              </div>
+              <div class="sidebar-templates__list">
+                {templates.map((template) => (
+                  <div class="template-item" key={template.examplePath}>
+                    <span class={`format-icon format-icon--${template.format}`}>{FORMAT_SHORT_LABELS[template.format]}</span>
+                    <span class="template-item__copy">
+                      <strong title={template.targetPath}>{template.targetPath.split("/").at(-1)}</strong>
+                      <small title={template.examplePath}>{t("sidebar.templateFrom", { source: template.examplePath })}</small>
+                    </span>
+                    <button
+                      type="button"
+                      class="template-init-btn"
+                      disabled={busy}
+                      onClick={() => onInitTemplate(template)}
+                      title={t("sidebar.templateInitTitle", { target: template.targetPath, source: template.examplePath })}
+                    >
+                      <Icon name="plus" size={12}/>
+                      <span>{t("sidebar.templateInit")}</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div class="sidebar-empty">

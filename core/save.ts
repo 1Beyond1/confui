@@ -1,13 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { chmod, copyFile, lstat, open, rename, stat, unlink } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { chmod, copyFile, lstat, open, realpath, rename, stat, unlink } from "node:fs/promises";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
   BackupStatus,
+  CompareEntryStatus,
   ConfigChange,
+  ConfigCompareEntry,
+  ConfigCompareResult,
   ConfigFormat,
+  CreateFromExampleResult,
   FileVersion,
   PathSegment,
+  RedactedExportPreview,
   RestoreBackupPreview,
   SavePreview,
   SaveResult,
@@ -16,11 +21,23 @@ import { isForbiddenKey } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { HARD_FILE_LIMIT, currentVersion, hashText, readTextSnapshot } from "./files.ts";
 import { assertEditableSyntax, detectFormat, parseConfig, updateConfigText } from "./formats.ts";
-import { ensurePathInsideProject, formatPath, getAtPath, pathKey, resolveExistingProjectPath } from "./paths.ts";
+import { isSecretPath, toEditorValue } from "./inference/common.ts";
+import { maskDocumentSecrets } from "./inference/heuristic.ts";
+import {
+  ensurePathInsideProject,
+  formatPath,
+  getAtPath,
+  pathKey,
+  resolveExistingProjectPath,
+  safeJoin,
+} from "./paths.ts";
+import { deriveTargetFromExample, isExampleFilename } from "./scanner.ts";
 
 const activeSavePaths = new Set<string>();
 const MAX_SAVE_CHANGES = 2_000;
 const MAX_CHANGE_VALUE_BYTES = 1 * 1024 * 1024;
+const MAX_COMPARE_DEPTH = 16;
+const MAX_COMPARE_ENTRIES = 5_000;
 const RENAME_RETRY_DELAYS_MS = [20, 50, 100, 200];
 
 export async function previewSave(
@@ -515,4 +532,551 @@ function validateChangeValue(value: unknown): void {
     seen.delete(current);
   }
   visit(value, false);
+}
+
+/**
+ * Safely creates a new configuration file from an existing example template
+ * inside the same project. Enforces physical `realpath` containment, rejects
+ * symlinks in both source and target paths, and uses `open(..., "wx")` to
+ * guarantee an existing file is never overwritten.
+ */
+export async function createConfigFromExample(
+  root: string,
+  exampleRelativeFile: string,
+  targetRelativeFile?: string,
+): Promise<CreateFromExampleResult> {
+  if (typeof root !== "string" || !root.trim()) {
+    throw new ConfuiError("INVALID_INPUT", "项目路径无效");
+  }
+  let projectRoot: string;
+  try {
+    projectRoot = await realpath(resolve(root.trim()));
+  } catch {
+    throw new ConfuiError("NOT_FOUND", "找不到这个项目文件夹");
+  }
+
+  const lexicalExample = safeJoin(projectRoot, exampleRelativeFile);
+  await assertSafeParentDirectory(projectRoot, lexicalExample);
+  let exampleInfo;
+  try {
+    exampleInfo = await lstat(lexicalExample);
+  } catch {
+    throw new ConfuiError("NOT_FOUND", "找不到指定的示例模板文件");
+  }
+  if (exampleInfo.isSymbolicLink() || !exampleInfo.isFile()) {
+    throw new ConfuiError("INVALID_INPUT", "示例模板必须是普通文件，已拒绝软链接");
+  }
+  const resolvedExample = await resolveExistingProjectPath(projectRoot, exampleRelativeFile);
+  if (!samePath(resolvedExample.path, lexicalExample)) {
+    throw new ConfuiError("INVALID_INPUT", "示例模板路径包含符号链接，已拒绝访问");
+  }
+  const normalizedExample = relative(projectRoot, lexicalExample).replace(/\\/g, "/");
+
+  let normalizedTarget: string;
+  let format: ConfigFormat;
+  if (targetRelativeFile !== undefined && targetRelativeFile.trim()) {
+    const trimmedTarget = targetRelativeFile.trim();
+    const candidateLexical = safeJoin(projectRoot, trimmedTarget);
+    normalizedTarget = relative(projectRoot, candidateLexical).replace(/\\/g, "/");
+    const targetName = basename(normalizedTarget);
+    const detected = detectFormat(targetName);
+    if (!detected || isExampleFilename(targetName) || /\.bak(?:\.|$)/i.test(targetName)) {
+      throw new ConfuiError("INVALID_INPUT", "目标配置文件名不受支持");
+    }
+    format = detected;
+  } else {
+    const derived = deriveTargetFromExample(normalizedExample);
+    if (!derived) {
+      throw new ConfuiError("INVALID_INPUT", "无法从该示例模板推导目标配置文件路径");
+    }
+    normalizedTarget = derived.targetPath;
+    format = derived.format;
+  }
+
+  const lexicalTarget = safeJoin(projectRoot, normalizedTarget);
+  if (samePath(lexicalTarget, lexicalExample)) {
+    throw new ConfuiError("INVALID_INPUT", "目标文件不能与示例模板相同");
+  }
+  await assertSafeParentDirectory(projectRoot, lexicalTarget);
+  const existingTarget = await lstat(lexicalTarget).catch(() => undefined);
+  if (existingTarget) {
+    throw new ConfuiError("FILE_CONFLICT", "目标配置文件已存在，已拒绝覆盖");
+  }
+
+  const snapshot = await readTextSnapshot(lexicalExample);
+  assertEditableSyntax(normalizedTarget, snapshot.text);
+  parseConfig(snapshot.text, format);
+  assertWritableSize(snapshot.text);
+
+  await assertSafeParentDirectory(projectRoot, lexicalTarget);
+  let handle;
+  try {
+    handle = await open(lexicalTarget, "wx");
+    await handle.writeFile(snapshot.text, "utf8");
+    await handle.sync();
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") {
+      throw new ConfuiError("FILE_CONFLICT", "目标配置文件已存在，已拒绝覆盖");
+    }
+    if (error instanceof ConfuiError) throw error;
+    throw new ConfuiError(
+      "SAVE_ERROR",
+      "从示例模板创建配置文件失败",
+      error instanceof Error ? error.message : String(error),
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+
+  await assertStableTarget(projectRoot, lexicalTarget);
+  return {
+    file: normalizedTarget,
+    exampleFile: normalizedExample,
+    format,
+    size: Buffer.byteLength(snapshot.text, "utf8"),
+  };
+}
+
+/**
+ * Structurally compares two configuration files inside the same project and
+ * classifies leaf keys into missing-in-target, different, only-in-target, or same.
+ */
+export async function compareConfigFiles(
+  root: string,
+  sourceRelativeFile: string,
+  targetRelativeFile: string,
+): Promise<ConfigCompareResult> {
+  const sourceResolved = await resolveExistingProjectPath(root, sourceRelativeFile);
+  const targetResolved = await resolveExistingProjectPath(root, targetRelativeFile);
+  await assertStableTarget(sourceResolved.root, sourceResolved.path);
+  await assertStableTarget(targetResolved.root, targetResolved.path);
+
+  const sourceFormat = detectFormat(sourceRelativeFile);
+  const targetFormat = detectFormat(targetRelativeFile);
+  if (!sourceFormat || !targetFormat) {
+    throw new ConfuiError("INVALID_INPUT", "对比文件包含不支持的配置格式");
+  }
+
+  const [sourceSnap, targetSnap] = await Promise.all([
+    readTextSnapshot(sourceResolved.path),
+    readTextSnapshot(targetResolved.path),
+  ]);
+  assertEditableSyntax(sourceRelativeFile, sourceSnap.text);
+  assertEditableSyntax(targetRelativeFile, targetSnap.text);
+
+  const sourceParsed = parseConfig(sourceSnap.text, sourceFormat);
+  const targetParsed = parseConfig(targetSnap.text, targetFormat);
+
+  const rawSourceLeaves = flattenConfigLeaves(sourceParsed);
+  const rawTargetLeaves = flattenConfigLeaves(targetParsed);
+  const sourceLeaves = pruneEmptyContainerConflicts(rawSourceLeaves, rawTargetLeaves);
+  const targetLeaves = pruneEmptyContainerConflicts(rawTargetLeaves, rawSourceLeaves);
+
+  const allKeys = new Set<string>([...sourceLeaves.keys(), ...targetLeaves.keys()]);
+  const entries: ConfigCompareEntry[] = [];
+  const summary = {
+    missingInTarget: 0,
+    onlyInTarget: 0,
+    different: 0,
+    same: 0,
+  };
+
+  for (const key of allKeys) {
+    const src = sourceLeaves.get(key);
+    const dst = targetLeaves.get(key);
+    const segments = src?.segments ?? dst!.segments;
+    const path = src?.path ?? dst!.path;
+    const secret = isSecretPath(segments);
+    const hasSource = src !== undefined;
+    const hasTarget = dst !== undefined;
+    let status: CompareEntryStatus;
+    if (hasSource && !hasTarget) {
+      status = "missing-in-target";
+      summary.missingInTarget += 1;
+    } else if (!hasSource && hasTarget) {
+      status = "only-in-target";
+      summary.onlyInTarget += 1;
+    } else if (isDeepStrictEqual(src?.value, dst?.value)) {
+      status = "same";
+      summary.same += 1;
+    } else {
+      status = "different";
+      summary.different += 1;
+    }
+    entries.push({
+      path,
+      segments: [...segments],
+      status,
+      secret,
+      hasSource,
+      hasTarget,
+      sourceValue: hasSource ? src.value : undefined,
+      targetValue: hasTarget ? dst.value : undefined,
+    });
+  }
+
+  const statusOrder: Record<CompareEntryStatus, number> = {
+    "missing-in-target": 0,
+    different: 1,
+    "only-in-target": 2,
+    same: 3,
+  };
+  entries.sort((left, right) =>
+    statusOrder[left.status] - statusOrder[right.status]
+    || left.path.localeCompare(right.path, "en", { numeric: true, sensitivity: "base" }),
+  );
+
+  return {
+    sourceFile: sourceRelativeFile.replace(/\\/g, "/"),
+    targetFile: targetRelativeFile.replace(/\\/g, "/"),
+    sourceFormat,
+    targetFormat,
+    targetVersion: targetSnap.version,
+    entries,
+    summary,
+  };
+}
+
+/**
+ * Generates a validated `SavePreview` that copies selected key paths from
+ * `sourceRelativeFile` into `targetRelativeFile`. Values are read directly from
+ * disk in the main process rather than trusted from the renderer.
+ */
+export async function previewSyncFromFile(
+  root: string,
+  sourceRelativeFile: string,
+  targetRelativeFile: string,
+  selectedSegments: readonly (readonly PathSegment[])[],
+  expectedTargetVersion: FileVersion,
+): Promise<SavePreview> {
+  if (!Array.isArray(selectedSegments) || selectedSegments.length === 0 || selectedSegments.length > MAX_SAVE_CHANGES) {
+    throw new ConfuiError("INVALID_INPUT", "请选择至少一项需要补齐的配置项");
+  }
+  const sourceResolved = await resolveExistingProjectPath(root, sourceRelativeFile);
+  await assertStableTarget(sourceResolved.root, sourceResolved.path);
+  const sourceFormat = detectFormat(sourceRelativeFile);
+  const targetFormat = detectFormat(targetRelativeFile);
+  if (!sourceFormat || !targetFormat) {
+    throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
+  }
+  const sourceSnap = await readTextSnapshot(sourceResolved.path);
+  assertEditableSyntax(sourceRelativeFile, sourceSnap.text);
+  const sourceParsed = parseConfig(sourceSnap.text, sourceFormat);
+
+  const changes: ConfigChange[] = [];
+  for (const segments of selectedSegments) {
+    if (!Array.isArray(segments) || segments.length < 1 || segments.length > 32) {
+      throw new ConfuiError("INVALID_INPUT", "配置字段路径无效");
+    }
+    const rawValue = getAtPath(sourceParsed, segments);
+    if (rawValue === undefined) {
+      throw new ConfuiError("INVALID_INPUT", `源文件中不存在配置项 ${formatPath(segments)}`);
+    }
+    const editorVal = toEditorValue(rawValue);
+    const adaptedValue = adaptValueForTargetFormat(editorVal, segments, targetFormat);
+    changes.push({ segments: [...segments], value: adaptedValue });
+  }
+
+  return previewSave(root, targetRelativeFile, changes, expectedTargetVersion);
+}
+
+/**
+ * Generates a redacted, comment-preserving copy of a configuration file for
+ * sharing or publishing as a template. Masks both structured secret fields
+ * (including caller-provided schema-marked secret paths) and pattern-matched
+ * inline credentials via `maskDocumentSecrets`.
+ */
+export async function generateRedactedExport(
+  root: string,
+  relativeFile: string,
+  extraSecretPaths: readonly (readonly PathSegment[])[] = [],
+): Promise<RedactedExportPreview> {
+  const resolved = await resolveExistingProjectPath(root, relativeFile);
+  await assertStableTarget(resolved.root, resolved.path);
+  const format = detectFormat(relativeFile);
+  if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
+
+  const snapshot = await readTextSnapshot(resolved.path);
+  assertEditableSyntax(relativeFile, snapshot.text);
+  const parsed = parseConfig(snapshot.text, format);
+  const leaves = flattenConfigLeaves(parsed);
+
+  const extraPathKeys = new Set<string>(
+    extraSecretPaths
+      .filter((segments) => Array.isArray(segments) && segments.length > 0 && segments.length <= 32)
+      .map((segments) => pathKey(segments)),
+  );
+
+  const redactChanges: ConfigChange[] = [];
+  for (const [key, leaf] of leaves) {
+    if (!isSecretPath(leaf.segments) && !extraPathKeys.has(key)) continue;
+    if (leaf.value === undefined || leaf.value === null || leaf.value === "") continue;
+    if (typeof leaf.value === "object") continue;
+    redactChanges.push({ segments: [...leaf.segments], value: "***" });
+  }
+
+  let updatedText = snapshot.text;
+  if (redactChanges.length > 0) {
+    try {
+      updatedText = updateConfigText(snapshot.text, format, redactChanges).output;
+    } catch {
+      // Fall back to pattern-based document masking if incremental patch fails.
+      updatedText = snapshot.text;
+    }
+  }
+  const content = maskDocumentSecrets(updatedText);
+  const redactedCount = countChangedLines(snapshot.text, content);
+
+  return {
+    sourceFile: relativeFile.replace(/\\/g, "/"),
+    format,
+    suggestedFileName: suggestRedactedFileName(basename(relativeFile)),
+    content,
+    redactedCount,
+  };
+}
+
+/**
+ * Writes a redacted export copy safely inside the project root without
+ * overwriting any existing file (`open(..., "wx")`) or following symlinks.
+ */
+export async function writeRedactedExport(
+  root: string,
+  sourceRelativeFile: string,
+  targetRelativeFile: string,
+  extraSecretPaths: readonly (readonly PathSegment[])[] = [],
+): Promise<CreateFromExampleResult> {
+  const resolvedSource = await resolveExistingProjectPath(root, sourceRelativeFile);
+  const preview = await generateRedactedExport(root, sourceRelativeFile, extraSecretPaths);
+  const lexicalTarget = safeJoin(resolvedSource.root, targetRelativeFile);
+  if (samePath(lexicalTarget, resolvedSource.path)) {
+    throw new ConfuiError("INVALID_INPUT", "导出目标不能覆盖原配置文件");
+  }
+  await assertSafeParentDirectory(resolvedSource.root, lexicalTarget);
+  const existing = await lstat(lexicalTarget).catch(() => undefined);
+  if (existing) {
+    throw new ConfuiError("FILE_CONFLICT", "导出目标文件已存在，已拒绝覆盖");
+  }
+  assertWritableSize(preview.content);
+
+  let handle;
+  try {
+    handle = await open(lexicalTarget, "wx");
+    await handle.writeFile(preview.content, "utf8");
+    await handle.sync();
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") {
+      throw new ConfuiError("FILE_CONFLICT", "导出目标文件已存在，已拒绝覆盖");
+    }
+    throw new ConfuiError(
+      "SAVE_ERROR",
+      "导出脱敏副本失败",
+      error instanceof Error ? error.message : String(error),
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+
+  return {
+    file: relative(resolvedSource.root, lexicalTarget).replace(/\\/g, "/"),
+    exampleFile: preview.sourceFile,
+    format: preview.format,
+    size: Buffer.byteLength(preview.content, "utf8"),
+  };
+}
+
+/**
+ * Safely writes a redacted export to a user-selected absolute path from native
+ * Save Dialog, refusing symlinks and refusing to overwrite the source file.
+ */
+export async function writeRedactedExportToChosenPath(
+  targetAbsolutePath: string,
+  sourceAbsolutePath: string,
+  content: string,
+): Promise<void> {
+  const resolvedTarget = resolve(targetAbsolutePath);
+  const resolvedSource = await realpath(sourceAbsolutePath);
+  if (samePath(resolvedTarget, resolvedSource)) {
+    throw new ConfuiError("INVALID_INPUT", "导出目标不能覆盖原配置文件");
+  }
+  const existing = await lstat(resolvedTarget).catch(() => undefined);
+  if (existing) {
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      throw new ConfuiError("SAVE_ERROR", "所选目标不是普通文件，已拒绝写入");
+    }
+    const existingReal = await realpath(resolvedTarget);
+    if (samePath(existingReal, resolvedSource)) {
+      throw new ConfuiError("INVALID_INPUT", "导出目标不能覆盖原配置文件");
+    }
+  }
+  assertWritableSize(content);
+  const temporaryPath = join(
+    dirname(resolvedTarget),
+    `.${basename(resolvedTarget)}.confui-${process.pid}-${randomUUID()}.tmp`,
+  );
+  try {
+    const handle = await open(temporaryPath, "wx");
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await renameWithRetry(temporaryPath, resolvedTarget);
+  } catch (error) {
+    await safeUnlink(temporaryPath);
+    if (error instanceof ConfuiError) throw error;
+    throw new ConfuiError(
+      "SAVE_ERROR",
+      "导出脱敏副本失败",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+async function assertSafeParentDirectory(projectRoot: string, lexicalTarget: string): Promise<void> {
+  const parentDir = dirname(lexicalTarget);
+  const relParent = relative(projectRoot, parentDir);
+  if (relParent === ".." || relParent.startsWith(`..${sep}`)) {
+    throw new ConfuiError("INVALID_INPUT", "已拒绝访问项目目录之外的路径");
+  }
+  let current = projectRoot;
+  if (relParent && relParent !== ".") {
+    for (const part of relParent.split(sep).filter(Boolean)) {
+      current = join(current, part);
+      let info;
+      try {
+        info = await lstat(current);
+      } catch {
+        throw new ConfuiError("NOT_FOUND", "目标目录不存在");
+      }
+      if (info.isSymbolicLink() || !info.isDirectory()) {
+        throw new ConfuiError("INVALID_INPUT", "目标路径包含符号链接或非目录节点，已拒绝操作");
+      }
+    }
+  }
+  const resolvedParent = await ensurePathInsideProject(projectRoot, parentDir);
+  if (!samePath(resolvedParent, parentDir)) {
+    throw new ConfuiError("INVALID_INPUT", "目标目录包含符号链接，已拒绝操作");
+  }
+}
+
+interface FlattenedLeaf {
+  segments: PathSegment[];
+  path: string;
+  value: unknown;
+}
+
+function flattenConfigLeaves(parsed: unknown): Map<string, FlattenedLeaf> {
+  const leaves = new Map<string, FlattenedLeaf>();
+  function visit(current: unknown, segments: PathSegment[], depth: number): void {
+    if (leaves.size >= MAX_COMPARE_ENTRIES) return;
+    if (
+      current !== null
+      && typeof current === "object"
+      && !Array.isArray(current)
+      && !(current instanceof Date)
+    ) {
+      const entries = Object.entries(current as Record<string, unknown>);
+      if (entries.length === 0) {
+        if (segments.length > 0) {
+          leaves.set(pathKey(segments), { segments, path: formatPath(segments), value: {} });
+        }
+        return;
+      }
+      if (depth >= MAX_COMPARE_DEPTH) {
+        if (segments.length > 0) {
+          leaves.set(pathKey(segments), {
+            segments,
+            path: formatPath(segments),
+            value: toEditorValue(current),
+          });
+        }
+        return;
+      }
+      for (const [key, child] of entries) {
+        if (key === "$schema" || isForbiddenKey(key)) continue;
+        visit(child, [...segments, key], depth + 1);
+        if (leaves.size >= MAX_COMPARE_ENTRIES) return;
+      }
+      return;
+    }
+    if (segments.length > 0) {
+      leaves.set(pathKey(segments), {
+        segments,
+        path: formatPath(segments),
+        value: toEditorValue(current),
+      });
+    }
+  }
+  visit(parsed, [], 0);
+  return leaves;
+}
+
+function pruneEmptyContainerConflicts(
+  mine: Map<string, FlattenedLeaf>,
+  other: Map<string, FlattenedLeaf>,
+): Map<string, FlattenedLeaf> {
+  const otherSegmentsList = [...other.values()].map((item) => item.segments);
+  const result = new Map<string, FlattenedLeaf>();
+  for (const [key, leaf] of mine) {
+    const isEmptyObj = leaf.value !== null
+      && typeof leaf.value === "object"
+      && !Array.isArray(leaf.value)
+      && Object.keys(leaf.value as Record<string, unknown>).length === 0;
+    if (isEmptyObj && otherSegmentsList.some((otherSegs) => isStrictPrefix(leaf.segments, otherSegs))) {
+      continue;
+    }
+    result.set(key, leaf);
+  }
+  return result;
+}
+
+function adaptValueForTargetFormat(
+  value: unknown,
+  segments: readonly PathSegment[],
+  targetFormat: ConfigFormat,
+): unknown {
+  if (targetFormat === "env" || targetFormat === "properties") {
+    if (segments.length !== 1) {
+      throw new ConfuiError("INVALID_INPUT", `${targetFormat.toUpperCase()} 格式不支持嵌套路径 ${formatPath(segments)}`);
+    }
+    if (value !== null && typeof value === "object") {
+      throw new ConfuiError("INVALID_INPUT", `${targetFormat.toUpperCase()} 格式不支持对象或数组值 ${formatPath(segments)}`);
+    }
+    return value === null ? "" : String(value);
+  }
+  if (targetFormat === "ini") {
+    if (segments.length > 2) {
+      throw new ConfuiError("INVALID_INPUT", `INI 格式不支持超过两层的路径 ${formatPath(segments)}`);
+    }
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      throw new ConfuiError("INVALID_INPUT", `INI 格式不支持嵌套对象值 ${formatPath(segments)}`);
+    }
+  }
+  return value;
+}
+
+function suggestRedactedFileName(fileName: string): string {
+  const lower = fileName.toLowerCase();
+  if (lower === ".env" || lower.startsWith(".env.")) {
+    return `${fileName}.example`;
+  }
+  const ext = extname(fileName);
+  if (ext && ext.length < fileName.length) {
+    const stem = fileName.slice(0, -ext.length);
+    return `${stem}.redacted${ext}`;
+  }
+  return `${fileName}.redacted`;
+}
+
+function countChangedLines(before: string, after: string): number {
+  const left = before.replace(/\r\n/g, "\n").split("\n");
+  const right = after.replace(/\r\n/g, "\n").split("\n");
+  const len = Math.max(left.length, right.length);
+  let count = 0;
+  for (let i = 0; i < len; i += 1) {
+    if (left[i] !== right[i]) count += 1;
+  }
+  return count;
 }

@@ -1,6 +1,13 @@
 import { lstat, open, opendir, realpath, stat } from "node:fs/promises";
-import { basename, join, relative, resolve } from "node:path";
-import type { ConfigFile, ConfigFileStatus, ProjectScanResult } from "../shared/schema.ts";
+import { basename, extname, join, posix, relative, resolve } from "node:path";
+import type {
+  ConfigEnvGroup,
+  ConfigFile,
+  ConfigFileStatus,
+  ConfigFormat,
+  ExampleTemplate,
+  ProjectScanResult,
+} from "../shared/schema.ts";
 import { normalizeGithubUrl } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { AI_FILE_LIMIT, HARD_FILE_LIMIT } from "./files.ts";
@@ -16,6 +23,9 @@ const MAX_SCAN_DEPTH = 32;
 const MAX_SCAN_ENTRIES = 50_000;
 const MAX_SCAN_DIRECTORIES = 4_096;
 const MAX_CONFIG_FILES = 4_000;
+const MAX_EXAMPLE_TEMPLATES = 500;
+const EXAMPLE_MARKERS = ["example", "template", "sample", "default", "dist"] as const;
+const ENV_VARIANT_RE = /^(.+?)[._-](dev|development|prod|production|staging|stage|test|testing|local|qa|uat|preview|ci|sandbox|debug|release|beta|alpha|preprod)$/i;
 
 const KNOWN_FILES = new Set([
   "package.json",
@@ -102,11 +112,14 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
   if (!rootInfo.isDirectory()) throw new ConfuiError("INVALID_INPUT", "请选择一个项目文件夹");
 
   const files: ConfigFile[] = [];
+  const rawTemplates: ExampleTemplate[] = [];
+  const existingPathsLower = new Set<string>();
   const warnings: string[] = [];
   let skippedCount = 0;
   let scannedEntries = 0;
   let scannedDirectories = 0;
   let scheduledConfigFiles = 0;
+  let scheduledTemplates = 0;
   let scanCapped = false;
 
   async function walk(directory: string, depth: number): Promise<void> {
@@ -158,8 +171,42 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
           if (!IGNORE_DIRS.has(lowerName)) directories.push(absolutePath);
           continue;
         }
-        if (!entry.isFile() || IGNORE_FILES.has(lowerName)) continue;
-        if (isExampleFilename(entry.name) || SCHEMA_FILE.test(lowerName) || /\.bak(?:\.|$)/i.test(lowerName)) continue;
+        if (!entry.isFile()) continue;
+        const relativePath = relative(root, absolutePath).replace(/\\/g, "/");
+        existingPathsLower.add(relativePath.toLowerCase());
+        if (IGNORE_FILES.has(lowerName)) continue;
+        if (SCHEMA_FILE.test(lowerName) || /\.bak(?:\.|$)/i.test(lowerName)) continue;
+        if (isExampleFilename(entry.name)) {
+          const derived = deriveTargetFromExample(relativePath);
+          if (!derived || scheduledTemplates >= MAX_EXAMPLE_TEMPLATES) continue;
+          scheduledTemplates += 1;
+          fileTasks.push(async () => {
+            try {
+              const info = await lstat(absolutePath);
+              if (!info.isFile() || info.isSymbolicLink() || info.size > HARD_FILE_LIMIT) {
+                skippedCount += 1;
+                return;
+              }
+              if (derived.format === "ini" && !isUnambiguousIniName(posix.basename(derived.targetPath))) {
+                try {
+                  if (!looksLikeIni(await readPrefix(absolutePath, SNIFF_BYTES))) return;
+                } catch {
+                  return;
+                }
+              }
+              rawTemplates.push({
+                examplePath: relativePath,
+                targetPath: derived.targetPath,
+                format: derived.format,
+                size: info.size,
+                modifiedAt: info.mtimeMs,
+              });
+            } catch {
+              skippedCount += 1;
+            }
+          });
+          continue;
+        }
         const format = detectFormat(entry.name);
         if (!format) continue;
         scheduledConfigFiles += 1;
@@ -178,7 +225,6 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
               skippedCount += 1;
               return;
             }
-            const relativePath = relative(root, absolutePath).replace(/\\/g, "/");
             const confidence = classifyConfidence(entry.name, relativePath);
             let status: ConfigFileStatus = info.size > HARD_FILE_LIMIT
               ? "too-large"
@@ -232,13 +278,17 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
 
   await walk(root, 0);
   files.sort(compareFiles);
-  if (!files.length) warnings.push("没有发现 Confui 支持的配置文件");
+  const templates = deduplicateOrphanTemplates(rawTemplates, existingPathsLower);
+  const envGroups = detectEnvGroups(files);
+  if (!files.length && !templates.length) warnings.push("没有发现 Confui 支持的配置文件");
   if (scanCapped) warnings.push("项目内容较多，扫描已达到安全上限；可以缩小项目范围后再试。");
 
   return {
     root,
     name: basename(root) || root,
     files,
+    templates,
+    envGroups,
     detectedGithubUrl: await detectGithubRemote(root),
     scannedAt: Date.now(),
     skippedCount,
@@ -285,6 +335,153 @@ export function isExampleFilename(filename: string): boolean {
   const lower = filename.toLowerCase();
   if (lower === ".env.example" || lower === ".env.sample" || lower === ".env.template") return true;
   return EXAMPLE_MARKER.test(lower);
+}
+
+/**
+ * Derives the target configuration file path and format for an example/template
+ * file (e.g. `.env.example` -> `.env`, `config.example.jsonc` -> `config.jsonc`,
+ * `app.yaml.sample` -> `app.yaml`). Returns `null` if the filename does not map
+ * cleanly to a supported editable config format.
+ */
+export function deriveTargetFromExample(
+  relativeExamplePath: string,
+): { targetPath: string; format: ConfigFormat } | null {
+  const normalized = relativeExamplePath.replace(/\\/g, "/");
+  const dir = posix.dirname(normalized);
+  const name = posix.basename(normalized);
+  const lower = name.toLowerCase();
+  if (!name || SCHEMA_FILE.test(lower) || /\.bak(?:\.|$)/i.test(lower)) return null;
+
+  let targetName: string | undefined;
+
+  // 1. Trailing marker: `.env.example`, `.env.local.example`, `config.json.sample`
+  for (const marker of EXAMPLE_MARKERS) {
+    const dotSuffix = `.${marker}`;
+    if (lower.endsWith(dotSuffix) && name.length > dotSuffix.length) {
+      const candidate = name.slice(0, -dotSuffix.length);
+      if (detectFormat(candidate)) {
+        targetName = candidate;
+        break;
+      }
+    }
+  }
+
+  // 2. Infix marker before extension: `config.example.jsonc`, `app-sample.yaml`, `settings_template.toml`
+  if (!targetName) {
+    const ext = extname(name);
+    if (ext && ext.length < name.length) {
+      const stem = name.slice(0, -ext.length);
+      const markerPattern = new RegExp(`^(.+?)[._-](?:${EXAMPLE_MARKERS.join("|")})$`, "i");
+      const match = stem.match(markerPattern);
+      if (match?.[1]) {
+        const candidate = `${match[1]}${ext}`;
+        if (detectFormat(candidate)) targetName = candidate;
+      }
+    }
+  }
+
+  if (!targetName || targetName.toLowerCase() === lower) return null;
+  const targetLower = targetName.toLowerCase();
+  if (IGNORE_FILES.has(targetLower) || SCHEMA_FILE.test(targetLower) || isExampleFilename(targetName)) {
+    return null;
+  }
+  const format = detectFormat(targetName);
+  if (!format) return null;
+  const targetPath = dir === "." ? targetName : `${dir}/${targetName}`;
+  return { targetPath, format };
+}
+
+function markerPriority(examplePath: string): number {
+  const lower = posix.basename(examplePath).toLowerCase();
+  const idx = EXAMPLE_MARKERS.findIndex((marker) => new RegExp(`(?:^|[._-])${marker}(?:[._-]|$)`, "i").test(lower));
+  return idx >= 0 ? idx : EXAMPLE_MARKERS.length;
+}
+
+function deduplicateOrphanTemplates(
+  candidates: readonly ExampleTemplate[],
+  existingPathsLower: ReadonlySet<string>,
+): ExampleTemplate[] {
+  const byTarget = new Map<string, ExampleTemplate>();
+  const sorted = [...candidates].sort((left, right) =>
+    markerPriority(left.examplePath) - markerPriority(right.examplePath)
+    || left.examplePath.localeCompare(right.examplePath, "en", { numeric: true, sensitivity: "base" }),
+  );
+  for (const template of sorted) {
+    const targetKey = template.targetPath.toLowerCase();
+    if (existingPathsLower.has(targetKey)) continue;
+    if (!byTarget.has(targetKey)) byTarget.set(targetKey, template);
+  }
+  return [...byTarget.values()].sort((left, right) =>
+    left.targetPath.localeCompare(right.targetPath, "en", { numeric: true, sensitivity: "base" }),
+  );
+}
+
+/**
+ * Groups multi-environment config files residing in the same directory
+ * (e.g. `.env` + `.env.local` + `.env.production`, or `config.json` +
+ * `config.dev.json` + `config.prod.json`, or `application.yml` + `application-prod.yml`).
+ */
+export function detectEnvGroups(files: readonly ConfigFile[]): ConfigEnvGroup[] {
+  const openable = files.filter((file) => file.status === "ready" || file.status === "large");
+  const buckets = new Map<string, { label: string; format: ConfigFormat; baseNameLower: string; files: ConfigFile[] }>();
+
+  for (const file of openable) {
+    const normalized = file.path.replace(/\\/g, "/");
+    const dir = posix.dirname(normalized);
+    const name = posix.basename(normalized);
+    const lower = name.toLowerCase();
+
+    let familyKey: string | undefined;
+    let label: string | undefined;
+    let baseNameLower = "";
+
+    if (lower === ".env" || lower.startsWith(".env.")) {
+      familyKey = `${dir}|env|.env`;
+      label = dir === "." ? ".env" : `${dir}/.env`;
+      baseNameLower = ".env";
+    } else {
+      const ext = extname(name);
+      if (!ext || ext.length >= name.length) continue;
+      const stem = name.slice(0, -ext.length);
+      const variantMatch = stem.match(ENV_VARIANT_RE);
+      const baseStem = variantMatch?.[1] ?? stem;
+      const formatFamily = file.format === "jsonc" ? "json" : file.format;
+      familyKey = `${dir}|${formatFamily}|${baseStem.toLowerCase()}`;
+      label = dir === "." ? `${baseStem}${ext}` : `${dir}/${baseStem}${ext}`;
+      baseNameLower = `${baseStem.toLowerCase()}${ext.toLowerCase()}`;
+    }
+
+    const bucket = buckets.get(familyKey);
+    if (bucket) {
+      bucket.files.push(file);
+    } else {
+      buckets.set(familyKey, { label, format: file.format, baseNameLower, files: [file] });
+    }
+  }
+
+  const groups: ConfigEnvGroup[] = [];
+  for (const [, bucket] of buckets) {
+    if (bucket.files.length < 2) continue;
+    const sortedFiles = [...bucket.files].sort((left, right) => {
+      const leftName = posix.basename(left.path).toLowerCase();
+      const rightName = posix.basename(right.path).toLowerCase();
+      const leftBase = leftName === bucket.baseNameLower ? 0 : 1;
+      const rightBase = rightName === bucket.baseNameLower ? 0 : 1;
+      return leftBase - rightBase
+        || left.path.localeCompare(right.path, "en", { numeric: true, sensitivity: "base" });
+    });
+    const firstFile = sortedFiles[0]!;
+    groups.push({
+      id: bucket.label,
+      label: bucket.label,
+      format: firstFile.format,
+      files: sortedFiles.map((item) => item.path),
+    });
+  }
+
+  return groups.sort((left, right) =>
+    left.id.localeCompare(right.id, "en", { numeric: true, sensitivity: "base" }),
+  );
 }
 
 function classifyConfidence(filename: string, relativePath: string): ConfigFile["confidence"] {

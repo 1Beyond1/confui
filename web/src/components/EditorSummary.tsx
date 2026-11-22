@@ -9,12 +9,20 @@ export function EditorSummary({
   fieldCount,
   backupStatus,
   busy,
+  canCompare = false,
+  hasEnvGroup = false,
+  onOpenCompare,
+  onOpenExportRedacted,
   onRestoreBackup,
 }: {
   schema: ConfigFormSchema;
   fieldCount?: number;
   backupStatus?: BackupStatus;
   busy?: boolean;
+  canCompare?: boolean;
+  hasEnvGroup?: boolean;
+  onOpenCompare?: () => void;
+  onOpenExportRedacted?: () => void;
   onRestoreBackup?: () => void;
 }) {
   const { locale, t } = useI18n();
@@ -29,19 +37,43 @@ export function EditorSummary({
             <p>{t("editor.summaryMeta", { count: totalFields, format: FORMAT_LABELS[schema.format], size: formatBytes(schema.version.size) })}</p>
           </div>
         </div>
-        {backupStatus?.exists && onRestoreBackup && (
-          <Button
-            variant="ghost"
-            icon="history"
-            disabled={busy}
-            onClick={onRestoreBackup}
-            title={backupStatus.modifiedAt
-              ? t("editor.backupTimeTooltip", { time: new Date(backupStatus.modifiedAt).toLocaleString(locale) })
-              : undefined}
-          >
-            {t("editor.restoreBackup")}
-          </Button>
-        )}
+        <div class="editor-summary__actions">
+          {canCompare && onOpenCompare && (
+            <Button
+              variant="ghost"
+              icon="compare"
+              disabled={busy}
+              onClick={onOpenCompare}
+              title={hasEnvGroup ? t("editor.compareEnvGroupTooltip") : t("editor.compareTooltip")}
+            >
+              {t("editor.compareAction")}
+            </Button>
+          )}
+          {onOpenExportRedacted && (
+            <Button
+              variant="ghost"
+              icon="download"
+              disabled={busy}
+              onClick={onOpenExportRedacted}
+              title={t("editor.exportRedactedTooltip")}
+            >
+              {t("editor.exportRedactedAction")}
+            </Button>
+          )}
+          {backupStatus?.exists && onRestoreBackup && (
+            <Button
+              variant="ghost"
+              icon="history"
+              disabled={busy}
+              onClick={onRestoreBackup}
+              title={backupStatus.modifiedAt
+                ? t("editor.backupTimeTooltip", { time: new Date(backupStatus.modifiedAt).toLocaleString(locale) })
+                : undefined}
+            >
+              {t("editor.restoreBackup")}
+            </Button>
+          )}
+        </div>
       </div>
       <div class="source-pipeline">
         {schema.sources.map((source) => (
