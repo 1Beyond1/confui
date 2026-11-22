@@ -25,7 +25,8 @@ import { isSecretPath } from "../core/inference/common.ts";
 import { assertEditableSyntax, detectFormat, parseConfig } from "../core/formats.ts";
 import { getAtPath, resolveExistingProjectPath } from "../core/paths.ts";
 import { commitSave, previewSave } from "../core/save.ts";
-import { normalizeGithubUrl, scanProject } from "../core/scanner.ts";
+import { isForbiddenKey, normalizeGithubUrl } from "../shared/validation.ts";
+import { scanProject } from "../core/scanner.ts";
 import { SettingsStore, type SecretCodec } from "../core/settings.ts";
 import { checkForUpdates } from "../core/update.ts";
 import type {
@@ -589,7 +590,5 @@ function isSafeAssistSegment(segment: unknown): segment is string | number {
     : typeof segment === "string"
       && segment.length <= 512
       && !segment.includes("\0")
-      && segment !== "__proto__"
-      && segment !== "prototype"
-      && segment !== "constructor";
+      && !isForbiddenKey(segment);
 }

@@ -1,4 +1,5 @@
 import type { ConfigFormat, FieldAssistField, FieldAssistResult, FieldSpec, PathSegment } from "../../shared/schema.ts";
+import { isHexColor } from "../../shared/validation.ts";
 import type { AIProvider } from "../ai/provider.ts";
 import { ConfuiError } from "../errors.ts";
 import { formatPath, getAtPath, pathKey } from "../paths.ts";
@@ -285,7 +286,7 @@ function isCompatibleType(type: FieldSpec["type"], value: unknown, enumValues?: 
     case "json":
       return value !== null && typeof value === "object" && !Array.isArray(value);
     case "color":
-      return typeof value === "string" && /^(?:#[\da-f]{3}|#[\da-f]{4}|#[\da-f]{6}|#[\da-f]{8})$/i.test(value);
+      return isHexColor(value);
     case "secret":
     case "string":
       return typeof value === "string" || value === undefined || value === null;

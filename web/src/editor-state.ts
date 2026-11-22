@@ -1,4 +1,5 @@
 import type { ConfigChange, ConfigFormat, FieldSpec } from "../../shared/schema.ts";
+import { isHexColor } from "../../shared/validation.ts";
 
 export interface JsonDraft {
   __confuiJsonDraft: true;
@@ -110,7 +111,7 @@ export function validateField(field: FieldSpec, editorValue: unknown, format?: C
     return "请选择列表中的有效选项";
   }
   if (typeof value === "string") {
-    if (field.type === "color" && !/^(?:#[\da-f]{3}|#[\da-f]{4}|#[\da-f]{6}|#[\da-f]{8})$/i.test(value)) return "请输入有效的十六进制颜色";
+    if (field.type === "color" && !isHexColor(value)) return "请输入有效的十六进制颜色";
     if (field.minLength !== undefined && value.length < field.minLength) return `至少需要 ${field.minLength} 个字符`;
     if (field.maxLength !== undefined && value.length > field.maxLength) return `最多允许 ${field.maxLength} 个字符`;
     if (field.pattern) {

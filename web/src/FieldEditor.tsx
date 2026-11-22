@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { FieldAssistResult, FieldSpec } from "../../shared/schema.ts";
+import { isHexColor6 } from "../../shared/validation.ts";
 import {
   effectiveValue,
   enumValueEqual,
@@ -340,9 +341,8 @@ function FieldControl({
     // The native picker only understands six-digit opaque colors. Keep it
     // disabled for shorthand/alpha values so opening the picker cannot
     // silently replace a value that the text input can preserve.
-    const pickerEnabled = value === undefined || value === ""
-      || typeof value === "string" && /^#[\da-f]{6}$/i.test(value);
-    const color = pickerEnabled && typeof value === "string" && /^#[\da-f]{6}$/i.test(value) ? value : "#2563eb";
+    const pickerEnabled = value === undefined || value === "" || isHexColor6(value);
+    const color = pickerEnabled && isHexColor6(value) ? value : "#2563eb";
     return (
       <div class="color-control">
         <input id={`${id}-picker`} type="color" value={color} title={pickerEnabled ? "选择颜色" : "当前颜色包含简写或透明度，请使用文本输入"} aria-label={`${field.label}颜色选择器`} aria-describedby={describedBy} disabled={disabled || !pickerEnabled} onInput={(event) => onChange(event.currentTarget.value)}/>

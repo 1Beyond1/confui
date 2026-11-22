@@ -10,12 +10,12 @@ import type {
   SavePreview,
   SaveResult,
 } from "../shared/schema.ts";
+import { isForbiddenKey } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { HARD_FILE_LIMIT, currentVersion, hashText, readTextSnapshot } from "./files.ts";
 import { assertEditableSyntax, detectFormat, parseConfig, updateConfigText } from "./formats.ts";
 import { ensurePathInsideProject, formatPath, getAtPath, pathKey, resolveExistingProjectPath } from "./paths.ts";
 
-const FORBIDDEN_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
 const activeSavePaths = new Set<string>();
 const MAX_SAVE_CHANGES = 2_000;
 const MAX_CHANGE_VALUE_BYTES = 1 * 1024 * 1024;
@@ -314,7 +314,7 @@ function validateChange(change: ConfigChange): void {
       || (typeof segment === "string" && (segment.length > 512 || segment.includes("\0")))) {
       throw new ConfuiError("INVALID_INPUT", "配置字段路径无效");
     }
-    if (typeof segment === "string" && FORBIDDEN_SEGMENTS.has(segment)) {
+    if (typeof segment === "string" && isForbiddenKey(segment)) {
       throw new ConfuiError("INVALID_INPUT", "配置字段路径包含不安全的键名");
     }
   }

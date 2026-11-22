@@ -1,4 +1,5 @@
 import type { FieldProperty, FieldSource, FieldSpec, PathSegment, SourceSummary } from "../../shared/schema.ts";
+import { isHexColor } from "../../shared/validation.ts";
 import { formatPath, pathKey } from "../paths.ts";
 import { groupForPath, humanize } from "./common.ts";
 import type { FieldCandidate } from "./types.ts";
@@ -210,9 +211,7 @@ function normalizeDefault(
       if (typeof value === "string") return value;
       return typeof value === "number" || typeof value === "boolean" ? String(value) : undefined;
     case "color":
-      return typeof value === "string" && /^(?:#[\da-f]{3}|#[\da-f]{4}|#[\da-f]{6}|#[\da-f]{8})$/i.test(value)
-        ? value
-        : undefined;
+      return isHexColor(value) ? value : undefined;
     case "boolean":
       if (typeof value === "boolean") return value;
       if (typeof value === "string") {

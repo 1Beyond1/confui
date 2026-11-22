@@ -10,8 +10,13 @@ import type {
   ProjectScanResult,
   RecentProject,
   SavePreview,
-  ThemePreference,
 } from "../../shared/schema.ts";
+import { EditorSkeleton, EditorSummary } from "./components/EditorSummary.tsx";
+import { HomePage } from "./components/HomePage.tsx";
+import { RawViewer } from "./components/RawViewer.tsx";
+import { SaveConfirmModal } from "./components/SaveConfirmModal.tsx";
+import { Sidebar } from "./components/Sidebar.tsx";
+import { UnsavedConfigModal, UnsavedSettingsModal } from "./components/UnsavedModals.tsx";
 import { FieldEditor } from "./FieldEditor.tsx";
 import {
   collectChanges,
@@ -23,8 +28,13 @@ import {
 } from "./editor-state.ts";
 import { Icon } from "./icons.tsx";
 import { SettingsPage } from "./SettingsPage.tsx";
-import { Button, EmptyIllustration, Logo, Modal, SourceBadge } from "./ui.tsx";
-import { formatDisplayValue } from "./value-display.ts";
+import { Button, EmptyIllustration, Logo } from "./ui.tsx";
+import {
+  applyTheme,
+  defaultClientSettings,
+  errorMessage,
+  sameProjectRoot,
+} from "./utils/format.ts";
 import "./styles.css";
 
 type View = "home" | "editor" | "settings";
@@ -49,27 +59,6 @@ interface LoadErrorState {
   file: string;
   message: string;
 }
-
-const FORMAT_LABELS: Record<ConfigFormat, string> = {
-  json: "JSON",
-  jsonc: "JSONC",
-  yaml: "YAML",
-  toml: "TOML",
-  env: "ENV",
-  ini: "INI",
-  properties: "PROPERTIES",
-};
-
-// Keep file badges short without slicing words (JSON must not become “JSO”).
-const FORMAT_SHORT_LABELS: Record<ConfigFormat, string> = {
-  json: "JSON",
-  jsonc: "JSONC",
-  yaml: "YAML",
-  toml: "TOML",
-  env: "ENV",
-  ini: "INI",
-  properties: "PROP",
-};
 
 export function App() {
   const [settings, setSettings] = useState<AppSettings>();
@@ -128,7 +117,6 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    // The footer label must track package.json, so it comes from the main process.
     void window.confui.getAppInfo().then((result) => {
       if (result.ok) setAppVersion(result.data.version);
     });
@@ -212,9 +200,6 @@ export function App() {
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       if (sequence !== openSequence.current) return;
       const scanned = result.data;
-      // The main process normalizes and validates this value before returning
-      // it, so credentials accidentally pasted into a GitHub URL never stay in
-      // the renderer or recent-project settings.
       const resolvedGithub = scanned.detectedGithubUrl || "";
       setProject(scanned);
       setExternalChange(false);
@@ -234,8 +219,6 @@ export function App() {
     } catch (error) {
       if (sequence === openSequence.current) notify(errorMessage(error), "error");
     } finally {
-      // loadFile() owns the busy state after it increments the sequence. An old
-      // scan must never clear the spinner for a newer project/file operation.
       if (sequence === openSequence.current) setBusy(null);
     }
   }
@@ -258,9 +241,6 @@ export function App() {
     }
     const sequence = ++openSequence.current;
     setBusy("infer");
-    // Switch the selection immediately. Keeping the previous form visible
-    // while a new file is being inferred makes it too easy to edit the wrong
-    // file, even though the controls are temporarily disabled.
     setActiveFile(file);
     setSchema(undefined);
     setValues({});
@@ -288,9 +268,6 @@ export function App() {
   }
 
   function requestAction(action: PendingAction): void {
-    // Letting navigation through while a scan/inference or save preview is in
-    // flight can leave a completed response free to switch the page back
-    // behind the user's click (or show a save preview after they discarded it).
     if (busy !== null || savePreview || pendingAction || pendingSettingsAction) return;
     if (view === "settings" && settingsDirty && action.kind !== "settings") {
       setPendingSettingsAction(action);
@@ -335,8 +312,6 @@ export function App() {
     if (errors.size) {
       notify(`有 ${errors.size} 个字段需要修正`, "error");
       setEditorTab("form");
-      // Re-mounting clears a field search that may have hidden the invalid
-      // row, then the next tick focuses the first actual control with an error.
       setFieldEditorRevision((current) => current + 1);
       window.setTimeout(() => document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus(), 0);
       return;
@@ -468,13 +443,7 @@ export function App() {
   function handleEditorTabKey(event: KeyboardEvent): void {
     if (!(["ArrowLeft", "ArrowRight", "Home", "End"] as string[]).includes(event.key)) return;
     event.preventDefault();
-    const next = event.key === "Home"
-      ? "form"
-      : event.key === "End"
-        ? "raw"
-        : event.key === "ArrowLeft"
-          ? "form"
-          : "raw";
+    const next = event.key === "Home" || event.key === "ArrowLeft" ? "form" : "raw";
     selectEditorTab(next);
   }
 
@@ -501,95 +470,94 @@ export function App() {
 
   return (
     <div class="app-shell">
-      <aside class="sidebar">
-        <div class="sidebar__brand"><Logo/></div>
-        <nav class="primary-nav" aria-label="主导航">
-          <button class={view === "home" ? "active" : ""} disabled={busy !== null} onClick={() => requestAction({ kind: "home" })}><Icon name="home"/><span>开始</span></button>
-        </nav>
-
-        {project ? (
-          <div class="project-panel">
-            <div class="project-card">
-              <div class="project-card__icon"><Icon name="folder-open"/></div>
-              <div><strong title={project.root}>{project.name}</strong><span>{project.files.length} 个配置文件</span></div>
-              <button class="icon-button" aria-label="重新扫描项目" title="重新扫描项目" disabled={busy !== null} onClick={() => requestAction({ kind: "rescan" })}><Icon name="refresh" size={16}/></button>
-            </div>
-            <div class="file-tools">
-              <label class="search-box">
-                <Icon name="search" size={15}/>
-                <input value={fileQuery} onInput={(event) => setFileQuery(event.currentTarget.value)} placeholder="筛选配置文件" aria-label="筛选配置文件"/>
-                {fileQuery && <button onClick={() => setFileQuery("")} aria-label="清空筛选"><Icon name="x" size={14}/></button>}
-              </label>
-              <div class="format-filter">
-                <select value={formatFilter} onChange={(event) => setFormatFilter(event.currentTarget.value as ConfigFormat | "all")} aria-label="按格式筛选">
-                  <option value="all">全部格式</option>
-                  {Object.entries(FORMAT_LABELS).map(([format, label]) => <option key={format} value={format}>{label}</option>)}
-                </select>
-                <Icon name="chevron-down" size={14}/>
-              </div>
-            </div>
-            <div class="file-list" role="listbox" aria-label="配置文件">
-              {filteredFiles.map((file) => (
-                <button
-                  key={file.path}
-                  role="option"
-                  aria-selected={activeFile?.path === file.path && view === "editor"}
-                  class={`file-item ${activeFile?.path === file.path && view === "editor" ? "active" : ""}`}
-                  disabled={busy !== null}
-                  onClick={() => requestAction({ kind: "file", file })}
-                  title={file.warning || file.path}
-                >
-                  <span class={`format-icon format-icon--${file.format}`}>{FORMAT_SHORT_LABELS[file.format]}</span>
-                  <span class="file-item__copy"><strong>{file.path.split("/").at(-1)}</strong><small>{parentPath(file.path)} · {formatBytes(file.size)}</small></span>
-                  {activeFile?.path === file.path && dirty && <i class="dirty-dot" title="有未保存的更改"/>}
-                  {file.status !== "ready" && <Icon name="warning" size={14} class="file-warning"/>}
-                </button>
-              ))}
-              {!filteredFiles.length && (
-                <div class="file-list__empty"><Icon name="search"/><span>没有匹配的文件</span></div>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div class="sidebar-empty">
-            <Icon name="folder"/>
-            <p>打开项目后，配置文件会出现在这里。</p>
-          </div>
-        )}
-
-        <nav class="sidebar-footer" aria-label="设置">
-          <button class={view === "settings" ? "active" : ""} disabled={busy !== null} onClick={() => requestAction({ kind: "settings" })}><Icon name="settings"/><span>设置</span></button>
-          <small>{appVersion ? `Confui ${appVersion}` : "Confui"}</small>
-        </nav>
-      </aside>
+      <Sidebar
+        view={view}
+        project={project}
+        filteredFiles={filteredFiles}
+        activeFile={activeFile}
+        fileQuery={fileQuery}
+        formatFilter={formatFilter}
+        dirty={dirty}
+        busy={busy !== null}
+        appVersion={appVersion}
+        onFileQuery={setFileQuery}
+        onFormatFilter={setFormatFilter}
+        onHome={() => requestAction({ kind: "home" })}
+        onSettings={() => requestAction({ kind: "settings" })}
+        onRescan={() => requestAction({ kind: "rescan" })}
+        onSelectFile={(file) => requestAction({ kind: "file", file })}
+      />
 
       <main class="main-shell" onWheel={forwardMainWheel}>
         <header class="topbar">
           <div class="topbar__title">
-            {view === "home" ? <><span>开始</span><small>选择项目并识别配置</small></> : view === "settings" ? <><span>设置</span><small>供应商、安全与外观</small></> : schema ? <><span>{schema.kind}{dirty && <i class="title-dirty"/>}</span><small title={schema.file}>{schema.file}</small></> : <><span>{project?.name ?? "配置编辑器"}</span><small>选择一个配置文件</small></>}
+            {view === "home"
+              ? <><span>开始</span><small>选择项目并识别配置</small></>
+              : view === "settings"
+                ? <><span>设置</span><small>供应商、安全与外观</small></>
+                : schema
+                  ? <><span>{schema.kind}{dirty && <i class="title-dirty"/>}</span><small title={schema.file}>{schema.file}</small></>
+                  : <><span>{project?.name ?? "配置编辑器"}</span><small>选择一个配置文件</small></>}
           </div>
           <div class="topbar__actions">
             {view === "editor" && schema && (
               <>
                 <div class="view-tabs" role="tablist" aria-orientation="horizontal">
-                  <button id="editor-tab-form" role="tab" tabIndex={editorTab === "form" ? 0 : -1} aria-selected={editorTab === "form"} aria-controls="editor-panel-form" class={editorTab === "form" ? "active" : ""} onKeyDown={handleEditorTabKey} onClick={() => selectEditorTab("form")}><Icon name="layers" size={15}/>表单</button>
-                  <button id="editor-tab-raw" role="tab" tabIndex={editorTab === "raw" ? 0 : -1} aria-selected={editorTab === "raw"} aria-controls="editor-panel-raw" class={editorTab === "raw" ? "active" : ""} onKeyDown={handleEditorTabKey} onClick={() => selectEditorTab("raw")}><Icon name="code" size={15}/>原始内容</button>
+                  <button
+                    id="editor-tab-form"
+                    role="tab"
+                    tabIndex={editorTab === "form" ? 0 : -1}
+                    aria-selected={editorTab === "form"}
+                    aria-controls="editor-panel-form"
+                    class={editorTab === "form" ? "active" : ""}
+                    onKeyDown={handleEditorTabKey}
+                    onClick={() => selectEditorTab("form")}
+                  >
+                    <Icon name="layers" size={15}/>表单
+                  </button>
+                  <button
+                    id="editor-tab-raw"
+                    role="tab"
+                    tabIndex={editorTab === "raw" ? 0 : -1}
+                    aria-selected={editorTab === "raw"}
+                    aria-controls="editor-panel-raw"
+                    class={editorTab === "raw" ? "active" : ""}
+                    onKeyDown={handleEditorTabKey}
+                    onClick={() => selectEditorTab("raw")}
+                  >
+                    <Icon name="code" size={15}/>原始内容
+                  </button>
                 </div>
-                <Button variant="primary" icon="save" disabled={!dirty || errors.size > 0 || busy !== null} busy={busy === "preview" || busy === "save"} onClick={() => void beginSave()}>
+                <Button
+                  variant="primary"
+                  icon="save"
+                  disabled={!dirty || errors.size > 0 || busy !== null}
+                  busy={busy === "preview" || busy === "save"}
+                  onClick={() => void beginSave()}
+                >
                   {dirty ? `保存 ${changes.length} 项` : "已保存"}
                 </Button>
               </>
             )}
-            {view === "home" && <Button icon="folder-open" disabled={busy !== null} onClick={() => void browseForProject()}>选择文件夹</Button>}
+            {view === "home" && (
+              <Button icon="folder-open" disabled={busy !== null} onClick={() => void browseForProject()}>
+                选择文件夹
+              </Button>
+            )}
           </div>
         </header>
 
         {externalChange && view === "editor" && (
           <div class="external-banner" role="status">
             <Icon name="warning"/>
-            <div><strong>文件在 Confui 外部发生了变化</strong><span>{dirty ? "当前还有未保存内容，重新加载前请先确认。" : "建议重新加载，以免基于旧内容继续编辑。"}</span></div>
+            <div>
+              <strong>文件在 Confui 外部发生了变化</strong>
+              <span>{dirty ? "当前还有未保存内容，重新加载前请先确认。" : "建议重新加载，以免基于旧内容继续编辑。"}</span>
+            </div>
             <Button onClick={() => requestAction({ kind: "reload" })}>重新加载</Button>
-            <button class="icon-button" onClick={() => setExternalChange(false)} aria-label="暂时忽略"><Icon name="x"/></button>
+            <button class="icon-button" onClick={() => setExternalChange(false)} aria-label="暂时忽略">
+              <Icon name="x"/>
+            </button>
           </div>
         )}
 
@@ -632,8 +600,15 @@ export function App() {
             <div class="editor-empty">
               <EmptyIllustration/>
               <h1>{project?.files.length ? "选择一个配置文件" : "没有发现配置文件"}</h1>
-              <p>{project?.files.length ? "Confui 会组合 Schema、示例、README 与结构推断，生成可编辑表单。" : "可以确认项目路径，或检查配置文件是否属于当前支持的格式。"}</p>
-              {!project && <Button variant="primary" icon="folder-open" onClick={() => void browseForProject()}>打开本地项目</Button>}
+              <p>{project?.files.length
+                ? "Confui 会组合 Schema、示例、README 与结构推断，生成可编辑表单。"
+                : "可以确认项目路径，或检查配置文件是否属于当前支持的格式。"}
+              </p>
+              {!project && (
+                <Button variant="primary" icon="folder-open" onClick={() => void browseForProject()}>
+                  打开本地项目
+                </Button>
+              )}
             </div>
           )}
 
@@ -653,212 +628,86 @@ export function App() {
                   onChange={updateField}
                 />
               ) : (
-                <div class="empty-card"><Icon name="info"/><div><h2>暂时无法生成表单</h2><p>这个文件没有可识别的键值字段。你仍然可以在“原始内容”中查看它。</p></div></div>
+                <div class="empty-card">
+                  <Icon name="info"/>
+                  <div>
+                    <h2>暂时无法生成表单</h2>
+                    <p>这个文件没有可识别的键值字段。你仍然可以在“原始内容”中查看它。</p>
+                  </div>
+                </div>
               )}
               <div class="editor-bottom-space"/>
             </div>
           )}
 
-          {view === "editor" && schema && editorTab === "raw" && (
-            <div id="editor-panel-raw" class="raw-page page-wide" role="tabpanel" aria-labelledby="editor-tab-raw">
-              <div class="raw-notice"><Icon name="info"/><span>原始内容用于核对格式和注释；请回到表单进行安全修改。</span><SourceBadge source="heuristic"/></div>
-              <section class="raw-card">
-                <header><span>{schema.file}</span><small>{FORMAT_LABELS[schema.format]} · 只读</small></header>
-                <pre><code>{schema.rawText}</code></pre>
-              </section>
-            </div>
-          )}
+          {view === "editor" && schema && editorTab === "raw" && <RawViewer schema={schema}/>}
         </div>
 
         {view === "editor" && schema && dirty && (
           <div class="editor-savebar">
-            <div><i/><strong>{changes.length} 项更改尚未保存</strong>{errors.size > 0 && <span>{errors.size} 个字段需要修正</span>}</div>
             <div>
-              <Button variant="ghost" disabled={busy !== null} onClick={() => setValues(initializeEditorValues(schema.fields))}>全部撤销</Button>
-              <Button variant="primary" icon="save" disabled={errors.size > 0 || busy !== null} busy={busy === "preview"} onClick={() => void beginSave()}>查看并保存</Button>
+              <i/>
+              <strong>{changes.length} 项更改尚未保存</strong>
+              {errors.size > 0 && <span>{errors.size} 个字段需要修正</span>}
+            </div>
+            <div>
+              <Button variant="ghost" disabled={busy !== null} onClick={() => setValues(initializeEditorValues(schema.fields))}>
+                全部撤销
+              </Button>
+              <Button
+                variant="primary"
+                icon="save"
+                disabled={errors.size > 0 || busy !== null}
+                busy={busy === "preview"}
+                onClick={() => void beginSave()}
+              >
+                查看并保存
+              </Button>
             </div>
           </div>
         )}
       </main>
 
       {toast && (
-        <div key={toast.id} class={`toast toast--${toast.type} ${(dirty || settingsDirty) ? "toast--above-savebar" : ""}`} role={toast.type === "error" ? "alert" : "status"}>
+        <div
+          key={toast.id}
+          class={`toast toast--${toast.type} ${(dirty || settingsDirty) ? "toast--above-savebar" : ""}`}
+          role={toast.type === "error" ? "alert" : "status"}
+        >
           <span><Icon name={toast.type === "success" ? "check" : toast.type === "error" ? "warning" : "info"}/></span>
           <p>{toast.message}</p>
-          <button class="icon-button" onClick={() => setToast(undefined)} aria-label="关闭提示"><Icon name="x" size={15}/></button>
+          <button class="icon-button" onClick={() => setToast(undefined)} aria-label="关闭提示">
+            <Icon name="x" size={15}/>
+          </button>
         </div>
       )}
 
       {savePreview && (
-        <Modal
-          title="确认保存更改"
-          description={`将更新 ${savePreview.file}，保存前会自动创建 .bak 备份。`}
-          width="680px"
+        <SaveConfirmModal
+          savePreview={savePreview}
+          schema={schema}
+          saving={busy === "save"}
           onClose={closeSavePreview}
-          footer={<><Button onClick={closeSavePreview} disabled={busy === "save"}>返回编辑</Button><Button variant="primary" icon="save" busy={busy === "save"} disabled={busy === "save"} onClick={() => void confirmSave()}>确认保存 {savePreview.changes.length} 项</Button></>}
-        >
-          {savePreview.warnings.map((warning) => <div class="modal-warning" key={warning}><Icon name="warning"/><span>{warning}</span></div>)}
-          <div class="diff-list">
-            {savePreview.changes.map((change) => {
-              const field = schema?.fields.find((item) => item.path === change.path);
-              const secret = field?.secret || field?.type === "secret";
-              return (
-                <div class="diff-item" key={change.path}>
-                  <div><strong>{field?.label || change.path}</strong><code>{change.path}</code></div>
-                  <div class="diff-values"><span>{secret ? "••••••••" : formatDisplayValue(change.before)}</span><Icon name="arrow-left" class="diff-arrow"/><strong>{secret ? "••••••••" : formatDisplayValue(change.after)}</strong></div>
-                </div>
-              );
-            })}
-          </div>
-        </Modal>
+          onConfirm={() => void confirmSave()}
+        />
       )}
 
       {pendingAction && (
-        <Modal
-          title="还有未保存的更改"
-          description="离开当前文件前，选择如何处理这些更改。"
-          onClose={() => setPendingAction(undefined)}
-          footer={<><Button onClick={() => setPendingAction(undefined)}>继续编辑</Button><Button variant="danger" onClick={discardAndContinue}>放弃更改</Button><Button variant="primary" icon="save" onClick={saveAndContinue}>保存后继续</Button></>}
-        >
-          <div class="unsaved-summary"><span><Icon name="file"/></span><div><strong>{schema?.kind}</strong><p>{changes.length} 项更改尚未写入文件</p></div></div>
-        </Modal>
+        <UnsavedConfigModal
+          kind={schema?.kind}
+          changeCount={changes.length}
+          onCancel={() => setPendingAction(undefined)}
+          onDiscard={discardAndContinue}
+          onSaveAndContinue={saveAndContinue}
+        />
       )}
 
       {pendingSettingsAction && (
-        <Modal
-          title="设置尚未保存"
-          description="离开设置页会丢弃刚才的修改。"
-          onClose={() => setPendingSettingsAction(undefined)}
-          footer={<><Button onClick={() => setPendingSettingsAction(undefined)}>返回设置</Button><Button variant="danger" onClick={discardSettingsAndContinue}>放弃并继续</Button></>}
-        >
-          <div class="unsaved-summary"><span><Icon name="settings"/></span><div><strong>Confui 设置</strong><p>供应商、安全或外观选项已发生变化</p></div></div>
-        </Modal>
+        <UnsavedSettingsModal
+          onCancel={() => setPendingSettingsAction(undefined)}
+          onDiscard={discardSettingsAndContinue}
+        />
       )}
     </div>
   );
-}
-
-function HomePage({
-  root,
-  github,
-  recent,
-  busy,
-  onRoot,
-  onGithub,
-  onBrowse,
-  onOpen,
-  onRecent,
-}: {
-  root: string;
-  github: string;
-  recent: RecentProject[];
-  busy: boolean;
-  onRoot: (value: string) => void;
-  onGithub: (value: string) => void;
-  onBrowse: () => void;
-  onOpen: () => void;
-  onRecent: (item: RecentProject) => void;
-}) {
-  return (
-    <div class="home-page page-wide">
-      <div class="home-heading">
-        <span class="home-heading__icon"><Icon name="layers" size={24}/></span>
-        <div><p class="eyebrow">本地配置工作台</p><h1>打开项目，直接开始配置</h1><p>Confui 会识别常见配置格式，把字段说明和正确控件放到同一个桌面界面里。</p></div>
-      </div>
-      <section class="open-project-card">
-        <div class="open-project-card__head"><div><h2>选择本地项目</h2><p>配置文件只在你的电脑上读取和保存。</p></div><span class="local-pill"><Icon name="shield" size={14}/>本地处理</span></div>
-        <div class="project-input-block">
-          <label for="project-root">项目文件夹 <em>必选</em></label>
-          <div class="path-control"><Icon name="folder"/><input id="project-root" value={root} disabled={busy} placeholder="选择或粘贴项目文件夹路径" onInput={(event) => onRoot(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") onOpen(); }}/><Button disabled={busy} onClick={onBrowse}>浏览</Button></div>
-        </div>
-        <div class="project-input-block">
-          <label for="github-url">GitHub 仓库 <span>可选，用于本地无 README 时补充说明</span></label>
-          <div class="path-control"><Icon name="github"/><input id="github-url" value={github} disabled={busy} placeholder="https://github.com/owner/repository" onInput={(event) => onGithub(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") onOpen(); }}/></div>
-        </div>
-        <div class="open-project-card__footer"><p><Icon name="info" size={15}/>优先读取本地 Schema、示例文件和 README；AI 只是最后一层补充。</p><Button variant="primary" icon="folder-open" busy={busy} disabled={busy || !root.trim()} onClick={onOpen}>识别并打开</Button></div>
-      </section>
-
-      {recent.length > 0 && (
-        <section class="recent-section">
-          <div class="section-heading"><div><h2>最近打开</h2><p>继续处理之前的本地项目</p></div></div>
-          <div class="recent-grid">
-            {recent.slice(0, 6).map((item) => (
-              <button class="recent-card" key={item.path} onClick={() => onRecent(item)}>
-                <span class="recent-card__icon"><Icon name="folder"/></span>
-                <span><strong>{item.name}</strong><small title={item.path}>{item.path}</small></span>
-                <Icon name="arrow-left" class="recent-card__arrow"/>
-              </button>
-            ))}
-          </div>
-        </section>
-      )}
-
-    </div>
-  );
-}
-
-function EditorSummary({ schema }: { schema: ConfigFormSchema }) {
-  return (
-    <section class="editor-summary">
-      <div class="editor-summary__main">
-        <span class={`format-icon format-icon--${schema.format}`}>{FORMAT_SHORT_LABELS[schema.format]}</span>
-        <div><h1>{schema.kind}</h1><p>{schema.fields.length} 个字段 · {FORMAT_LABELS[schema.format]} · {formatBytes(schema.version.size)}</p></div>
-      </div>
-      <div class="source-pipeline">
-        {schema.sources.map((source) => <span key={source.source} title={`${source.fieldCount} 个字段使用了此来源`}><SourceBadge source={source.source}/><small>{source.fieldCount}</small></span>)}
-      </div>
-      {(schema.warnings.length > 0 || schema.exampleFiles.length > 0 || schema.readmeSource) && (
-        <div class="editor-summary__details">
-          {schema.exampleFiles.length > 0 && <span><Icon name="archive" size={14}/>{schema.exampleFiles.length} 个示例文件</span>}
-          {schema.readmeSource && <span><Icon name="file" size={14}/>{schema.readmeSource === "local" ? "本地 README" : "GitHub README"}</span>}
-          {schema.warnings.map((warning) => <span class="summary-warning" key={warning} title={warning}><Icon name="warning" size={14}/>{warning}</span>)}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function EditorSkeleton() {
-  return (
-    <div class="editor-page page-wide skeleton-page">
-      <div class="skeleton skeleton--summary"/>
-      <div class="skeleton-card"><span/><span/><span/><span/></div>
-      <div class="skeleton-card"><span/><span/><span/></div>
-    </div>
-  );
-}
-
-function applyTheme(preference: ThemePreference): void {
-  const dark = preference === "dark" || (preference === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-  document.documentElement.style.colorScheme = dark ? "dark" : "light";
-}
-
-function defaultClientSettings(): AppSettings {
-  return {
-    theme: "system",
-    ai: { enabled: false, provider: "custom", model: "", baseUrl: "", apiKey: "", timeoutMs: 45_000 },
-    github: { token: "" },
-    recentProjects: [],
-  };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "操作失败，请重试";
-}
-
-function sameProjectRoot(left: string, right: string): boolean {
-  const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-  return normalize(left) === normalize(right);
-}
-
-function parentPath(path: string): string {
-  const parts = path.split("/");
-  return parts.length > 1 ? parts.slice(0, -1).join("/") : "项目根目录";
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

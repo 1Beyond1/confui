@@ -3,6 +3,7 @@ out/
 release/
 output/
 .playwright-cli/
+.tmp/
 
 *.log
 *.bak

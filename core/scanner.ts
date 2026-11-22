@@ -1,6 +1,7 @@
 import { lstat, open, opendir, realpath, stat } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import type { ConfigFile, ConfigFileStatus, ProjectScanResult } from "../shared/schema.ts";
+import { normalizeGithubUrl } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { AI_FILE_LIMIT, HARD_FILE_LIMIT } from "./files.ts";
 import { detectFormat, isUnambiguousIniName, looksLikeIni } from "./formats.ts";
@@ -324,24 +325,4 @@ async function detectGithubRemote(root: string): Promise<string | undefined> {
   return undefined;
 }
 
-export function normalizeGithubUrl(value: string): string | undefined {
-  const trimmed = value.trim();
-  const ssh = trimmed.match(/^git@github\.com:([^/]+)\/([^/?#]+?)(?:\.git)?$/i);
-  const candidate = ssh?.[1] && ssh[2]
-    ? `https://github.com/${ssh[1]}/${ssh[2]}`
-    : trimmed;
-  let parsed: URL;
-  try {
-    parsed = new URL(candidate);
-  } catch {
-    return undefined;
-  }
-  if (!/^https?:$/i.test(parsed.protocol) || !/^(?:www\.)?github\.com$/i.test(parsed.hostname)) return undefined;
-  if (parsed.username || parsed.password) return undefined;
-  const parts = parsed.pathname.split("/").filter(Boolean);
-  if (parts.length < 2) return undefined;
-  const owner = parts[0];
-  const repo = parts[1]?.replace(/\.git$/i, "");
-  if (!owner || !repo || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(owner) || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repo)) return undefined;
-  return `https://github.com/${owner}/${repo}`;
-}
+export { normalizeGithubUrl };

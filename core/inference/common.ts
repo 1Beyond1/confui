@@ -1,4 +1,5 @@
 import type { FieldType, PathSegment } from "../../shared/schema.ts";
+import { isHexColor, setSafeProperty } from "../../shared/validation.ts";
 import { formatPath } from "../paths.ts";
 
 export const SECRET_KEY_FRAGMENT = [
@@ -55,7 +56,7 @@ export function inferFieldType(key: string, value: unknown): FieldType {
   if (value instanceof Date) return "string";
   if (Array.isArray(value)) return "array";
   if (value !== null && typeof value === "object") return "json";
-  if (typeof value === "string" && /^(?:#[\da-f]{3}|#[\da-f]{4}|#[\da-f]{6}|#[\da-f]{8})$/i.test(value)) return "color";
+  if (isHexColor(value)) return "color";
   return "string";
 }
 
@@ -88,17 +89,7 @@ export function toEditorValue(value: unknown): unknown {
     const result: Record<string, unknown> = {};
     seen.set(current, result);
     for (const [key, item] of Object.entries(current as Record<string, unknown>)) {
-      const converted = convert(item);
-      if (key === "__proto__") {
-        Object.defineProperty(result, key, {
-          configurable: true,
-          enumerable: true,
-          value: converted,
-          writable: true,
-        });
-      } else {
-        result[key] = converted;
-      }
+      setSafeProperty(result, key, convert(item));
     }
     return result;
   }

@@ -1,4 +1,5 @@
 import type { PathSegment } from "../../shared/schema.ts";
+import { setSafeProperty } from "../../shared/validation.ts";
 import { formatPath, pathKey } from "../paths.ts";
 import {
   groupForPath,
@@ -129,16 +130,7 @@ function maskSecretsInternal(
         break;
       }
       const masked = maskSecretsInternal(item, [...segments, key], secretPathKeys, state);
-      if (key === "__proto__") {
-        Object.defineProperty(result, key, {
-          configurable: true,
-          enumerable: true,
-          value: masked,
-          writable: true,
-        });
-      } else {
-        result[key] = masked;
-      }
+      setSafeProperty(result, key, masked);
     }
     return result;
   }

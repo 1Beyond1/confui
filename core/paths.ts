@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { PathSegment } from "../shared/schema.ts";
+import { isSafePathSegment } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 
 export function safeJoin(root: string, relativePath: string): string {
@@ -155,8 +156,7 @@ export function deleteAtPath(target: unknown, segments: readonly PathSegment[]):
 }
 
 function isSafeSegment(segment: PathSegment): boolean {
-  if (typeof segment === "number") return Number.isSafeInteger(segment) && segment >= 0;
-  return segment !== "__proto__" && segment !== "prototype" && segment !== "constructor";
+  return isSafePathSegment(segment);
 }
 
 export function cloneValue<T>(value: T): T {

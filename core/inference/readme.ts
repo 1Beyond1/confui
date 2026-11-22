@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type { ConfigFormat, PathSegment } from "../../shared/schema.ts";
+import { parseGithubRepository } from "../../shared/validation.ts";
 import { parseConfig } from "../formats.ts";
 import { ensurePathInsideProject, formatPath, pathKey } from "../paths.ts";
 import { groupForPath, humanize, inferFieldType, isSecretPath, toEditorValue } from "./common.ts";
@@ -361,26 +362,7 @@ function flattenCodeExample(value: unknown, maxFields: number): { items: Array<{
   return { items: result, truncated };
 }
 
-function parseGithubRepository(url: string): { owner: string; repo: string } | undefined {
-  const trimmed = url.trim();
-  const candidate = trimmed.match(/^git@github\.com:(.+)$/i)
-    ? `https://github.com/${trimmed.slice("git@github.com:".length)}`
-    : trimmed;
-  let parsed: URL;
-  try {
-    parsed = new URL(candidate);
-  } catch {
-    return undefined;
-  }
-  if (!/^https?:$/i.test(parsed.protocol) || !/^(?:www\.)?github\.com$/i.test(parsed.hostname)) return undefined;
-  if (parsed.username || parsed.password) return undefined;
-  const parts = parsed.pathname.split("/").filter(Boolean);
-  if (parts.length < 2) return undefined;
-  const owner = parts[0];
-  const repo = parts[1]?.replace(/\.git$/i, "");
-  if (!owner || !repo || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(owner) || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repo)) return undefined;
-  return { owner, repo };
-}
+
 
 function normalizeKey(value: string): string {
   return value.toLowerCase().replace(/[`"'\s\[\]]/g, "").replace(/[-_]/g, "");
