@@ -13,11 +13,12 @@ core/
   formats.ts              兼容 re-export 入口（指向 core/formats/index.ts）
   inference/              6 层推断引擎（json-schema > known-template > example > readme > ai > heuristic）
   ai/                     OpenAI 兼容 AI 客户端与连接测试
-  scanner.ts              流式项目扫描与格式/安全限制
-  save.ts                 预览、版本校验、.bak 原子写回与备份恢复
+  scanner.ts              流式项目扫描、未配对示例模板发现与多环境分组
+  search.ts               受控并发的全项目跨文件脱敏配置搜索
+  save.ts                 预览、版本校验、.bak 原子写回与恢复、模板初始化、配置对比补齐与脱敏导出
   paths.ts                项目目录防逃逸路径解析与安全路径读写
   files.ts                受限 UTF-8 读取、文件大小上限与哈希版本计算
-  settings.ts             设置规范化、Electron safeStorage 凭据加解密与渲染进程脱敏
+  settings.ts             设置规范化、Windows 写入重试、Electron safeStorage 凭据加解密与渲染进程脱敏
   update.ts               GitHub Release 更新检查
   errors.ts               统一 ConfuiError 与 AppError 转换
 electron/

@@ -19,9 +19,10 @@ Confui is shared on the LINUX DO community — feedback and discussion are welco
 ## Key Features
 
 - **Format-Preserving Write-Back**: JSON / JSONC (AST incremental edits), YAML (`yaml` v2 CST incremental edits), TOML (in-place source patcher validated with `smol-toml`), and line-preserving ENV / INI / Java Properties editors.
-- **High-Frequency Editor Ergonomics**: Visual list editing (add, remove, reorder) for scalar arrays and key-value tables for flat objects with one-click JSON source toggle; per-field revert, `Ctrl+Z` / `Ctrl+Y` undo/redo history stack, and format-validated adding/deleting of custom keys.
-- **Safe Diff Preview & `.bak` Rollback**: Switch between Field Diff (`Added` / `Modified` / `Removed`) and color-coded Unified Diff in the confirmation dialog; atomic temp-file replacement with `.bak` creation; one-click `.bak` restore with Unified Diff preview.
-- **Raw View Search, Accessibility & Bilingual UI**: Line numbers and in-page keyword search highlighting in Raw view; keyboard navigation (`ArrowUp`/`ArrowDown`/`Home`/`End`) in the file listbox; WCAG AA contrast across light and dark themes; full Simplified Chinese (`zh-CN`) and English (`en-US`) UI switching.
+- **Project-Wide Config Search & `Ctrl+K` Command Palette**: Concurrently searches readable configs (bounded concurrency, byte budget, and hit limits) by key path, non-secret values, and comments while strictly redacting secret hits to location-only (`••••••••`); jump directly to and highlight target fields (preserving unsaved-change guards) and invoke high-frequency actions (save, `.bak` restore, compare/sync, redacted export, rescan, theme/language toggle).
+- **Template Initialization, Multi-Env Compare/Sync & Redacted Export**: Detects unpaired example templates (e.g. `.env.example`, `config.example.jsonc/yaml/toml`) for one-click safe creation in the sidebar (`open(..., "wx")` never overwrites and blocks symlinks); groups multi-environment config families (`.env` + `.env.production`, `app.yaml` + `app-prod.yaml`) for structured key diffing and selective batch sync with secrets masked by default; exports comment-preserving redacted copies via `maskDocumentSecrets`.
+- **Editor Ergonomics & Large-File Performance**: Visual list editing for scalar arrays and key-value tables for flat objects with one-click JSON toggle; collapsible field groups, status filter pills (`All` / `Modified` / `Errors` / `Required`), exact numeric input beside integer range sliders, safe `Ctrl+Z` / `Ctrl+Y` undo/redo that never hijacks text inputs, drag-and-drop folder opening on Home, and fixed-row-height virtual scrolling with search navigation in Raw view.
+- **Safe Diff Preview, Secret Masking & `.bak` Rollback**: Switch between Field Diff (`Added` / `Modified` / `Removed`) and Unified Diff with sensitive values masked by default (`••••••••`) plus an explicit Show/Hide secrets toggle to prevent screen-share leaks; atomic temp-file replacement with Windows `EPERM`/`EBUSY` retry and `.bak` rollback; full `zh-CN` / `en-US` UI and bilingual AI field explanation.
 
 ## Supported Formats
 
@@ -53,8 +54,10 @@ Defaults from schemas or examples are never written implicitly; empty fields off
 
 - Renderer runs with `contextIsolation: true`, `sandbox: true`, and `nodeIntegration: false`, communicating strictly over a typed `contextBridge` IPC allowlist with zero HTTP backend.
 - Every file read, save, and `.bak` restore validates physical paths (`realpath` + `lstat`) inside the selected project directory and rejects symlinks/junction escapes.
-- The main process re-generates save output from validated operations and re-verifies SHA-256 file hashes before writing, preventing stale overwrites or renderer tampering.
-- Saves write to a same-directory temp file, stage the backup, atomically swap the target (with Windows `EPERM`/`EBUSY` backoff retry), and atomically promote `.bak`.
+- The main process re-generates save output from validated operations and re-verifies SHA-256 file hashes before writing, preventing stale overwrites or renderer tampering; Unified Diff views mask sensitive values by default (`••••••••`) with an explicit reveal toggle.
+- Example template initialization validates physical `realpath` containment, rejects symlinks in both source and target directory chains, and writes exclusively via `open(..., "wx")` so existing files are never overwritten.
+- Cross-file project search enforces bounded concurrency, byte budgets, and hit caps, skips oversized/unsupported files, never matches plaintext secret values, and redacts secret key hits to location-only.
+- Both config saves and settings persistence use atomic same-directory temp swaps with Windows `EPERM`/`EBUSY` backoff retry and atomic `.bak` promotion.
 - Oversized configs cap displayed fields at the top 2,000 by priority; streaming project scans cap at 50,000 entries and 4,000 config files.
 - API keys and GitHub tokens are encrypted via Electron `safeStorage`, redacted before crossing to the renderer, and preserved untouched when the OS keychain is unavailable.
 - Outbound AI prompts recursively redact passwords, tokens, private keys, DSNs, `Authorization` headers, and common vendor API key formats.
@@ -101,9 +104,10 @@ core/
   formats/    Multi-format parse & write-back engines (json / yaml / toml / env / ini / properties)
   inference/  6-layer inference pipeline (JSON Schema / built-in / example / README / AI / heuristic)
   ai/         OpenAI-compatible client and connection test
-  scanner.ts  Streaming project scanner & format detection
-  save.ts     Diff preview, atomic save, and .bak rollback
-  settings.ts Settings normalization and safeStorage encryption
+  scanner.ts  Streaming project scanner, orphan template discovery & multi-env grouping
+  search.ts   Bounded concurrent cross-file redacted configuration search engine
+  save.ts     Diff preview, atomic save, .bak rollback, template init, compare/sync & redacted export
+  settings.ts Settings normalization, Windows rename retry & safeStorage encryption
 electron/     Main process, window lifecycle, CSP, file watcher, and sandboxed preload bridge
 shared/       IPC & FormSchema contracts, shared validation helpers, and LCS Unified Diff engine
 web/src/      Preact desktop renderer (components / hooks / i18n / utils)
