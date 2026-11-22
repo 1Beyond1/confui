@@ -225,16 +225,90 @@ app.name=Confui
     });
   });
 
-  it("round-trips YAML and TOML values and reports formatting risk", () => {
-    const yaml = `server:\n  port: 3000\n`;
-    const yamlResult = updateConfigText(yaml, "yaml", [{ segments: ["server", "port"], value: 8080 }]);
-    expect(parseConfig(yamlResult.output, "yaml")).toEqual({ server: { port: 8080 } });
-    expect(yamlResult.warnings[0]).toContain("注释");
+  it("preserves YAML comments, indentation and key order via CST without false warnings", () => {
+    const original = `# top comment
+server:
+    # port comment
+    port: 3000 # inline port note
+    host: "127.0.0.1"
 
-    const toml = `[server]\nport = 3000\n`;
-    const tomlResult = updateConfigText(toml, "toml", [{ segments: ["server", "port"], value: 8080 }]);
-    expect(parseConfig(tomlResult.output, "toml")).toMatchObject({ server: { port: 8080 } });
-    expect(tomlResult.warnings[0]).toContain("TOML");
+# logging section
+logging:
+    level: info
+`;
+    const result = updateConfigText(original, "yaml", [
+      { segments: ["server", "port"], value: 8080 },
+      { segments: ["logging", "level"], value: "debug" },
+    ]);
+    expect(result.warnings).toEqual([]);
+    expect(result.output).toContain("# top comment");
+    expect(result.output).toContain("# port comment");
+    expect(result.output).toContain("port: 8080 # inline port note");
+    expect(result.output).toContain('host: "127.0.0.1"');
+    expect(result.output).toContain("# logging section");
+    expect(result.output).toContain("    level: debug");
+    expect(result.output.indexOf("server:")).toBeLessThan(result.output.indexOf("logging:"));
+    expect(parseConfig(result.output, "yaml")).toEqual({
+      server: { port: 8080, host: "127.0.0.1" },
+      logging: { level: "debug" },
+    });
+
+    // Editing through a YAML alias falls back and warns on demand.
+    const aliased = "defaults: &defaults\n  enabled: true\none: *defaults\n";
+    const aliasedResult = updateConfigText(aliased, "yaml", [
+      { segments: ["one", "enabled"], value: false },
+    ]);
+    expect(aliasedResult.warnings.length).toBeGreaterThan(0);
+    expect(parseConfig(aliasedResult.output, "yaml")).toMatchObject({
+      defaults: { enabled: true },
+      one: { enabled: false },
+    });
+  });
+
+  it("preserves TOML comments, blank lines and table order in place and only warns on complex fallback", () => {
+    const original = `# global header
+title = "demo" # keep title note
+
+[server]
+# listening port
+port = 3000 # inline port
+host = "127.0.0.1"
+tags = [
+  "alpha",
+  "beta",
+] # keep tags note
+
+[database]
+url = "postgres://localhost/app"
+`;
+    const result = updateConfigText(original, "toml", [
+      { segments: ["server", "port"], value: 8080 },
+      { segments: ["server", "tags"], value: ["gamma", "delta"] },
+      { segments: ["server", "timeout"], value: 30 },
+    ]);
+    expect(result.warnings).toEqual([]);
+    expect(result.output).toContain("# global header");
+    expect(result.output).toContain('title = "demo" # keep title note');
+    expect(result.output).toContain("# listening port");
+    expect(result.output).toContain("port = 8080 # inline port");
+    expect(result.output).toContain('tags = ["gamma", "delta"] # keep tags note');
+    expect(result.output).toContain("timeout = 30");
+    expect(result.output.indexOf("[server]")).toBeLessThan(result.output.indexOf("[database]"));
+    expect(result.output.indexOf("timeout = 30")).toBeLessThan(result.output.indexOf("[database]"));
+    expect(parseConfig(result.output, "toml")).toMatchObject({
+      title: "demo",
+      server: { port: 8080, host: "127.0.0.1", tags: ["gamma", "delta"], timeout: 30 },
+      database: { url: "postgres://localhost/app" },
+    });
+
+    // Editing a nested key inside an inline table falls back to smol-toml stringify with a precise warning.
+    const inlineTable = "# keep\npoint = { x = 1, y = 2 }\n";
+    const fallbackResult = updateConfigText(inlineTable, "toml", [
+      { segments: ["point", "x"], value: 10 },
+    ]);
+    expect(fallbackResult.warnings.length).toBeGreaterThan(0);
+    expect(fallbackResult.warnings[0]).toContain("TOML");
+    expect(parseConfig(fallbackResult.output, "toml")).toMatchObject({ point: { x: 10, y: 2 } });
   });
 
   it("preserves TOML date metadata when an unrelated value changes", () => {

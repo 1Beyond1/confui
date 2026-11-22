@@ -1,3 +1,4 @@
+import { useRef } from "preact/hooks";
 import type { ConfigFile, ConfigFormat, ProjectScanResult } from "../../../shared/schema.ts";
 import { Icon } from "../icons.tsx";
 import { Logo } from "../ui.tsx";
@@ -38,6 +39,30 @@ export function Sidebar({
   onRescan,
   onSelectFile,
 }: SidebarProps) {
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const activeIndex = filteredFiles.findIndex((file) => activeFile?.path === file.path && view === "editor");
+
+  function handleListKeyDown(event: KeyboardEvent): void {
+    if (!filteredFiles.length) return;
+    const keys = ["ArrowDown", "ArrowUp", "Home", "End"];
+    if (!keys.includes(event.key)) return;
+    const options = [...(listRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])];
+    if (!options.length) return;
+    const currentIndex = options.indexOf(document.activeElement as HTMLButtonElement);
+    let nextIndex = currentIndex >= 0 ? currentIndex : Math.max(0, activeIndex);
+    if (event.key === "ArrowDown") nextIndex = (nextIndex + 1) % options.length;
+    else if (event.key === "ArrowUp") nextIndex = (nextIndex - 1 + options.length) % options.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = options.length - 1;
+    event.preventDefault();
+    const target = options[nextIndex];
+    if (target) {
+      target.focus();
+      target.scrollIntoView({ block: "nearest" });
+    }
+  }
+
   return (
     <aside class="sidebar">
       <div class="sidebar__brand"><Logo/></div>
@@ -95,26 +120,37 @@ export function Sidebar({
               <Icon name="chevron-down" size={14}/>
             </div>
           </div>
-          <div class="file-list" role="listbox" aria-label="配置文件">
-            {filteredFiles.map((file) => (
-              <button
-                key={file.path}
-                role="option"
-                aria-selected={activeFile?.path === file.path && view === "editor"}
-                class={`file-item ${activeFile?.path === file.path && view === "editor" ? "active" : ""}`}
-                disabled={busy}
-                onClick={() => onSelectFile(file)}
-                title={file.warning || file.path}
-              >
-                <span class={`format-icon format-icon--${file.format}`}>{FORMAT_SHORT_LABELS[file.format]}</span>
-                <span class="file-item__copy">
-                  <strong>{file.path.split("/").at(-1)}</strong>
-                  <small>{parentPath(file.path)} · {formatBytes(file.size)}</small>
-                </span>
-                {activeFile?.path === file.path && dirty && <i class="dirty-dot" title="有未保存的更改"/>}
-                {file.status !== "ready" && <Icon name="warning" size={14} class="file-warning"/>}
-              </button>
-            ))}
+          <div
+            ref={listRef}
+            class="file-list"
+            role="listbox"
+            aria-label="配置文件"
+            onKeyDown={handleListKeyDown}
+          >
+            {filteredFiles.map((file, index) => {
+              const selected = activeFile?.path === file.path && view === "editor";
+              const tabStop = activeIndex >= 0 ? index === activeIndex : index === 0;
+              return (
+                <button
+                  key={file.path}
+                  role="option"
+                  tabIndex={tabStop ? 0 : -1}
+                  aria-selected={selected}
+                  class={`file-item ${selected ? "active" : ""}`}
+                  disabled={busy}
+                  onClick={() => onSelectFile(file)}
+                  title={file.warning || file.path}
+                >
+                  <span class={`format-icon format-icon--${file.format}`}>{FORMAT_SHORT_LABELS[file.format]}</span>
+                  <span class="file-item__copy">
+                    <strong>{file.path.split("/").at(-1)}</strong>
+                    <small>{parentPath(file.path)} · {formatBytes(file.size)}</small>
+                  </span>
+                  {activeFile?.path === file.path && dirty && <i class="dirty-dot" title="有未保存的更改"/>}
+                  {file.status !== "ready" && <Icon name="warning" size={14} class="file-warning"/>}
+                </button>
+              );
+            })}
             {!filteredFiles.length && (
               <div class="file-list__empty"><Icon name="search"/><span>没有匹配的文件</span></div>
             )}

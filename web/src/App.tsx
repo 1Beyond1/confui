@@ -35,6 +35,7 @@ import {
   errorMessage,
   sameProjectRoot,
 } from "./utils/format.ts";
+import { normalizeGithubUrl } from "../../shared/validation.ts";
 import "./styles.css";
 
 type View = "home" | "editor" | "settings";
@@ -193,6 +194,11 @@ export function App() {
       notify("请先选择本地项目文件夹", "error");
       return;
     }
+    const trimmedGithub = githubUrl.trim();
+    if (trimmedGithub && !normalizeGithubUrl(trimmedGithub)) {
+      notify("请输入有效的 GitHub 仓库链接，例如 https://github.com/owner/repository", "error");
+      return;
+    }
     const sequence = ++openSequence.current;
     setBusy("scan");
     try {
@@ -227,6 +233,15 @@ export function App() {
     setRootInput(recent.path);
     setGithubInput(recent.githubUrl ?? "");
     await openProject(recent.path, recent.githubUrl ?? "");
+  }
+
+  async function removeRecent(projectPath: string): Promise<void> {
+    const result = await window.confui.removeRecentProject(projectPath);
+    if (!result.ok) {
+      notify(result.error.detail || result.error.message, "error");
+      return;
+    }
+    setSettings(result.data);
   }
 
   async function loadFile(
@@ -573,6 +588,7 @@ export function App() {
               onBrowse={() => void browseForProject()}
               onOpen={() => void openProject()}
               onRecent={(item) => void openRecent(item)}
+              onRemoveRecent={(path) => void removeRecent(path)}
             />
           )}
 

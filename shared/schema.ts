@@ -318,6 +318,7 @@ export interface ConfuiAPI {
   saveConfig(root: string, preview: SavePreview): Promise<Result<SaveResult>>;
   getSettings(): Promise<Result<AppSettings>>;
   setSettings(settings: AppSettings): Promise<Result<AppSettings>>;
+  removeRecentProject(projectPath: string): Promise<Result<AppSettings>>;
   testAI(settings: TestAIRequest): Promise<Result<ConnectionTestResult>>;
   getAppInfo(): Promise<Result<AppInfo>>;
   checkForUpdates(): Promise<Result<UpdateCheckResult>>;

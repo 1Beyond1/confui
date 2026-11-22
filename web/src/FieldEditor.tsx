@@ -285,17 +285,24 @@ function FieldControl({
     const selectedIndex = exactIndex >= 0
       ? exactIndex
       : options.findIndex((option) => enumValueEqual(option, value));
+    const hasNonPresetValue = value !== undefined && selectedIndex < 0;
+    const selectValue = selectedIndex >= 0
+      ? String(selectedIndex)
+      : hasNonPresetValue
+        ? "__non_preset__"
+        : "";
     return (
       <div class="select-wrap">
         <select
           id={id}
           class={`control ${error ? "control--error" : ""}`}
-          value={selectedIndex >= 0 ? String(selectedIndex) : ""}
+          value={selectValue}
           aria-describedby={describedBy}
           aria-invalid={Boolean(error)}
           aria-required={field.required}
           disabled={disabled}
           onChange={(event) => {
+            if (event.currentTarget.value === "__non_preset__") return;
             if (event.currentTarget.value === "") {
               onChange(undefined);
               return;
@@ -305,6 +312,11 @@ function FieldControl({
           }}
         >
           <option value="">请选择</option>
+          {hasNonPresetValue && (
+            <option value="__non_preset__">
+              {`${value === "" ? "（空字符串）" : formatCompact(value)} — 当前值（非预设）`}
+            </option>
+          )}
           {options.map((option, index) => (
             <option value={String(index)} key={`${typeof option}:${String(option)}:${index}`}>
               {option === "" ? "（空字符串）" : String(option)}

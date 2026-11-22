@@ -24,6 +24,7 @@ const api: ConfuiAPI = {
     ipcRenderer.invoke("confui:saveConfig", root, preview),
   getSettings: () => ipcRenderer.invoke("confui:getSettings"),
   setSettings: (settings: AppSettings) => ipcRenderer.invoke("confui:setSettings", settings),
+  removeRecentProject: (projectPath: string) => ipcRenderer.invoke("confui:removeRecentProject", projectPath),
   testAI: (settings: TestAIRequest) => ipcRenderer.invoke("confui:testAI", settings),
   getAppInfo: () => ipcRenderer.invoke("confui:getAppInfo"),
   checkForUpdates: () => ipcRenderer.invoke("confui:checkForUpdates"),

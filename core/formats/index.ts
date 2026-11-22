@@ -73,7 +73,7 @@ export function stringifyConfig(value: unknown, format: ConfigFormat, originalTe
       output = stringifyJsonc(value, originalText);
       break;
     case "yaml":
-      output = stringifyYaml(value);
+      output = stringifyYaml(value, originalText);
       break;
     case "toml":
       output = stringifyToml(value as Record<string, unknown>);

@@ -349,6 +349,11 @@ function registerIpcHandlers(): void {
     return saved;
   });
 
+  handle("confui:removeRecentProject", async (_event, projectPath: unknown) => {
+    assertString(projectPath, "项目路径", MAX_PROJECT_PATH_CHARS);
+    return settingsStore.removeRecentProject(projectPath);
+  });
+
   handle("confui:testAI", async (_event, settings: unknown) => {
     if (!isTestAIRequest(settings)) throw new ConfuiError("INVALID_INPUT", "AI 设置内容无效");
     let effectiveApiKey = settings.apiKey;

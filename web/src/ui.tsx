@@ -1,5 +1,5 @@
 import type { ComponentChildren, JSX } from "preact";
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect, useId, useRef } from "preact/hooks";
 import type { FieldSource } from "../../shared/schema.ts";
 import { Icon, type IconName } from "./icons.tsx";
 
@@ -69,6 +69,9 @@ export function Modal({
   const dialogRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const modalId = useId();
+  const titleId = `${modalId}-title`;
+  const descriptionId = `${modalId}-description`;
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -112,11 +115,11 @@ export function Modal({
     <div class="modal-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
-      <section ref={dialogRef} class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby={description ? "modal-description" : undefined} tabIndex={-1} style={{ maxWidth: width }}>
+      <section ref={dialogRef} class="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined} tabIndex={-1} style={{ maxWidth: width }}>
         <header class="modal__header">
           <div>
-            <h2 id="modal-title">{title}</h2>
-            {description && <p id="modal-description">{description}</p>}
+            <h2 id={titleId}>{title}</h2>
+            {description && <p id={descriptionId}>{description}</p>}
           </div>
           <button class="icon-button" onClick={onClose} aria-label="关闭"><Icon name="x"/></button>
         </header>

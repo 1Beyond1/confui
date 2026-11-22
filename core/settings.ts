@@ -123,6 +123,18 @@ export class SettingsStore {
     });
   }
 
+  async removeRecentProject(projectPath: string): Promise<AppSettings> {
+    return this.withWriteLock(async () => {
+      const target = projectPath.trim().toLowerCase();
+      const persisted = await this.readPersistedForWrite();
+      persisted.recentProjects = persisted.recentProjects.filter(
+        (item) => item.path.toLowerCase() !== target,
+      );
+      await this.writePersisted(persisted);
+      return redactSettingsForRenderer(this.decodeSecrets(persisted));
+    });
+  }
+
   /** Reads the on-disk settings with the secrets left in their stored form. */
   private async readPersisted(): Promise<PersistedSettings> {
     try {
