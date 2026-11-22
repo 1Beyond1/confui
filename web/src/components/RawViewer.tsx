@@ -10,16 +10,35 @@ interface TextSegment {
   matchIndex?: number;
 }
 
-export function RawViewer({ schema }: { schema: ConfigFormSchema }) {
+export function RawViewer({
+  schema,
+  focusLine,
+}: {
+  schema: ConfigFormSchema;
+  focusLine?: { line: number; token: number };
+}) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [activeMatch, setActiveMatch] = useState(0);
+  const [highlightedLine, setHighlightedLine] = useState<number>();
   const codeContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setQuery("");
     setActiveMatch(0);
+    setHighlightedLine(undefined);
   }, [schema.file]);
+
+  useEffect(() => {
+    if (!focusLine?.line) return;
+    setHighlightedLine(focusLine.line);
+    const row = codeContainerRef.current?.querySelector<HTMLElement>(`[data-line-number="${focusLine.line}"]`);
+    row?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const timer = window.setTimeout(() => {
+      setHighlightedLine((current) => (current === focusLine.line ? undefined : current));
+    }, 2_600);
+    return () => window.clearTimeout(timer);
+  }, [focusLine?.line, focusLine?.token]);
 
   const { lines, totalMatches } = useMemo(() => {
     const rawLines = schema.rawText.replace(/\r\n/g, "\n").split("\n");
@@ -134,7 +153,11 @@ export function RawViewer({ schema }: { schema: ConfigFormSchema }) {
         <div ref={codeContainerRef} class="raw-code-scroll">
           <div class="raw-lines" role="code" aria-label={schema.file}>
             {lines.map((segments, lineIndex) => (
-              <div class="raw-line" key={lineIndex}>
+              <div
+                class={`raw-line ${highlightedLine === lineIndex + 1 ? "raw-line--highlighted" : ""}`}
+                data-line-number={lineIndex + 1}
+                key={lineIndex}
+              >
                 <span class="raw-line-num" aria-hidden="true">{lineIndex + 1}</span>
                 <span class="raw-line-code">
                   {segments.map((seg, segIndex) =>

@@ -9,6 +9,7 @@ import type {
   InferOptions,
   Locale,
   PathSegment,
+  ProjectSearchOptions,
   RestoreBackupPreview,
   SavePreview,
   TestAIRequest,
@@ -46,6 +47,8 @@ const api: ConfuiAPI = {
     ipcRenderer.invoke("confui:previewRedactedExport", root, file, secretPaths),
   saveRedactedExport: (root: string, file: string, secretPaths?: PathSegment[][]) =>
     ipcRenderer.invoke("confui:saveRedactedExport", root, file, secretPaths),
+  searchProject: (root: string, query: string, options?: ProjectSearchOptions) =>
+    ipcRenderer.invoke("confui:searchProject", root, query, options),
   getSettings: () => ipcRenderer.invoke("confui:getSettings"),
   setSettings: (settings: AppSettings) => ipcRenderer.invoke("confui:setSettings", settings),
   removeRecentProject: (projectPath: string) => ipcRenderer.invoke("confui:removeRecentProject", projectPath),

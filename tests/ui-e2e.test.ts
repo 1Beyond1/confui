@@ -216,6 +216,7 @@ describe("UI state, diff, validation & i18n integration", () => {
       "confui:previewSyncConfig",
       "confui:previewRedactedExport",
       "confui:saveRedactedExport",
+      "confui:searchProject",
     ]) {
       expect(preloadSource).toContain(channel);
       expect(mainSource).toContain(channel);

@@ -38,6 +38,7 @@ import {
 } from "../core/save.ts";
 import { isForbiddenKey, normalizeGithubUrl } from "../shared/validation.ts";
 import { scanProject } from "../core/scanner.ts";
+import { searchProjectConfigs } from "../core/search.ts";
 import { SettingsStore, type SecretCodec } from "../core/settings.ts";
 import { checkForUpdates } from "../core/update.ts";
 import type {
@@ -50,6 +51,7 @@ import type {
   InferOptions,
   Locale,
   PathSegment,
+  ProjectSearchOptions,
   Result,
   RestoreBackupPreview,
   SavePreview,
@@ -472,6 +474,39 @@ function registerIpcHandlers(): void {
     }
     await writeRedactedExportToChosenPath(chosen.filePath, resolved.path, preview.content);
     return { savedPath: chosen.filePath, redactedCount: preview.redactedCount };
+  });
+
+  handle("confui:searchProject", async (_event, root: unknown, query: unknown, options?: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    if (typeof query !== "string" || query.length > 500 || query.includes("\0")) {
+      throw new ConfuiError("INVALID_INPUT", "搜索关键词无效");
+    }
+    const safeOptions: ProjectSearchOptions = {};
+    if (options !== undefined) {
+      if (options === null || typeof options !== "object") {
+        throw new ConfuiError("INVALID_INPUT", "搜索选项无效");
+      }
+      const candidate = options as ProjectSearchOptions;
+      if (candidate.limit !== undefined) {
+        if (typeof candidate.limit !== "number" || !Number.isFinite(candidate.limit)) {
+          throw new ConfuiError("INVALID_INPUT", "搜索结果上限无效");
+        }
+        safeOptions.limit = candidate.limit;
+      }
+      if (candidate.maxTotalBytes !== undefined) {
+        if (typeof candidate.maxTotalBytes !== "number" || !Number.isFinite(candidate.maxTotalBytes)) {
+          throw new ConfuiError("INVALID_INPUT", "搜索字节上限无效");
+        }
+        safeOptions.maxTotalBytes = candidate.maxTotalBytes;
+      }
+      if (candidate.concurrency !== undefined) {
+        if (typeof candidate.concurrency !== "number" || !Number.isFinite(candidate.concurrency)) {
+          throw new ConfuiError("INVALID_INPUT", "搜索并发数无效");
+        }
+        safeOptions.concurrency = candidate.concurrency;
+      }
+    }
+    return searchProjectConfigs(root, query, safeOptions);
   });
 
   handle("confui:getSettings", async () => settingsStore.loadForRenderer());

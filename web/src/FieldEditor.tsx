@@ -31,6 +31,7 @@ export function FieldEditor({
   aiAvailable = false,
   onExplain,
   disabled = false,
+  focusRequest,
 }: {
   fileKey?: string;
   fields: FieldSpec[];
@@ -48,12 +49,37 @@ export function FieldEditor({
   aiAvailable?: boolean;
   onExplain?: (field: FieldSpec) => Promise<FieldAssistResult>;
   disabled?: boolean;
+  focusRequest?: { path: string; token: number };
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
+  const [highlightedPath, setHighlightedPath] = useState<string>();
+  const editorRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     setQuery("");
+    setHighlightedPath(undefined);
   }, [fileKey]);
+  useEffect(() => {
+    if (!focusRequest?.path) return;
+    setQuery("");
+    setHighlightedPath(focusRequest.path);
+    const scrollTimer = window.setTimeout(() => {
+      const rows = editorRef.current?.querySelectorAll<HTMLElement>("[data-field-path]");
+      const target = rows ? [...rows].find((el) => el.dataset.fieldPath === focusRequest.path) : undefined;
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        const focusable = target.querySelector<HTMLElement>("input, select, textarea, button[role='switch']");
+        focusable?.focus({ preventScroll: true });
+      }
+    }, 30);
+    const clearTimer = window.setTimeout(() => {
+      setHighlightedPath((current) => (current === focusRequest.path ? undefined : current));
+    }, 2_600);
+    return () => {
+      window.clearTimeout(scrollTimer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [focusRequest?.path, focusRequest?.token]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleFields = normalizedQuery
     ? fields.filter((field) => [field.label, field.path, field.description, field.group]
@@ -65,7 +91,7 @@ export function FieldEditor({
   const groups = groupFields(visibleFields, t("common.generalGroup"));
   const controlIds = new Map(fields.map((field, index) => [fieldKey(field), `field-${index}`]));
   return (
-    <div class="field-editor" aria-busy={disabled}>
+    <div ref={editorRef} class="field-editor" aria-busy={disabled}>
       <div class="field-toolbar">
         <label class="field-search">
           <Icon name="search" size={15}/>
@@ -144,6 +170,7 @@ export function FieldEditor({
                       key={key}
                       field={field}
                       isCustom={Boolean(customKeys?.has(key))}
+                      highlighted={highlightedPath === field.path}
                       value={values[key]}
                       error={errors.get(key)}
                       controlId={controlIds.get(key) ?? `field-${key}`.replace(/[^\w-]/g, "-")}
@@ -174,6 +201,7 @@ export function FieldEditor({
 function FieldRow({
   field,
   isCustom,
+  highlighted = false,
   value,
   error,
   controlId,
@@ -186,6 +214,7 @@ function FieldRow({
 }: {
   field: FieldSpec;
   isCustom: boolean;
+  highlighted?: boolean;
   value: unknown;
   error?: string;
   controlId: string;
@@ -228,7 +257,8 @@ function FieldRow({
 
   return (
     <div
-      class={`field-row ${field.confidence < 0.7 ? "field-row--suggested" : ""} ${error ? "field-row--error" : ""} ${modified && !error ? "field-row--modified" : ""} ${markedDeleted ? "field-row--deleted" : ""}`}
+      data-field-path={field.path}
+      class={`field-row ${field.confidence < 0.7 ? "field-row--suggested" : ""} ${error ? "field-row--error" : ""} ${modified && !error ? "field-row--modified" : ""} ${markedDeleted ? "field-row--deleted" : ""} ${highlighted ? "field-row--highlighted" : ""}`}
     >
       <div class="field-row__meta">
         <div class="field-row__title">

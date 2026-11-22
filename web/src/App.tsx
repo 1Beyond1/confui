@@ -13,12 +13,15 @@ import type {
   Locale,
   PathSegment,
   ProjectScanResult,
+  ProjectSearchHit,
   RecentProject,
   RestoreBackupPreview,
   SavePreview,
+  ThemePreference,
 } from "../../shared/schema.ts";
 import { normalizeGithubUrl } from "../../shared/validation.ts";
 import { AddKeyModal } from "./components/AddKeyModal.tsx";
+import { CommandPalette, type PaletteCommand } from "./components/CommandPalette.tsx";
 import { CompareSyncModal } from "./components/CompareSyncModal.tsx";
 import { EditorSkeleton, EditorSummary } from "./components/EditorSummary.tsx";
 import { ExportRedactedModal } from "./components/ExportRedactedModal.tsx";
@@ -59,7 +62,7 @@ type EditorTab = "form" | "raw";
 type BusyState = "scan" | "infer" | "preview" | "save" | "restore" | null;
 type ToastType = "success" | "error" | "info";
 type PendingAction =
-  | { kind: "file"; file: ConfigFile }
+  | { kind: "file"; file: ConfigFile; focusFieldPath?: string; focusLine?: number; openRaw?: boolean }
   | { kind: "home" }
   | { kind: "settings" }
   | { kind: "reload" }
@@ -100,6 +103,9 @@ export function App() {
   const [addKeyOpen, setAddKeyOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [focusFieldRequest, setFocusFieldRequest] = useState<{ file: string; path: string; token: number }>();
+  const [focusLineRequest, setFocusLineRequest] = useState<{ file: string; line: number; token: number }>();
   const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsPageRevision, setSettingsPageRevision] = useState(0);
@@ -203,11 +209,18 @@ export function App() {
 
   const keydownHandlerRef = useRef<(event: KeyboardEvent) => void>();
   keydownHandlerRef.current = (event: KeyboardEvent) => {
-    const anyModalOpen = Boolean(
+    const anyBlockingModal = Boolean(
       savePreview || restorePreview || addKeyOpen || compareOpen || exportOpen || pendingAction || pendingSettingsAction,
     );
+    const anyModalOpen = anyBlockingModal || commandPaletteOpen;
     const mod = event.ctrlKey || event.metaKey;
     const lower = event.key.toLowerCase();
+    if (mod && lower === "k") {
+      event.preventDefault();
+      if (commandPaletteOpen) setCommandPaletteOpen(false);
+      else if (!anyBlockingModal && busy === null) setCommandPaletteOpen(true);
+      return;
+    }
     if (mod && lower === "s") {
       event.preventDefault();
       if (view === "editor" && dirty && busy === null && !anyModalOpen) void beginSave();
@@ -215,7 +228,7 @@ export function App() {
     }
     if (mod && lower === "o") {
       event.preventDefault();
-      requestAction({ kind: "browse" });
+      if (!anyModalOpen) requestAction({ kind: "browse" });
       return;
     }
     if (view === "editor" && editorTab === "form" && busy === null && !anyModalOpen && mod) {
@@ -234,7 +247,8 @@ export function App() {
       }
     }
     if (event.key === "Escape") {
-      if (savePreview) closeSavePreview();
+      if (commandPaletteOpen) setCommandPaletteOpen(false);
+      else if (savePreview) closeSavePreview();
       else if (restorePreview && busy !== "restore") setRestorePreview(undefined);
       else if (addKeyOpen) setAddKeyOpen(false);
       else if (compareOpen) setCompareOpen(false);
@@ -345,6 +359,7 @@ export function App() {
     root = project?.root,
     githubUrl = githubInput,
     targetLocale = locale,
+    focusTarget?: { focusFieldPath?: string; focusLine?: number; openRaw?: boolean },
   ): Promise<void> {
     if (!root) return;
     if (file.status === "too-large" || file.status === "unsupported" || file.status === "unreadable") {
@@ -360,7 +375,7 @@ export function App() {
     setExternalChange(false);
     setLoadError(undefined);
     setView("editor");
-    setEditorTab("form");
+    setEditorTab(focusTarget?.openRaw ? "raw" : "form");
     try {
       const result = await window.confui.inferSchema(root, file.path, {
         githubUrl: githubUrl || undefined,
@@ -373,6 +388,11 @@ export function App() {
       history.reset({ values: initializeEditorValues(result.data.fields), customFields: [] });
       setExternalChange(false);
       void refreshBackupStatus(root, file.path, sequence);
+      if (focusTarget?.focusFieldPath && !focusTarget.openRaw) {
+        setFocusFieldRequest({ file: result.data.file, path: focusTarget.focusFieldPath, token: Date.now() });
+      } else if (focusTarget?.focusLine && focusTarget.openRaw) {
+        setFocusLineRequest({ file: result.data.file, line: focusTarget.focusLine, token: Date.now() });
+      }
     } catch (error) {
       if (sequence === openSequence.current) {
         const message = errorMessage(error, t("common.actionFailed"));
@@ -393,6 +413,15 @@ export function App() {
     const sameFile = view !== "home" && action.kind === "file" && action.file.path === activeFile?.path;
     if (sameFile && !loadError) {
       setView("editor");
+      if (action.openRaw) {
+        setEditorTab("raw");
+        if (action.focusLine) {
+          setFocusLineRequest({ file: action.file.path, line: action.focusLine, token: Date.now() });
+        }
+      } else if (action.focusFieldPath) {
+        setEditorTab("form");
+        setFocusFieldRequest({ file: action.file.path, path: action.focusFieldPath, token: Date.now() });
+      }
       return;
     }
     if (dirty) setPendingAction(action);
@@ -433,7 +462,11 @@ export function App() {
     }
     switch (action.kind) {
       case "file":
-        await loadFile(action.file);
+        await loadFile(action.file, project?.root, githubInput, locale, {
+          focusFieldPath: action.focusFieldPath,
+          focusLine: action.focusLine,
+          openRaw: action.openRaw,
+        });
         return;
       case "home":
         window.confui.stopWatching();
@@ -721,6 +754,158 @@ export function App() {
     scroller.scrollBy({ left: event.deltaX, top: event.deltaY });
   }
 
+  function handleSelectSearchHit(hit: ProjectSearchHit): void {
+    if (!project) return;
+    const targetFile = project.files.find((file) => file.path === hit.file);
+    if (!targetFile) return;
+    const openRaw = !hit.path;
+    requestAction({
+      kind: "file",
+      file: targetFile,
+      focusFieldPath: hit.path,
+      focusLine: hit.line,
+      openRaw,
+    });
+  }
+
+  function quickSwitchTheme(theme: ThemePreference): void {
+    if (!settings) return;
+    void saveSettings({ ...settings, theme }).catch((err) => {
+      notify(errorMessage(err, t("settings.toastSaveFailed")), "error");
+    });
+  }
+
+  function quickSwitchLocale(nextLocale: Locale): void {
+    if (!settings) return;
+    void saveSettings({ ...settings, locale: nextLocale }).catch((err) => {
+      notify(errorMessage(err, t("settings.toastSaveFailed")), "error");
+    });
+  }
+
+  const paletteCommands: PaletteCommand[] = settings
+    ? [
+      {
+        id: "save",
+        label: t("palette.cmdSave"),
+        description: schema ? schema.file : undefined,
+        keywords: "save write commit 保存",
+        shortcut: "Ctrl+S",
+        icon: "save",
+        disabled: !(view === "editor" && schema && changes.length > 0 && errors.size === 0),
+        run: () => void beginSave(),
+      },
+      {
+        id: "restore-backup",
+        label: t("palette.cmdRestore"),
+        description: schema ? `${schema.file}.bak` : undefined,
+        keywords: "backup rollback restore bak 恢复 备份",
+        icon: "history",
+        disabled: !(view === "editor" && schema && backupStatus?.exists),
+        run: () => void beginRestoreBackup(),
+      },
+      {
+        id: "compare-sync",
+        label: t("palette.cmdCompare"),
+        description: t("editor.compareTooltip"),
+        keywords: "compare diff sync env 对比 补齐",
+        icon: "compare",
+        disabled: !(project && openableFiles.length >= 2),
+        run: () => setCompareOpen(true),
+      },
+      {
+        id: "export-redacted",
+        label: t("palette.cmdExportRedacted"),
+        description: schema?.file,
+        keywords: "export redact mask share template 导出 脱敏",
+        icon: "download",
+        disabled: !(view === "editor" && schema),
+        run: () => setExportOpen(true),
+      },
+      {
+        id: "add-key",
+        label: t("palette.cmdAddKey"),
+        description: schema?.file,
+        keywords: "add key field new 新增 字段",
+        icon: "plus",
+        disabled: !(view === "editor" && schema),
+        run: () => setAddKeyOpen(true),
+      },
+      {
+        id: "toggle-tab",
+        label: editorTab === "form" ? t("palette.cmdViewRaw") : t("palette.cmdViewForm"),
+        keywords: "form raw source tab 表单 原始",
+        icon: editorTab === "form" ? "code" : "layers",
+        disabled: !(view === "editor" && schema),
+        run: () => selectEditorTab(editorTab === "form" ? "raw" : "form"),
+      },
+      {
+        id: "rescan",
+        label: t("palette.cmdRescan"),
+        description: project?.name,
+        keywords: "rescan refresh project 重扫 刷新",
+        icon: "refresh",
+        disabled: !project,
+        run: () => requestAction({ kind: "rescan" }),
+      },
+      {
+        id: "open-folder",
+        label: t("palette.cmdOpenFolder"),
+        keywords: "open folder project browse 打开 项目",
+        shortcut: "Ctrl+O",
+        icon: "folder-open",
+        run: () => requestAction({ kind: "browse" }),
+      },
+      {
+        id: "theme-light",
+        label: t("palette.cmdThemeLight"),
+        keywords: "theme light appearance 浅色 主题",
+        icon: "sparkles",
+        disabled: settings.theme === "light" || (view === "settings" && settingsDirty),
+        run: () => quickSwitchTheme("light"),
+      },
+      {
+        id: "theme-dark",
+        label: t("palette.cmdThemeDark"),
+        keywords: "theme dark appearance 深色 主题",
+        icon: "sparkles",
+        disabled: settings.theme === "dark" || (view === "settings" && settingsDirty),
+        run: () => quickSwitchTheme("dark"),
+      },
+      {
+        id: "theme-system",
+        label: t("palette.cmdThemeSystem"),
+        keywords: "theme system appearance 跟随系统 主题",
+        icon: "sparkles",
+        disabled: settings.theme === "system" || (view === "settings" && settingsDirty),
+        run: () => quickSwitchTheme("system"),
+      },
+      {
+        id: "locale-toggle",
+        label: locale === "zh-CN" ? t("palette.cmdSwitchEn") : t("palette.cmdSwitchZh"),
+        keywords: "language locale english chinese 语言 中文 英文",
+        icon: "info",
+        disabled: view === "settings" && settingsDirty,
+        run: () => quickSwitchLocale(locale === "zh-CN" ? "en-US" : "zh-CN"),
+      },
+      {
+        id: "go-settings",
+        label: t("palette.cmdSettings"),
+        keywords: "settings preferences ai github 设置",
+        icon: "settings",
+        disabled: view === "settings",
+        run: () => requestAction({ kind: "settings" }),
+      },
+      {
+        id: "go-home",
+        label: t("palette.cmdHome"),
+        keywords: "home start recent 开始 首页",
+        icon: "home",
+        disabled: view === "home",
+        run: () => requestAction({ kind: "home" }),
+      },
+    ]
+    : [];
+
   if (!settings) {
     return (
       <I18nProvider locale={locale}>
@@ -766,6 +951,17 @@ export function App() {
                     : <><span>{project?.name ?? t("topbar.editorFallbackTitle")}</span><small>{t("topbar.editorFallbackSubtitle")}</small></>}
             </div>
             <div class="topbar__actions">
+              <button
+                type="button"
+                class="palette-trigger"
+                disabled={busy !== null}
+                onClick={() => setCommandPaletteOpen(true)}
+                title={t("palette.triggerTooltip")}
+              >
+                <Icon name="search" size={14}/>
+                <span>{t("palette.triggerLabel")}</span>
+                <kbd>Ctrl+K</kbd>
+              </button>
               {view === "editor" && schema && (
                 <>
                   <div class="view-tabs" role="tablist" aria-orientation="horizontal">
@@ -909,6 +1105,7 @@ export function App() {
                     aiAvailable={settings.ai.enabled && Boolean(settings.ai.baseUrl.trim() && settings.ai.model.trim())}
                     onExplain={askAiAboutField}
                     onChange={updateField}
+                    focusRequest={focusFieldRequest?.file === schema.file ? focusFieldRequest : undefined}
                   />
                 ) : (
                   <div class="empty-card">
@@ -926,7 +1123,12 @@ export function App() {
               </div>
             )}
 
-            {view === "editor" && schema && editorTab === "raw" && <RawViewer schema={schema}/>}
+            {view === "editor" && schema && editorTab === "raw" && (
+              <RawViewer
+                schema={schema}
+                focusLine={focusLineRequest?.file === schema.file ? focusLineRequest : undefined}
+              />
+            )}
           </div>
 
           {view === "editor" && schema && changes.length > 0 && (
@@ -1022,6 +1224,17 @@ export function App() {
             secretPaths={secretPathsForExport}
             onClose={() => setExportOpen(false)}
             onToast={notify}
+          />
+        )}
+
+        {commandPaletteOpen && (
+          <CommandPalette
+            project={project}
+            openableFiles={openableFiles}
+            commands={paletteCommands}
+            onClose={() => setCommandPaletteOpen(false)}
+            onSelectFile={(file) => requestAction({ kind: "file", file })}
+            onSelectSearchHit={handleSelectSearchHit}
           />
         )}
 

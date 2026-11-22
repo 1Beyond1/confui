@@ -211,6 +211,33 @@ export interface RedactedExportSaveResult {
   redactedCount: number;
 }
 
+export type SearchMatchKind = "path" | "value" | "comment";
+
+export interface ProjectSearchOptions {
+  limit?: number;
+  maxTotalBytes?: number;
+  concurrency?: number;
+}
+
+export interface ProjectSearchHit {
+  file: string;
+  format: ConfigFormat;
+  path?: string;
+  segments?: PathSegment[];
+  line?: number;
+  matchKind: SearchMatchKind;
+  preview: string;
+  secret: boolean;
+}
+
+export interface ProjectSearchResult {
+  query: string;
+  hits: ProjectSearchHit[];
+  searchedFiles: number;
+  skippedFiles: number;
+  truncated: boolean;
+}
+
 export type Locale = "zh-CN" | "en-US";
 
 export interface InferOptions {
@@ -417,6 +444,7 @@ export interface ConfuiAPI {
   ): Promise<Result<SavePreview>>;
   previewRedactedExport(root: string, file: string, secretPaths?: PathSegment[][]): Promise<Result<RedactedExportPreview>>;
   saveRedactedExport(root: string, file: string, secretPaths?: PathSegment[][]): Promise<Result<RedactedExportSaveResult>>;
+  searchProject(root: string, query: string, options?: ProjectSearchOptions): Promise<Result<ProjectSearchResult>>;
   getSettings(): Promise<Result<AppSettings>>;
   setSettings(settings: AppSettings): Promise<Result<AppSettings>>;
   removeRecentProject(projectPath: string): Promise<Result<AppSettings>>;
