@@ -1034,6 +1034,11 @@ export function App() {
                 onGithub={setGithubInput}
                 onBrowse={() => void browseForProject()}
                 onOpen={() => void openProject()}
+                onDropFolder={(folderPath) => {
+                  setRootInput(folderPath);
+                  void openProject(folderPath, githubInput);
+                }}
+                onDropInvalid={(message) => notify(message, "error")}
                 onRecent={(item) => void openRecent(item)}
                 onRemoveRecent={(path) => void removeRecent(path)}
               />

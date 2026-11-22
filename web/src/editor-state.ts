@@ -10,6 +10,30 @@ export interface JsonDraft {
 }
 
 export type EditorValues = Record<string, unknown>;
+export type FieldStatusFilter = "all" | "modified" | "error" | "required";
+
+export function filterFieldsByStatus(
+  fields: readonly FieldSpec[],
+  values: EditorValues,
+  errors: ReadonlyMap<string, string>,
+  customKeys: ReadonlySet<string> | undefined,
+  status: FieldStatusFilter,
+): FieldSpec[] {
+  if (status === "all") return [...fields];
+  return fields.filter((field) => {
+    const key = fieldKey(field);
+    if (status === "modified") {
+      return Boolean(customKeys?.has(key)) || isFieldModified(field, values[key]);
+    }
+    if (status === "error") {
+      return errors.has(key);
+    }
+    if (status === "required") {
+      return field.required === true;
+    }
+    return true;
+  });
+}
 
 export function fieldKey(field: Pick<FieldSpec, "segments">): string {
   return JSON.stringify(field.segments);

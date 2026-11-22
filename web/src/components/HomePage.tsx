@@ -1,3 +1,4 @@
+import { useRef, useState } from "preact/hooks";
 import type { RecentProject } from "../../../shared/schema.ts";
 import { normalizeGithubUrl } from "../../../shared/validation.ts";
 import { useI18n } from "../i18n/index.tsx";
@@ -13,6 +14,8 @@ export interface HomePageProps {
   onGithub: (value: string) => void;
   onBrowse: () => void;
   onOpen: () => void;
+  onDropFolder: (folderPath: string) => void;
+  onDropInvalid: (message: string) => void;
   onRecent: (item: RecentProject) => void;
   onRemoveRecent: (path: string) => void;
 }
@@ -26,17 +29,77 @@ export function HomePage({
   onGithub,
   onBrowse,
   onOpen,
+  onDropFolder,
+  onDropInvalid,
   onRecent,
   onRemoveRecent,
 }: HomePageProps) {
   const { t } = useI18n();
+  const [dragActive, setDragActive] = useState(false);
+  const dragDepth = useRef(0);
   const trimmedGithub = github.trim();
   const githubError = trimmedGithub && !normalizeGithubUrl(trimmedGithub)
     ? t("home.githubInvalid")
     : undefined;
 
+  function handleDragEnter(event: DragEvent): void {
+    if (busy) return;
+    event.preventDefault();
+    dragDepth.current += 1;
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    setDragActive(true);
+  }
+
+  function handleDragOver(event: DragEvent): void {
+    if (busy) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleDragLeave(event: DragEvent): void {
+    event.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragActive(false);
+  }
+
+  function handleDrop(event: DragEvent): void {
+    event.preventDefault();
+    dragDepth.current = 0;
+    setDragActive(false);
+    if (busy) return;
+
+    const firstItem = event.dataTransfer?.items?.[0];
+    const webkitEntry = typeof firstItem?.webkitGetAsEntry === "function"
+      ? firstItem.webkitGetAsEntry()
+      : null;
+    if (webkitEntry && !webkitEntry.isDirectory) {
+      onDropInvalid(t("home.dropFolderOnly"));
+      return;
+    }
+
+    const droppedFile = event.dataTransfer?.files?.[0];
+    if (!droppedFile) {
+      onDropInvalid(t("home.dropFolderOnly"));
+      return;
+    }
+    const resolvedPath = window.confui.getPathForFile?.(droppedFile)
+      || (droppedFile as File & { path?: string }).path
+      || "";
+    if (!resolvedPath.trim()) {
+      onDropInvalid(t("home.dropFolderOnly"));
+      return;
+    }
+    onDropFolder(resolvedPath.trim());
+  }
+
   return (
-    <div class="home-page page-wide">
+    <div
+      class="home-page page-wide"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div class="home-heading">
         <span class="home-heading__icon"><Icon name="layers" size={24}/></span>
         <div>
@@ -45,7 +108,14 @@ export function HomePage({
           <p>{t("home.subtitle")}</p>
         </div>
       </div>
-      <section class="open-project-card">
+      <section class={`open-project-card ${dragActive ? "open-project-card--dragging" : ""}`}>
+        {dragActive && (
+          <div class="drop-overlay" role="status">
+            <span class="drop-overlay__icon"><Icon name="folder-open" size={28}/></span>
+            <strong>{t("home.dropOverlayTitle")}</strong>
+            <span>{t("home.dropOverlayHint")}</span>
+          </div>
+        )}
         <div class="open-project-card__head">
           <div>
             <h2>{t("home.cardTitle")}</h2>
@@ -67,6 +137,7 @@ export function HomePage({
             />
             <Button disabled={busy} onClick={onBrowse}>{t("home.browse")}</Button>
           </div>
+          <p class="drop-inline-hint"><Icon name="upload" size={13}/>{t("home.dropInlineHint")}</p>
         </div>
         <div class="project-input-block">
           <label for="github-url">{t("home.githubLabel")} <span>{t("home.githubHint")}</span></label>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { FieldAssistResult, FieldSpec } from "../../shared/schema.ts";
 import { isHexColor6 } from "../../shared/validation.ts";
 import { StructuredArrayControl, StructuredObjectControl } from "./components/StructuredControls.tsx";
@@ -6,9 +6,11 @@ import {
   effectiveValue,
   enumValueEqual,
   fieldKey,
+  filterFieldsByStatus,
   isFieldModified,
   isInactiveExamplePlaceholder,
   type EditorValues,
+  type FieldStatusFilter,
 } from "./editor-state.ts";
 import { useI18n } from "./i18n/index.tsx";
 import { Icon } from "./icons.tsx";
@@ -53,15 +55,28 @@ export function FieldEditor({
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<FieldStatusFilter>("all");
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [highlightedPath, setHighlightedPath] = useState<string>();
   const editorRef = useRef<HTMLDivElement>(null);
+  const defaultGroupName = t("common.generalGroup");
+
   useEffect(() => {
     setQuery("");
+    setStatusFilter("all");
+    setCollapsedGroups({});
     setHighlightedPath(undefined);
   }, [fileKey]);
+
   useEffect(() => {
     if (!focusRequest?.path) return;
     setQuery("");
+    setStatusFilter("all");
+    const targetField = fields.find((item) => item.path === focusRequest.path);
+    if (targetField) {
+      const targetGroup = normalizeGroupName(targetField.group, defaultGroupName);
+      setCollapsedGroups((prev) => (prev[targetGroup] ? { ...prev, [targetGroup]: false } : prev));
+    }
     setHighlightedPath(focusRequest.path);
     const scrollTimer = window.setTimeout(() => {
       const rows = editorRef.current?.querySelectorAll<HTMLElement>("[data-field-path]");
@@ -79,17 +94,51 @@ export function FieldEditor({
       window.clearTimeout(scrollTimer);
       window.clearTimeout(clearTimer);
     };
-  }, [focusRequest?.path, focusRequest?.token]);
+  }, [focusRequest?.path, focusRequest?.token, fields, defaultGroupName]);
+
+  const statusCounts = useMemo(() => {
+    let modified = 0;
+    let errorCount = 0;
+    let required = 0;
+    for (const field of fields) {
+      const key = fieldKey(field);
+      if (customKeys?.has(key) || isFieldModified(field, values[key])) modified += 1;
+      if (errors.has(key)) errorCount += 1;
+      if (field.required === true) required += 1;
+    }
+    return { all: fields.length, modified, error: errorCount, required };
+  }, [fields, values, errors, customKeys]);
+
+  const statusFilteredFields = useMemo(
+    () => filterFieldsByStatus(fields, values, errors, customKeys, statusFilter),
+    [fields, values, errors, customKeys, statusFilter],
+  );
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleFields = normalizedQuery
-    ? fields.filter((field) => [field.label, field.path, field.description, field.group]
+    ? statusFilteredFields.filter((field) => [field.label, field.path, field.description, field.group]
       .filter(Boolean)
       .join(" ")
       .toLocaleLowerCase()
       .includes(normalizedQuery))
-    : fields;
-  const groups = groupFields(visibleFields, t("common.generalGroup"));
+    : statusFilteredFields;
+  const groups = groupFields(visibleFields, defaultGroupName);
+  const allCollapsed = groups.length > 0 && groups.every(([name]) => Boolean(collapsedGroups[name]));
   const controlIds = new Map(fields.map((field, index) => [fieldKey(field), `field-${index}`]));
+
+  function toggleGroup(name: string): void {
+    setCollapsedGroups((prev) => ({ ...prev, [name]: !prev[name] }));
+  }
+
+  function toggleAllGroups(): void {
+    if (allCollapsed) {
+      setCollapsedGroups({});
+    } else {
+      const next: Record<string, boolean> = {};
+      for (const [name] of groups) next[name] = true;
+      setCollapsedGroups(next);
+    }
+  }
+
   return (
     <div ref={editorRef} class="field-editor" aria-busy={disabled}>
       <div class="field-toolbar">
@@ -152,46 +201,123 @@ export function FieldEditor({
         </div>
       </div>
 
+      <div class="field-status-bar">
+        <div class="field-status-pills" role="group" aria-label={t("field.statusFilterAria")}>
+          {([
+            ["all", t("field.filterAll"), statusCounts.all],
+            ["modified", t("field.filterModified"), statusCounts.modified],
+            ["error", t("field.filterError"), statusCounts.error],
+            ["required", t("field.filterRequired"), statusCounts.required],
+          ] as Array<[FieldStatusFilter, string, number]>).map(([id, label, count]) => (
+            <button
+              key={id}
+              type="button"
+              class={`status-pill ${statusFilter === id ? "active" : ""} ${id === "error" && count > 0 ? "status-pill--danger" : ""}`}
+              aria-pressed={statusFilter === id}
+              disabled={disabled}
+              onClick={() => setStatusFilter(id)}
+            >
+              <span>{label}</span>
+              <small>{count}</small>
+            </button>
+          ))}
+        </div>
+        {groups.length > 1 && (
+          <button
+            type="button"
+            class="field-action-btn"
+            disabled={disabled}
+            onClick={toggleAllGroups}
+          >
+            <Icon name="chevron-down" size={12} class={allCollapsed ? "icon-rotate-neg90" : ""}/>
+            <span>{allCollapsed ? t("field.expandAllGroups") : t("field.collapseAllGroups")}</span>
+          </button>
+        )}
+      </div>
+
       {groups.length ? (
         <div class="field-groups">
-          {groups.map(([name, groupedFields]) => (
-            <section class="form-card" key={name}>
-              <header class="form-card__header">
-                <div>
-                  <h2>{name}</h2>
-                  <p>{t("field.groupCount", { count: groupedFields.length })}</p>
-                </div>
-              </header>
-              <div class="form-card__body">
-                {groupedFields.map((field) => {
-                  const key = fieldKey(field);
-                  return (
-                    <FieldRow
-                      key={key}
-                      field={field}
-                      isCustom={Boolean(customKeys?.has(key))}
-                      highlighted={highlightedPath === field.path}
-                      value={values[key]}
-                      error={errors.get(key)}
-                      controlId={controlIds.get(key) ?? `field-${key}`.replace(/[^\w-]/g, "-")}
-                      disabled={disabled}
-                      aiAvailable={aiAvailable}
-                      onExplain={onExplain ? () => onExplain(field) : undefined}
-                      onChange={(value, coalesce) => onChange(field, value, { coalesce })}
-                      onReset={onResetField ? () => onResetField(field) : undefined}
-                      onDelete={onDeleteField ? () => onDeleteField(field) : undefined}
-                    />
-                  );
-                })}
-              </div>
-            </section>
-          ))}
+          {groups.map(([name, groupedFields], groupIdx) => {
+            const collapsed = Boolean(collapsedGroups[name]);
+            const bodyId = `field-group-body-${groupIdx}`;
+            let groupModified = 0;
+            let groupErrors = 0;
+            for (const field of groupedFields) {
+              const key = fieldKey(field);
+              if (customKeys?.has(key) || isFieldModified(field, values[key])) groupModified += 1;
+              if (errors.has(key)) groupErrors += 1;
+            }
+            return (
+              <section class={`form-card ${collapsed ? "form-card--collapsed" : ""}`} key={name}>
+                <header class="form-card__header">
+                  <button
+                    type="button"
+                    class="form-card__toggle"
+                    aria-expanded={!collapsed}
+                    aria-controls={bodyId}
+                    onClick={() => toggleGroup(name)}
+                  >
+                    <Icon name="chevron-down" size={15} class={`form-card__chevron ${collapsed ? "icon-rotate-neg90" : ""}`}/>
+                    <div class="form-card__title-block">
+                      <h2>{name}</h2>
+                      <p>{t("field.groupCount", { count: groupedFields.length })}</p>
+                    </div>
+                    <div class="form-card__badges">
+                      {groupModified > 0 && (
+                        <span class="group-pill group-pill--modified">
+                          {t("field.groupModified", { count: groupModified })}
+                        </span>
+                      )}
+                      {groupErrors > 0 && (
+                        <span class="group-pill group-pill--error">
+                          {t("field.groupErrors", { count: groupErrors })}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                </header>
+                {!collapsed && (
+                  <div id={bodyId} class="form-card__body">
+                    {groupedFields.map((field) => {
+                      const key = fieldKey(field);
+                      return (
+                        <FieldRow
+                          key={key}
+                          field={field}
+                          isCustom={Boolean(customKeys?.has(key))}
+                          highlighted={highlightedPath === field.path}
+                          value={values[key]}
+                          error={errors.get(key)}
+                          controlId={controlIds.get(key) ?? `field-${key}`.replace(/[^\w-]/g, "-")}
+                          disabled={disabled}
+                          aiAvailable={aiAvailable}
+                          onExplain={onExplain ? () => onExplain(field) : undefined}
+                          onChange={(value, coalesce) => onChange(field, value, { coalesce })}
+                          onReset={onResetField ? () => onResetField(field) : undefined}
+                          onDelete={onDeleteField ? () => onDeleteField(field) : undefined}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            );
+          })}
         </div>
       ) : (
         <div class="field-filter-empty">
           <Icon name="search"/>
           <span>{t("field.noMatch")}</span>
-          <button type="button" disabled={disabled} onClick={() => setQuery("")}>{t("sidebar.clearFilter")}</button>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => {
+              setQuery("");
+              setStatusFilter("all");
+            }}
+          >
+            {t("sidebar.clearFilter")}
+          </button>
         </div>
       )}
     </div>
@@ -571,6 +697,9 @@ function FieldControl({
       && typeof maximum === "number" && Number.isSafeInteger(maximum)
       && maximum > minimum && maximum - minimum <= 1000;
     if (slidable) {
+      const sliderValue = current !== undefined
+        ? Math.min(maximum, Math.max(minimum, current))
+        : minimum;
       return (
         <div class={`range-control ${error ? "range-control--error" : ""}`}>
           <input
@@ -579,29 +708,75 @@ function FieldControl({
             min={minimum}
             max={maximum}
             step={1}
-            value={current ?? minimum}
+            value={sliderValue}
             aria-describedby={describedBy}
             aria-invalid={Boolean(error)}
             aria-required={field.required}
             aria-valuetext={current === undefined ? t("common.unset") : String(current)}
             disabled={disabled}
-            onInput={(event) => onChange(event.currentTarget.valueAsNumber)}
+            onInput={(event) => {
+              const next = event.currentTarget.valueAsNumber;
+              lastNumberValue.current = next;
+              setNumberText(String(next));
+              onChange(next);
+            }}
             onClick={(event) => {
-              if (current === undefined) onChange(event.currentTarget.valueAsNumber);
+              if (current === undefined) {
+                const next = event.currentTarget.valueAsNumber;
+                lastNumberValue.current = next;
+                setNumberText(String(next));
+                onChange(next);
+              }
             }}
             onKeyDown={(event) => {
               if (current === undefined && ["ArrowLeft", "ArrowDown", "Home", "PageDown", "Enter", " "].includes(event.key)) {
                 event.preventDefault();
+                lastNumberValue.current = minimum;
+                setNumberText(String(minimum));
                 onChange(minimum);
               }
             }}
           />
-          <b class="range-control__value">{current ?? "—"}</b>
+          <input
+            id={`${id}-exact`}
+            class={`control range-control__input ${error ? "control--error" : ""}`}
+            type="text"
+            inputMode="numeric"
+            value={numberText}
+            placeholder="—"
+            aria-label={t("field.exactNumberAria", { label: field.label })}
+            aria-describedby={describedBy}
+            aria-invalid={Boolean(error)}
+            disabled={disabled}
+            onInput={(event) => {
+              const raw = event.currentTarget.value;
+              setNumberText(raw);
+              if (!raw.trim()) {
+                lastNumberValue.current = undefined;
+                onChange(undefined);
+                return;
+              }
+              const parsed = Number(raw);
+              const valid = Number.isFinite(parsed) && Number.isSafeInteger(parsed);
+              lastNumberValue.current = valid ? parsed : raw;
+              onChange(valid ? parsed : raw, true);
+            }}
+            onBlur={() => {
+              const parsed = Number(numberText);
+              if (numberText.trim() && Number.isFinite(parsed) && Number.isSafeInteger(parsed)) {
+                setNumberText(String(parsed));
+              }
+            }}
+          />
           <button
             type="button"
             class="boolean-control__reset range-control__reset"
-            disabled={disabled || current === undefined}
-            onClick={() => onChange(undefined)}
+            disabled={disabled || value === undefined}
+            onClick={() => {
+              lastNumberValue.current = undefined;
+              setNumberText("");
+              onChange(undefined);
+            }}
             aria-label={t("field.setUnsetAria", { label: field.label })}
           >
             {t("common.reset")}
@@ -666,11 +841,15 @@ function FieldControl({
   );
 }
 
+function normalizeGroupName(group: string | undefined, defaultGroup: string): string {
+  const rawGroup = group || defaultGroup;
+  return rawGroup === "常规" ? defaultGroup : rawGroup;
+}
+
 function groupFields(fields: FieldSpec[], defaultGroup: string): Array<[string, FieldSpec[]]> {
   const groups = new Map<string, FieldSpec[]>();
   for (const field of fields) {
-    const rawGroup = field.group || defaultGroup;
-    const name = rawGroup === "常规" ? defaultGroup : rawGroup;
+    const name = normalizeGroupName(field.group, defaultGroup);
     const current = groups.get(name) ?? [];
     current.push(field);
     groups.set(name, current);

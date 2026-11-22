@@ -4,11 +4,16 @@ import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { SourceBadge } from "../ui.tsx";
 import { FORMAT_LABELS } from "../utils/format.ts";
+import { computeCenteredScrollTop, computeVirtualWindow } from "../utils/virtual-scroll.ts";
 
 interface TextSegment {
   text: string;
   matchIndex?: number;
 }
+
+const RAW_LINE_HEIGHT = 22;
+const RAW_OVERSCAN_LINES = 28;
+const DEFAULT_VIEWPORT_HEIGHT = 520;
 
 export function RawViewer({
   schema,
@@ -21,70 +26,113 @@ export function RawViewer({
   const [query, setQuery] = useState("");
   const [activeMatch, setActiveMatch] = useState(0);
   const [highlightedLine, setHighlightedLine] = useState<number>();
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(DEFAULT_VIEWPORT_HEIGHT);
   const codeContainerRef = useRef<HTMLDivElement>(null);
+
+  const rawLines = useMemo(
+    () => schema.rawText.replace(/\r\n/g, "\n").split("\n"),
+    [schema.rawText],
+  );
 
   useEffect(() => {
     setQuery("");
     setActiveMatch(0);
     setHighlightedLine(undefined);
+    setScrollTop(0);
+    if (codeContainerRef.current) codeContainerRef.current.scrollTop = 0;
   }, [schema.file]);
 
   useEffect(() => {
-    if (!focusLine?.line) return;
-    setHighlightedLine(focusLine.line);
-    const row = codeContainerRef.current?.querySelector<HTMLElement>(`[data-line-number="${focusLine.line}"]`);
-    row?.scrollIntoView({ behavior: "smooth", block: "center" });
-    const timer = window.setTimeout(() => {
-      setHighlightedLine((current) => (current === focusLine.line ? undefined : current));
-    }, 2_600);
-    return () => window.clearTimeout(timer);
-  }, [focusLine?.line, focusLine?.token]);
+    const container = codeContainerRef.current;
+    if (!container) return;
+    const updateHeight = () => {
+      if (container.clientHeight > 0) setViewportHeight(container.clientHeight);
+    };
+    updateHeight();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
 
-  const { lines, totalMatches } = useMemo(() => {
-    const rawLines = schema.rawText.replace(/\r\n/g, "\n").split("\n");
-    const needle = query.trim();
-    if (!needle) {
-      return {
-        lines: rawLines.map((line) => [{ text: line }] as TextSegment[]),
-        totalMatches: 0,
-      };
+  const trimmedQuery = query.trim();
+  const { totalMatches, matchLines, lineMatchStart } = useMemo(() => {
+    const starts = new Int32Array(rawLines.length);
+    starts.fill(-1);
+    if (!trimmedQuery) {
+      return { totalMatches: 0, matchLines: [] as number[], lineMatchStart: starts };
     }
-    const lowerNeedle = needle.toLocaleLowerCase();
+    const lowerNeedle = trimmedQuery.toLocaleLowerCase();
+    const linesOfMatches: number[] = [];
     let count = 0;
-    const segmented = rawLines.map((line) => {
-      const lowerLine = line.toLocaleLowerCase();
-      const parts: TextSegment[] = [];
+    for (let i = 0; i < rawLines.length; i += 1) {
+      const lowerLine = rawLines[i]!.toLocaleLowerCase();
       let cursor = 0;
-      while (cursor < line.length) {
+      let firstOnLine = -1;
+      while (cursor < lowerLine.length) {
         const hit = lowerLine.indexOf(lowerNeedle, cursor);
-        if (hit < 0) {
-          parts.push({ text: line.slice(cursor) });
-          break;
-        }
-        if (hit > cursor) parts.push({ text: line.slice(cursor, hit) });
-        parts.push({ text: line.slice(hit, hit + needle.length), matchIndex: count });
+        if (hit < 0) break;
+        if (firstOnLine < 0) firstOnLine = count;
+        linesOfMatches.push(i);
         count += 1;
-        cursor = hit + needle.length;
+        cursor = hit + lowerNeedle.length;
       }
-      if (!parts.length) parts.push({ text: "" });
-      return parts;
-    });
-    return { lines: segmented, totalMatches: count };
-  }, [schema.rawText, query]);
+      starts[i] = firstOnLine;
+    }
+    return { totalMatches: count, matchLines: linesOfMatches, lineMatchStart: starts };
+  }, [rawLines, trimmedQuery]);
 
   useEffect(() => {
     setActiveMatch(0);
-  }, [query]);
+  }, [trimmedQuery]);
 
   useEffect(() => {
     if (!totalMatches) return;
-    const mark = codeContainerRef.current?.querySelector<HTMLElement>(`[data-match-index="${activeMatch}"]`);
-    mark?.scrollIntoView({ block: "center", inline: "nearest" });
-  }, [activeMatch, totalMatches]);
+    const targetLineIdx = matchLines[activeMatch];
+    if (targetLineIdx === undefined) return;
+    const container = codeContainerRef.current;
+    const height = container?.clientHeight || viewportHeight;
+    const nextTop = computeCenteredScrollTop(targetLineIdx, height, RAW_LINE_HEIGHT, rawLines.length);
+    if (container) container.scrollTop = nextTop;
+    setScrollTop(nextTop);
+    const frame = window.requestAnimationFrame(() => {
+      const mark = codeContainerRef.current?.querySelector<HTMLElement>(`[data-match-index="${activeMatch}"]`);
+      mark?.scrollIntoView({ block: "nearest", inline: "center" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeMatch, totalMatches, matchLines, rawLines.length, viewportHeight]);
+
+  useEffect(() => {
+    if (!focusLine?.line) return;
+    const targetLineIdx = Math.max(0, Math.min(rawLines.length - 1, focusLine.line - 1));
+    setHighlightedLine(targetLineIdx + 1);
+    const container = codeContainerRef.current;
+    const height = container?.clientHeight || viewportHeight;
+    const nextTop = computeCenteredScrollTop(targetLineIdx, height, RAW_LINE_HEIGHT, rawLines.length);
+    if (container) container.scrollTop = nextTop;
+    setScrollTop(nextTop);
+    const timer = window.setTimeout(() => {
+      setHighlightedLine((current) => (current === targetLineIdx + 1 ? undefined : current));
+    }, 2_600);
+    return () => window.clearTimeout(timer);
+  }, [focusLine?.line, focusLine?.token, rawLines.length, viewportHeight]);
+
+  const virtualWindow = useMemo(
+    () => computeVirtualWindow(rawLines.length, scrollTop, viewportHeight, RAW_LINE_HEIGHT, RAW_OVERSCAN_LINES),
+    [rawLines.length, scrollTop, viewportHeight],
+  );
+
+  const gutterWidth = Math.max(48, String(rawLines.length).length * 8 + 22);
 
   function stepMatch(delta: number): void {
     if (!totalMatches) return;
     setActiveMatch((current) => (current + delta + totalMatches) % totalMatches);
+  }
+
+  const visibleIndices: number[] = [];
+  for (let idx = virtualWindow.startIndex; idx < virtualWindow.endIndex; idx += 1) {
+    visibleIndices.push(idx);
   }
 
   return (
@@ -98,7 +146,7 @@ export function RawViewer({
         <header>
           <div class="raw-card__title">
             <span>{schema.file}</span>
-            <small>{t("raw.meta", { format: FORMAT_LABELS[schema.format], lines: lines.length })}</small>
+            <small>{t("raw.meta", { format: FORMAT_LABELS[schema.format], lines: rawLines.length })}</small>
           </div>
           <div class="raw-search">
             <label class="raw-search__input">
@@ -121,7 +169,7 @@ export function RawViewer({
                 </button>
               )}
             </label>
-            {query.trim() && (
+            {trimmedQuery && (
               <span class="raw-search__count" role="status">
                 {totalMatches > 0 ? `${activeMatch + 1} / ${totalMatches}` : t("raw.noMatches")}
               </span>
@@ -150,35 +198,75 @@ export function RawViewer({
             </div>
           </div>
         </header>
-        <div ref={codeContainerRef} class="raw-code-scroll">
+        <div
+          ref={codeContainerRef}
+          class="raw-code-scroll"
+          onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        >
           <div class="raw-lines" role="code" aria-label={schema.file}>
-            {lines.map((segments, lineIndex) => (
-              <div
-                class={`raw-line ${highlightedLine === lineIndex + 1 ? "raw-line--highlighted" : ""}`}
-                data-line-number={lineIndex + 1}
-                key={lineIndex}
-              >
-                <span class="raw-line-num" aria-hidden="true">{lineIndex + 1}</span>
-                <span class="raw-line-code">
-                  {segments.map((seg, segIndex) =>
-                    seg.matchIndex !== undefined ? (
-                      <mark
-                        key={segIndex}
-                        data-match-index={seg.matchIndex}
-                        class={`raw-match ${seg.matchIndex === activeMatch ? "raw-match--active" : ""}`}
-                      >
-                        {seg.text}
-                      </mark>
-                    ) : (
-                      <span key={segIndex}>{seg.text}</span>
-                    ),
-                  )}
-                </span>
-              </div>
-            ))}
+            {virtualWindow.topSpacerPx > 0 && (
+              <div class="raw-spacer" style={{ height: `${virtualWindow.topSpacerPx}px` }} aria-hidden="true"/>
+            )}
+            {visibleIndices.map((lineIndex) => {
+              const lineText = rawLines[lineIndex] ?? "";
+              const startMatch = lineMatchStart[lineIndex] ?? -1;
+              const segments = startMatch >= 0 && trimmedQuery
+                ? segmentLine(lineText, trimmedQuery, startMatch)
+                : [{ text: lineText }];
+              return (
+                <div
+                  class={`raw-line ${highlightedLine === lineIndex + 1 ? "raw-line--highlighted" : ""}`}
+                  data-line-number={lineIndex + 1}
+                  key={lineIndex}
+                >
+                  <span class="raw-line-num" style={{ minWidth: `${gutterWidth}px`, width: `${gutterWidth}px` }} aria-hidden="true">
+                    {lineIndex + 1}
+                  </span>
+                  <span class="raw-line-code">
+                    {segments.map((seg, segIndex) =>
+                      seg.matchIndex !== undefined ? (
+                        <mark
+                          key={segIndex}
+                          data-match-index={seg.matchIndex}
+                          class={`raw-match ${seg.matchIndex === activeMatch ? "raw-match--active" : ""}`}
+                        >
+                          {seg.text}
+                        </mark>
+                      ) : (
+                        <span key={segIndex}>{seg.text}</span>
+                      ),
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+            {virtualWindow.bottomSpacerPx > 0 && (
+              <div class="raw-spacer" style={{ height: `${virtualWindow.bottomSpacerPx}px` }} aria-hidden="true"/>
+            )}
           </div>
         </div>
       </section>
     </div>
   );
+}
+
+function segmentLine(line: string, needle: string, firstMatchIndex: number): TextSegment[] {
+  const lowerNeedle = needle.toLocaleLowerCase();
+  const lowerLine = line.toLocaleLowerCase();
+  const parts: TextSegment[] = [];
+  let cursor = 0;
+  let matchIndex = firstMatchIndex;
+  while (cursor < line.length) {
+    const hit = lowerLine.indexOf(lowerNeedle, cursor);
+    if (hit < 0) {
+      parts.push({ text: line.slice(cursor) });
+      break;
+    }
+    if (hit > cursor) parts.push({ text: line.slice(cursor, hit) });
+    parts.push({ text: line.slice(hit, hit + needle.length), matchIndex });
+    matchIndex += 1;
+    cursor = hit + needle.length;
+  }
+  if (!parts.length) parts.push({ text: "" });
+  return parts;
 }

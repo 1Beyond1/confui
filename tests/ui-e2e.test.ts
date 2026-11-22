@@ -15,6 +15,7 @@ import {
   allowedCustomFieldTypes,
   createCustomFieldSpec,
   createJsonDraft,
+  filterFieldsByStatus,
   initialFieldEditorValue,
   isEditableKeyboardTarget,
   isFieldModified,
@@ -25,6 +26,7 @@ import {
   fieldKey,
 } from "../web/src/editor-state.ts";
 import { DICTIONARIES, translate } from "../web/src/i18n/index.tsx";
+import { computeCenteredScrollTop, computeVirtualWindow } from "../web/src/utils/virtual-scroll.ts";
 import { formatDisplayValue } from "../web/src/value-display.ts";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -115,6 +117,47 @@ describe("UI state, diff, validation & i18n integration", () => {
     expect(isEditableKeyboardTarget({ tagName: "BUTTON" })).toBe(false);
     expect(isEditableKeyboardTarget({ tagName: "SPAN", parentElement: { tagName: "INPUT" }, closest: () => ({}) })).toBe(true);
     expect(isEditableKeyboardTarget(null)).toBe(false);
+  });
+
+  it("filters fields cleanly across all/modified/error/required status pills", () => {
+    const f1 = makeField({ path: "port", segments: ["port"], value: 3000, required: true });
+    const f2 = makeField({ path: "host", segments: ["host"], type: "string", value: "localhost", required: false });
+    const f3 = makeField({ path: "retries", segments: ["retries"], value: 3, minimum: 1, required: true });
+    const fields = [f1, f2, f3];
+    const values = {
+      [fieldKey(f1)]: 8080, // modified
+      [fieldKey(f2)]: "localhost", // untouched
+      [fieldKey(f3)]: 0, // modified + error (below minimum)
+    };
+    const errs = validationErrors(fields, values, "json", "en-US");
+
+    expect(filterFieldsByStatus(fields, values, errs, undefined, "all").map((f) => f.path)).toEqual(["port", "host", "retries"]);
+    expect(filterFieldsByStatus(fields, values, errs, undefined, "modified").map((f) => f.path)).toEqual(["port", "retries"]);
+    expect(filterFieldsByStatus(fields, values, errs, undefined, "error").map((f) => f.path)).toEqual(["retries"]);
+    expect(filterFieldsByStatus(fields, values, errs, undefined, "required").map((f) => f.path)).toEqual(["port", "retries"]);
+  });
+
+  it("computes bounded virtual scroll windows and centered line offsets for large files", () => {
+    const totalLines = 20_000;
+    const rowHeight = 22;
+    const viewport = 440; // 20 visible rows
+
+    const topWin = computeVirtualWindow(totalLines, 0, viewport, rowHeight, 10);
+    expect(topWin.startIndex).toBe(0);
+    expect(topWin.endIndex).toBe(30);
+    expect(topWin.topSpacerPx).toBe(0);
+    expect(topWin.topSpacerPx + (topWin.endIndex - topWin.startIndex) * rowHeight + topWin.bottomSpacerPx).toBe(totalLines * rowHeight);
+
+    const midScroll = computeCenteredScrollTop(10_000, viewport, rowHeight, totalLines);
+    const midWin = computeVirtualWindow(totalLines, midScroll, viewport, rowHeight, 10);
+    expect(midWin.startIndex).toBeLessThanOrEqual(10_000);
+    expect(midWin.endIndex).toBeGreaterThan(10_000);
+    expect(midWin.endIndex - midWin.startIndex).toBeLessThanOrEqual(45);
+
+    const bottomScroll = computeCenteredScrollTop(19_999, viewport, rowHeight, totalLines);
+    const bottomWin = computeVirtualWindow(totalLines, bottomScroll, viewport, rowHeight, 10);
+    expect(bottomWin.endIndex).toBe(totalLines);
+    expect(bottomWin.bottomSpacerPx).toBe(0);
   });
 
   it("enforces shared validation rules for colors, prototype keys and GitHub URLs", () => {
@@ -221,5 +264,6 @@ describe("UI state, diff, validation & i18n integration", () => {
       expect(preloadSource).toContain(channel);
       expect(mainSource).toContain(channel);
     }
+    expect(preloadSource).toContain("webUtils.getPathForFile");
   });
 });

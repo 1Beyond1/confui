@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppSettings,
   ConfigChange,
@@ -58,6 +58,13 @@ const api: ConfuiAPI = {
   openReleasePage: () => ipcRenderer.invoke("confui:openReleasePage"),
   setDirtyState: (dirty: boolean) => ipcRenderer.send("confui:setDirtyState", dirty),
   stopWatching: () => ipcRenderer.send("confui:stopWatching"),
+  getPathForFile: (file: File) => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return "";
+    }
+  },
   onFileChanged: (callback: (event: FileChangedEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: FileChangedEvent) => callback(payload);
     ipcRenderer.on("confui:fileChanged", listener);

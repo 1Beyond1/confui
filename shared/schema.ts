@@ -454,5 +454,6 @@ export interface ConfuiAPI {
   openReleasePage(): Promise<Result<null>>;
   setDirtyState(dirty: boolean): void;
   stopWatching(): void;
+  getPathForFile(file: File): string;
   onFileChanged(callback: (event: FileChangedEvent) => void): () => void;
 }
