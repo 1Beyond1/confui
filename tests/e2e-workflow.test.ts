@@ -261,6 +261,7 @@ describe("end-to-end confui workflow", () => {
       locale: "en-US",
       ai: { enabled: true, provider: "openai", model: "gpt-4.1-mini", baseUrl: "https://api.openai.com/v1", apiKey: "sk-secret-key-1234", timeoutMs: 45_000 },
       github: { token: "github_pat_secret_1234" },
+      schemaStore: { enabled: false },
       recentProjects: [],
     });
     await store.rememberProject({ path: "C:/projects/alpha", name: "alpha", openedAt: 1 });

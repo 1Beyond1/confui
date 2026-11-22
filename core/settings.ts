@@ -297,6 +297,7 @@ export function normalizeSettings(input: unknown): AppSettings {
     : DEFAULT_SETTINGS.locale;
   const ai = isRecord(source.ai) ? source.ai : {};
   const github = isRecord(source.github) ? source.github : {};
+  const schemaStore = isRecord(source.schemaStore) ? source.schemaStore : {};
   const recentProjects = Array.isArray(source.recentProjects)
     ? source.recentProjects
       .filter((item): item is RecentProject => Boolean(item && typeof item.path === "string" && typeof item.name === "string"))
@@ -329,6 +330,9 @@ export function normalizeSettings(input: unknown): AppSettings {
     },
     github: {
       token: typeof github.token === "string" ? github.token.slice(0, SECRET_STORAGE_MAX_CHARS) : "",
+    },
+    schemaStore: {
+      enabled: schemaStore.enabled === true,
     },
     recentProjects,
   };

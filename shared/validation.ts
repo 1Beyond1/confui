@@ -72,6 +72,11 @@ export const SECRET_KEY_FRAGMENT = [
 
 export const SECRET_KEY_PATTERN = new RegExp(SECRET_KEY_FRAGMENT, "i");
 
+/** Returns true if a single configuration key name indicates a sensitive credential. */
+export function isSensitiveKey(key: string): boolean {
+  return SECRET_KEY_PATTERN.test(key);
+}
+
 export const PEM_BEGIN_RE = /-----BEGIN (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----/;
 export const PEM_END_RE = /-----END (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----/;
 export const URL_CREDENTIALS_RE = /(\b[a-z][a-z0-9+.-]*:\/\/)([^/\s:@"'<>]*):([^/\s"'<>]+)@/gi;

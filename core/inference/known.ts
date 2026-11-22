@@ -1,10 +1,19 @@
-import type { ConfigFormat, Locale, PathSegment } from "../../shared/schema.ts";
+import type { ConfigFormat, ItemFieldSpec, Locale, PathSegment } from "../../shared/schema.ts";
 import { getAtPath } from "../paths.ts";
 import type { FieldCandidate } from "./types.ts";
 
 interface BilingualText {
   zh: string;
   en: string;
+}
+
+interface KnownItemFieldDef {
+  key: string;
+  label: BilingualText;
+  description: BilingualText;
+  type: FieldCandidate["type"];
+  required?: boolean;
+  enum?: Array<string | number>;
 }
 
 interface KnownDefinition {
@@ -19,6 +28,7 @@ interface KnownDefinition {
   secret?: boolean;
   placeholder?: string;
   group?: BilingualText;
+  itemFields?: KnownItemFieldDef[];
 }
 
 const PACKAGE: KnownDefinition[] = [
@@ -126,6 +136,38 @@ const CARGO: KnownDefinition[] = [
   { segments: ["workspace", "resolver"], label: { zh: "依赖解析器版本", en: "Feature Resolver" }, description: { zh: "Cargo 特性解析算法版本（推荐 2 或 3）。", en: "Cargo feature resolver version (2 or 3 recommended)." }, type: "enum", enum: ["1", "2", "3"], group: { zh: "工作区与优化", en: "Workspace & Profiles" } },
   { segments: ["profile", "release", "lto"], label: { zh: "Release LTO 优化", en: "Release LTO" }, description: { zh: "启用链接时优化以减小体积或提升运行性能。", en: "Enable Link-Time Optimization for release builds." }, type: "boolean", group: { zh: "工作区与优化", en: "Workspace & Profiles" } },
   { segments: ["profile", "release", "strip"], label: { zh: "剥离调试符号", en: "Strip Symbols" }, description: { zh: "发布构建时移除调试符号以缩小二进制体积。", en: "Strip debug symbols from release binaries to reduce size." }, type: "boolean", group: { zh: "工作区与优化", en: "Workspace & Profiles" } },
+  {
+    segments: ["bin"],
+    label: { zh: "可执行目标 ([[bin]])", en: "Binary Targets ([[bin]])" },
+    description: { zh: "声明此 Crate 构建的可执行二进制目标列表。", en: "Executable binary targets built by this crate." },
+    type: "array",
+    group: { zh: "构建目标", en: "Targets" },
+    itemFields: [
+      { key: "name", label: { zh: "目标名称", en: "Name" }, description: { zh: "生成的二进制可执行文件名。", en: "Name of the generated binary." }, type: "string", required: true },
+      { key: "path", label: { zh: "入口文件", en: "Path" }, description: { zh: "二进制入口源码路径（如 src/main.rs）。", en: "Source entry file path (e.g. src/main.rs)." }, type: "string" },
+      { key: "required-features", label: { zh: "依赖特性", en: "Required Features" }, description: { zh: "构建此目标前必须启用的 Cargo features。", en: "Cargo features required to build this binary." }, type: "array" },
+    ],
+  },
+];
+
+const EDITORCONFIG: KnownDefinition[] = [
+  { segments: ["root"], label: { zh: "根目录标记", en: "Root" }, description: { zh: "设为 true 以停止向上级目录继续查找 .editorconfig。", en: "Stop searching parent directories for additional .editorconfig files." }, type: "boolean", group: { zh: "全局", en: "Global" } },
+  { segments: ["*", "indent_style"], label: { zh: "缩进方式", en: "Indent Style" }, description: { zh: "默认使用空格（space）或制表符（tab）缩进。", en: "Default indentation style (space or tab)." }, type: "enum", enum: ["space", "tab"], group: { zh: "默认规则 (*)", en: "Default Rules (*)" } },
+  { segments: ["*", "indent_size"], label: { zh: "缩进宽度", en: "Indent Size" }, description: { zh: "每级缩进占用的列数。", en: "Number of columns used for each indentation level." }, type: "integer", minimum: 1, maximum: 16, group: { zh: "默认规则 (*)", en: "Default Rules (*)" } },
+  { segments: ["*", "end_of_line"], label: { zh: "换行符", en: "End of Line" }, description: { zh: "控制文件保存使用的行尾序列（lf / crlf / cr）。", en: "Line ending convention (lf, crlf, or cr)." }, type: "enum", enum: ["lf", "crlf", "cr"], group: { zh: "默认规则 (*)", en: "Default Rules (*)" } },
+  { segments: ["*", "charset"], label: { zh: "字符编码", en: "Charset" }, description: { zh: "文件默认字符编码（推荐 utf-8）。", en: "Default file character encoding (utf-8 recommended)." }, type: "enum", enum: ["utf-8", "utf-8-bom", "latin1", "utf-16be", "utf-16le"], group: { zh: "默认规则 (*)", en: "Default Rules (*)" } },
+  { segments: ["*", "trim_trailing_whitespace"], label: { zh: "移除行尾空白", en: "Trim Trailing Whitespace" }, description: { zh: "保存时自动删除每行末尾多余的空白字符。", en: "Remove trailing whitespace characters on save." }, type: "boolean", group: { zh: "默认规则 (*)", en: "Default Rules (*)" } },
+  { segments: ["*", "insert_final_newline"], label: { zh: "末尾插入空行", en: "Insert Final Newline" }, description: { zh: "确保文件以一个换行符结尾。", en: "Ensure files end with a trailing newline." }, type: "boolean", group: { zh: "默认规则 (*)", en: "Default Rules (*)" } },
+];
+
+const NPMRC: KnownDefinition[] = [
+  { segments: ["registry"], label: { zh: "默认 Registry", en: "Default Registry" }, description: { zh: "npm / pnpm 安装与发布包使用的默认镜像源 URL。", en: "Base URL of the npm package registry." }, type: "string", group: { zh: "镜像源", en: "Registry" } },
+  { segments: ["save-exact"], label: { zh: "锁定精确版本", en: "Save Exact" }, description: { zh: "安装包时写入精确版本号，不添加 ^ 范围前缀。", en: "Save exact package versions rather than semver ranges." }, type: "boolean", group: { zh: "依赖策略", en: "Dependencies" } },
+  { segments: ["engine-strict"], label: { zh: "严格检查引擎版本", en: "Engine Strict" }, description: { zh: "Node/npm 版本不满足 package.json engines 要求时中止安装。", en: "Fail installs when Node/npm versions do not satisfy engines." }, type: "boolean", group: { zh: "依赖策略", en: "Dependencies" } },
+  { segments: ["legacy-peer-deps"], label: { zh: "宽松 Peer 依赖", en: "Legacy Peer Deps" }, description: { zh: "忽略冲突的 peerDependencies 检查（兼容 npm v6 行为）。", en: "Ignore peerDependency conflicts (npm v6 compatibility)." }, type: "boolean", group: { zh: "依赖策略", en: "Dependencies" } },
+  { segments: ["strict-ssl"], label: { zh: "严格 TLS 校验", en: "Strict SSL" }, description: { zh: "访问 HTTPS 镜像源时严格校验证书有效性。", en: "Enforce TLS certificate validation for HTTPS registry requests." }, type: "boolean", group: { zh: "网络与安全", en: "Network & Security" } },
+  { segments: ["audit"], label: { zh: "安装时安全审计", en: "Security Audit" }, description: { zh: "执行安装命令时自动上报并检查已知安全漏洞。", en: "Submit audit reports during install commands." }, type: "boolean", group: { zh: "网络与安全", en: "Network & Security" } },
+  { segments: ["fund"], label: { zh: "显示赞助提示", en: "Funding Messages" }, description: { zh: "在安装完成后显示依赖包的开源赞助信息。", en: "Display funding messages after installs." }, type: "boolean", group: { zh: "界面输出", en: "Output" } },
 ];
 
 const ENV_COMMON: KnownDefinition[] = [
@@ -179,6 +221,8 @@ export function inferKnownFields(
   else if (isCompose) definitions = [...DOCKER_COMPOSE_TOP, ...expandDockerComposeServices(value)];
   else if (lower === "pyproject.toml") definitions = PYPROJECT;
   else if (lower === "cargo.toml") definitions = CARGO;
+  else if (lower === ".editorconfig") definitions = EDITORCONFIG;
+  else if (lower === ".npmrc") definitions = NPMRC;
   else if (isEnv) definitions = ENV_COMMON;
 
   const isEn = locale === "en-US";
@@ -200,6 +244,14 @@ export function inferKnownFields(
       secret: definition.secret,
       placeholder: definition.placeholder,
       group: definition.group ? (isEn ? definition.group.en : definition.group.zh) : undefined,
+      itemFields: definition.itemFields?.map((item): ItemFieldSpec => ({
+        key: item.key,
+        label: isEn ? item.label.en : item.label.zh,
+        description: isEn ? item.description.en : item.description.zh,
+        type: item.type ?? "string",
+        required: item.required,
+        enum: item.enum,
+      })),
       value: getAtPath(value, definition.segments),
       source: "known-template" as const,
       confidence: 0.97,

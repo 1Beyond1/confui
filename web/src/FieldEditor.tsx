@@ -10,6 +10,7 @@ import {
   isFieldModified,
   isInactiveExamplePlaceholder,
   resolveFocusField,
+  type DeepFocusTarget,
   type EditorValues,
   type FieldStatusFilter,
 } from "./editor-state.ts";
@@ -59,6 +60,7 @@ export function FieldEditor({
   const [statusFilter, setStatusFilter] = useState<FieldStatusFilter>("all");
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [highlightedPath, setHighlightedPath] = useState<string>();
+  const [deepFocusTarget, setDeepFocusTarget] = useState<DeepFocusTarget>();
   const editorRef = useRef<HTMLDivElement>(null);
   const defaultGroupName = t("common.generalGroup");
 
@@ -67,6 +69,7 @@ export function FieldEditor({
     setStatusFilter("all");
     setCollapsedGroups({});
     setHighlightedPath(undefined);
+    setDeepFocusTarget(undefined);
   }, [fileKey]);
 
   useEffect(() => {
@@ -75,20 +78,27 @@ export function FieldEditor({
     setStatusFilter("all");
     const targetField = resolveFocusField(fields, focusRequest.path, focusRequest.segments);
     const resolvedPath = targetField?.path ?? focusRequest.path;
+    const isDeepJump = Boolean(targetField && targetField.path !== focusRequest.path);
     if (targetField) {
       const targetGroup = normalizeGroupName(targetField.group, defaultGroupName);
       setCollapsedGroups((prev) => (prev[targetGroup] ? { ...prev, [targetGroup]: false } : prev));
     }
-    setHighlightedPath(resolvedPath);
+    setHighlightedPath(isDeepJump ? undefined : resolvedPath);
+    setDeepFocusTarget(isDeepJump
+      ? { path: focusRequest.path, segments: focusRequest.segments, token: focusRequest.token }
+      : undefined);
     const scrollTimer = window.setTimeout(() => {
+      const deepNodes = editorRef.current?.querySelectorAll<HTMLElement>("[data-deep-path]");
+      const deepEl = deepNodes ? [...deepNodes].find((el) => el.dataset.deepPath === focusRequest.path) : undefined;
       const rows = editorRef.current?.querySelectorAll<HTMLElement>("[data-field-path]");
-      const target = rows ? [...rows].find((el) => el.dataset.fieldPath === resolvedPath) : undefined;
+      const fieldEl = rows ? [...rows].find((el) => el.dataset.fieldPath === resolvedPath) : undefined;
+      const target = deepEl ?? fieldEl;
       if (target) {
         target.scrollIntoView({ behavior: "smooth", block: "center" });
         const focusable = target.querySelector<HTMLElement>("input, select, textarea, button[role='switch']");
         focusable?.focus({ preventScroll: true });
       }
-    }, 30);
+    }, isDeepJump ? 70 : 30);
     const clearTimer = window.setTimeout(() => {
       setHighlightedPath((current) => (current === resolvedPath ? undefined : current));
     }, 2_600);
@@ -288,6 +298,9 @@ export function FieldEditor({
                           field={field}
                           isCustom={Boolean(customKeys?.has(key))}
                           highlighted={highlightedPath === field.path}
+                          deepFocusTarget={deepFocusTarget && resolveFocusField([field], deepFocusTarget.path, deepFocusTarget.segments)
+                            ? deepFocusTarget
+                            : undefined}
                           value={values[key]}
                           error={errors.get(key)}
                           controlId={controlIds.get(key) ?? `field-${key}`.replace(/[^\w-]/g, "-")}
@@ -330,6 +343,7 @@ function FieldRow({
   field,
   isCustom,
   highlighted = false,
+  deepFocusTarget,
   value,
   error,
   controlId,
@@ -343,6 +357,7 @@ function FieldRow({
   field: FieldSpec;
   isCustom: boolean;
   highlighted?: boolean;
+  deepFocusTarget?: DeepFocusTarget;
   value: unknown;
   error?: string;
   controlId: string;
@@ -460,6 +475,7 @@ function FieldRow({
           error={error}
           descriptionId={field.description ? `${controlId}-description` : undefined}
           disabled={disabled}
+          deepFocusTarget={deepFocusTarget}
           onChange={handleChange}
         />
         {error && <p class="field-error" id={`${controlId}-error`}><Icon name="warning" size={14}/>{error}</p>}
@@ -497,6 +513,7 @@ function FieldControl({
   error,
   descriptionId,
   disabled,
+  deepFocusTarget,
   onChange,
 }: {
   id: string;
@@ -505,6 +522,7 @@ function FieldControl({
   error?: string;
   descriptionId?: string;
   disabled: boolean;
+  deepFocusTarget?: DeepFocusTarget;
   onChange: (value: unknown, coalesce?: boolean) => void;
 }) {
   const { t } = useI18n();
@@ -613,6 +631,7 @@ function FieldControl({
         error={error}
         describedBy={describedBy}
         disabled={disabled}
+        deepFocusTarget={deepFocusTarget}
         onChange={(next) => onChange(next, false)}
       />
     );
@@ -627,6 +646,7 @@ function FieldControl({
         error={error}
         describedBy={describedBy}
         disabled={disabled}
+        deepFocusTarget={deepFocusTarget}
         onChange={(next) => onChange(next, false)}
       />
     );

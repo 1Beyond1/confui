@@ -28,7 +28,7 @@ import {
 } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { HARD_FILE_LIMIT, currentVersion, hashText, readTextSnapshot } from "./files.ts";
-import { assertEditableSyntax, detectFormat, parseConfig, updateConfigText } from "./formats.ts";
+import { assertEditableSyntax, detectFormat, parseConfig, parseYamlDocuments, updateConfigText } from "./formats.ts";
 import { isSecretPath, toEditorValue } from "./inference/common.ts";
 import { maskDocumentSecrets } from "./inference/heuristic.ts";
 import {
@@ -53,19 +53,23 @@ export async function previewSave(
   relativeFile: string,
   requestedChanges: readonly ConfigChange[],
   expectedVersion: FileVersion,
+  documentIndex?: number,
 ): Promise<SavePreview> {
   const { root: projectRoot, path: absolutePath } = await resolveExistingProjectPath(root, relativeFile);
   const format = detectFormat(relativeFile);
   if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
+  if (documentIndex !== undefined && (!Number.isSafeInteger(documentIndex) || documentIndex < 0)) {
+    throw new ConfuiError("INVALID_INPUT", "文档索引参数无效");
+  }
   const snapshot = await readTextSnapshot(absolutePath);
   assertSameVersion(snapshot.version, expectedVersion);
   assertEditableSyntax(relativeFile, snapshot.text);
-  const parsed = parseConfig(snapshot.text, format);
+  const parsed = parseConfig(snapshot.text, format, { documentIndex });
   validateChanges(requestedChanges);
   const operations = requestedChanges.filter((change) => {
     return !isDeepStrictEqual(getAtPath(parsed, change.segments), change.value);
   });
-  const result = updateConfigText(snapshot.text, format, operations);
+  const result = updateConfigText(snapshot.text, format, operations, { documentIndex });
   assertWritableSize(result.output);
   return {
     projectRoot,
@@ -80,6 +84,7 @@ export async function previewSave(
     output: result.output,
     warnings: result.warnings,
     expectedVersion: snapshot.version,
+    ...(documentIndex !== undefined ? { documentIndex } : {}),
   };
 }
 
@@ -113,7 +118,12 @@ async function commitSaveExclusive(
   assertSameVersion(snapshot.version, preview.expectedVersion);
   assertEditableSyntax(preview.file, snapshot.text);
   validateChanges(preview.operations);
-  const generated = updateConfigText(snapshot.text, format, preview.operations);
+  if (preview.documentIndex !== undefined && (!Number.isSafeInteger(preview.documentIndex) || preview.documentIndex < 0)) {
+    throw new ConfuiError("INVALID_INPUT", "保存预览中的文档索引无效");
+  }
+  const generated = updateConfigText(snapshot.text, format, preview.operations, {
+    documentIndex: preview.documentIndex,
+  });
   assertWritableSize(generated.output);
   if (generated.output !== preview.output) {
     throw new ConfuiError("FILE_CONFLICT", "保存预览已经失效，请重新预览后再保存");
@@ -812,8 +822,6 @@ export async function generateRedactedExport(
 
   const snapshot = await readTextSnapshot(resolved.path);
   assertEditableSyntax(relativeFile, snapshot.text);
-  const parsed = parseConfig(snapshot.text, format);
-  const leaves = flattenConfigLeaves(parsed);
 
   const validExtraPaths = extraSecretPaths.filter(
     (segments) => Array.isArray(segments) && segments.length > 0 && segments.length <= 32,
@@ -827,29 +835,36 @@ export async function generateRedactedExport(
     if (typeof leaf === "string" && leaf.trim()) extraSecretKeys.add(leaf);
   }
 
-  const redactChanges: ConfigChange[] = [];
-  for (const [key, leaf] of leaves) {
-    const isMarkedSecret = isSecretPath(leaf.segments)
-      || extraPathKeys.has(key)
-      || validExtraPaths.some((prefix) => isStrictPrefix(prefix, leaf.segments));
-    if (leaf.value === undefined || leaf.value === null || leaf.value === "") continue;
-    if (!isMarkedSecret && !valueContainsSecret(leaf.value)) continue;
-    if (isMarkedSecret) {
-      collectSecretStrings(leaf.value, extraSecretValues);
-    }
-    const redacted = redactStructuredValue(leaf.value, isMarkedSecret);
-    if (redacted.changed) {
-      redactChanges.push({ segments: [...leaf.segments], value: redacted.value });
-    }
-  }
-
   let updatedText = snapshot.text;
-  if (redactChanges.length > 0) {
-    try {
-      updatedText = updateConfigText(snapshot.text, format, redactChanges).output;
-    } catch {
-      // Fall back to line-aware document masking if incremental patch fails.
-      updatedText = snapshot.text;
+  const documentValues: Array<{ index?: number; value: unknown }> = format === "yaml"
+    ? parseYamlDocuments(snapshot.text).map((doc) => ({ index: doc.index, value: doc.value }))
+    : [{ value: parseConfig(snapshot.text, format) }];
+
+  for (const docEntry of documentValues) {
+    const leaves = flattenConfigLeaves(docEntry.value);
+    const redactChanges: ConfigChange[] = [];
+    for (const [key, leaf] of leaves) {
+      const isMarkedSecret = isSecretPath(leaf.segments)
+        || extraPathKeys.has(key)
+        || validExtraPaths.some((prefix) => isStrictPrefix(prefix, leaf.segments));
+      if (leaf.value === undefined || leaf.value === null || leaf.value === "") continue;
+      if (!isMarkedSecret && !valueContainsSecret(leaf.value)) continue;
+      if (isMarkedSecret) {
+        collectSecretStrings(leaf.value, extraSecretValues);
+      }
+      const redacted = redactStructuredValue(leaf.value, isMarkedSecret);
+      if (redacted.changed) {
+        redactChanges.push({ segments: [...leaf.segments], value: redacted.value });
+      }
+    }
+    if (redactChanges.length > 0) {
+      try {
+        updatedText = updateConfigText(updatedText, format, redactChanges, {
+          documentIndex: docEntry.index,
+        }).output;
+      } catch {
+        // Fall back to line-aware document masking if incremental patch fails.
+      }
     }
   }
   const eol = updatedText.includes("\r\n") ? "\r\n" : "\n";

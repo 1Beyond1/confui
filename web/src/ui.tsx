@@ -7,6 +7,8 @@ import { Icon, type IconName } from "./icons.tsx";
 export const SOURCE_LABELS: Record<FieldSource, string> = {
   "json-schema": "JSON Schema",
   "known-template": "内置模板",
+  schemastore: "SchemaStore",
+  comment: "文件注释",
   example: "示例文件",
   readme: "README",
   ai: "AI 分析",

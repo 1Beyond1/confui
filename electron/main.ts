@@ -282,6 +282,12 @@ function registerIpcHandlers(): void {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
     assertOptionalString(options?.githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
+    if (
+      options?.documentIndex !== undefined
+      && (typeof options.documentIndex !== "number" || !Number.isSafeInteger(options.documentIndex) || options.documentIndex < 0)
+    ) {
+      throw new ConfuiError("INVALID_INPUT", "文档索引参数无效");
+    }
     const inferSeq = ++activeInferSeq;
     const settings = await settingsStore.load();
     const ai = settings.ai.enabled && settings.ai.baseUrl && settings.ai.model
@@ -290,7 +296,10 @@ function registerIpcHandlers(): void {
     const schema = await inferConfig(root, file, {
       githubUrl: typeof options?.githubUrl === "string" ? options.githubUrl : undefined,
       locale: options?.locale === "en-US" || options?.locale === "zh-CN" ? options.locale : settings.locale,
+      documentIndex: options?.documentIndex,
       githubToken: settings.github.token,
+      enableSchemaStore: settings.schemaStore.enabled,
+      schemaStoreCacheDir: join(app.getPath("userData"), "schemastore-cache"),
       ai,
     });
     const resolved = await resolveExistingProjectPath(root, file);
@@ -300,12 +309,18 @@ function registerIpcHandlers(): void {
     return schema;
   });
 
-  handle("confui:explainField", async (_event, root: unknown, file: unknown, field: unknown, githubUrl?: unknown, locale?: unknown) => {
+  handle("confui:explainField", async (_event, root: unknown, file: unknown, field: unknown, githubUrl?: unknown, locale?: unknown, documentIndex?: unknown) => {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
     assertOptionalString(githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
     if (locale !== undefined && locale !== "zh-CN" && locale !== "en-US") {
       throw new ConfuiError("INVALID_INPUT", currentLocale === "en-US" ? "Invalid locale parameter" : "语言参数无效");
+    }
+    if (
+      documentIndex !== undefined
+      && (typeof documentIndex !== "number" || !Number.isSafeInteger(documentIndex) || documentIndex < 0)
+    ) {
+      throw new ConfuiError("INVALID_INPUT", "文档索引参数无效");
     }
     const requestedLocale: Locale | undefined = locale === "en-US" || locale === "zh-CN" ? locale : undefined;
     if (!isFieldAssistField(field)) {
@@ -341,7 +356,7 @@ function registerIpcHandlers(): void {
         );
       }
       assertEditableSyntax(file, snapshot.text);
-      const parsed = parseConfig(snapshot.text, format);
+      const parsed = parseConfig(snapshot.text, format, { documentIndex });
       const isSecret = field.secret === true || field.type === "secret" || isSecretPath(field.segments);
       const maskedValue = isSecret
         ? "***"
@@ -374,13 +389,19 @@ function registerIpcHandlers(): void {
 
   handle(
     "confui:previewSave",
-    async (_event, root: unknown, file: unknown, changes: unknown, expectedVersion: unknown) => {
+    async (_event, root: unknown, file: unknown, changes: unknown, expectedVersion: unknown, documentIndex?: unknown) => {
       assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
       assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
       if (!Array.isArray(changes) || !isFileVersion(expectedVersion)) {
         throw new ConfuiError("INVALID_INPUT", "保存参数无效");
       }
-      return previewSave(root, file, changes as ConfigChange[], expectedVersion);
+      if (
+        documentIndex !== undefined
+        && (typeof documentIndex !== "number" || !Number.isSafeInteger(documentIndex) || documentIndex < 0)
+      ) {
+        throw new ConfuiError("INVALID_INPUT", "文档索引参数无效");
+      }
+      return previewSave(root, file, changes as ConfigChange[], expectedVersion, documentIndex);
     },
   );
 
@@ -737,6 +758,12 @@ function isFileVersion(value: unknown): value is FileVersion {
 function isSavePreview(value: unknown): value is SavePreview {
   if (value === null || typeof value !== "object") return false;
   const preview = value as SavePreview;
+  if (
+    preview.documentIndex !== undefined
+    && (typeof preview.documentIndex !== "number" || !Number.isSafeInteger(preview.documentIndex) || preview.documentIndex < 0)
+  ) {
+    return false;
+  }
   return boundedString(preview.projectRoot, MAX_PROJECT_PATH_CHARS)
     && boundedString(preview.file, MAX_CONFIG_PATH_CHARS)
     && typeof preview.format === "string"
@@ -788,6 +815,10 @@ function isAppSettings(value: unknown): value is AppSettings {
     if (candidate.clearSecrets === null || typeof candidate.clearSecrets !== "object") return false;
     if (candidate.clearSecrets.apiKey !== undefined && typeof candidate.clearSecrets.apiKey !== "boolean") return false;
     if (candidate.clearSecrets.githubToken !== undefined && typeof candidate.clearSecrets.githubToken !== "boolean") return false;
+  }
+  if (candidate.schemaStore !== undefined) {
+    if (candidate.schemaStore === null || typeof candidate.schemaStore !== "object") return false;
+    if (typeof candidate.schemaStore.enabled !== "boolean") return false;
   }
   return isAiSettings(candidate.ai)
     && candidate.github !== null

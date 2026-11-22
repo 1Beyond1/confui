@@ -7,10 +7,27 @@ import { parseJsonc, stringifyJsonc, updateJsonc } from "./json.ts";
 import { parseProperties, patchProperties, stringifyProperties } from "./properties.ts";
 import { parseToml, stringifyToml, updateToml } from "./toml.ts";
 import type { UpdateConfigResult } from "./types.ts";
-import { parseYaml, stringifyYaml, updateYaml } from "./yaml.ts";
+import {
+  extractYamlDocumentSummaries,
+  parseYaml,
+  parseYamlDocuments,
+  stringifyYaml,
+  updateYaml,
+  type ParsedYamlDocument,
+} from "./yaml.ts";
 
-export { isUnambiguousIniName, looksLikeIni };
-export type { UpdateConfigResult };
+export {
+  extractYamlDocumentSummaries,
+  isUnambiguousIniName,
+  looksLikeIni,
+  parseYamlDocuments,
+};
+export type { ParsedYamlDocument, UpdateConfigResult };
+
+export interface FormatDocumentOptions {
+  /** Zero-based document index when parsing or updating multi-document YAML files. */
+  documentIndex?: number;
+}
 
 export function detectFormat(filename: string): ConfigFormat | null {
   const lower = filename.toLowerCase();
@@ -19,7 +36,13 @@ export function detectFormat(filename: string): ConfigFormat | null {
   if (lower.endsWith(".yaml") || lower.endsWith(".yml")) return "yaml";
   if (lower.endsWith(".toml")) return "toml";
   if (lower === ".env" || lower.startsWith(".env.") || lower.endsWith(".env")) return "env";
-  if (lower.endsWith(".ini") || lower.endsWith(".conf") || lower.endsWith(".cfg")) return "ini";
+  if (
+    lower.endsWith(".ini")
+    || lower.endsWith(".conf")
+    || lower.endsWith(".cfg")
+    || lower === ".editorconfig"
+    || lower === ".npmrc"
+  ) return "ini";
   if (lower.endsWith(".properties")) return "properties";
   return null;
 }
@@ -40,7 +63,11 @@ export function assertEditableSyntax(filename: string, text: string): void {
   );
 }
 
-export function parseConfig(text: string, format: ConfigFormat): unknown {
+export function parseConfig(
+  text: string,
+  format: ConfigFormat,
+  options: FormatDocumentOptions = {},
+): unknown {
   try {
     const source = stripBom(text);
     switch (format) {
@@ -48,7 +75,7 @@ export function parseConfig(text: string, format: ConfigFormat): unknown {
       case "jsonc":
         return parseJsonc(source);
       case "yaml":
-        return parseYaml(source);
+        return parseYaml(source, options.documentIndex ?? 0);
       case "toml":
         return parseToml(source);
       case "env":
@@ -95,6 +122,7 @@ export function updateConfigText(
   originalText: string,
   format: ConfigFormat,
   changes: readonly ConfigChange[],
+  options: FormatDocumentOptions = {},
 ): UpdateConfigResult {
   if (!changes.length) return { output: originalText, warnings: [] };
   const bom = originalText.startsWith(UTF8_BOM) ? UTF8_BOM : "";
@@ -115,7 +143,7 @@ export function updateConfigText(
       result = { output: patchIni(source, changes), warnings: [] };
       break;
     case "yaml":
-      result = updateYaml(source, changes);
+      result = updateYaml(source, changes, options.documentIndex ?? 0);
       break;
     case "toml":
       result = updateToml(source, changes);

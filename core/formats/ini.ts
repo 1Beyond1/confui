@@ -8,9 +8,10 @@ import { assertAppendable, detectEol, escapeRegExp, isScalarValue, stripBom } fr
 /** Share of meaningful lines that must look like `[section]` or `key=value`. */
 const INI_ASSIGNMENT_RATIO = 0.8;
 
-/** True when the extension alone is enough to trust the INI parser. */
+/** True when the filename alone is enough to trust the INI parser. */
 export function isUnambiguousIniName(filename: string): boolean {
-  return filename.toLowerCase().endsWith(".ini");
+  const lower = filename.toLowerCase();
+  return lower.endsWith(".ini") || lower === ".editorconfig" || lower === ".npmrc";
 }
 
 /**
@@ -56,7 +57,7 @@ export function stringifyIni(value: Record<string, unknown>): string {
   return ini.stringify(value);
 }
 
-interface IniAssignment {
+export interface IniAssignment {
   indent: string;
   rawKey: string;
   character: "=" | ":";
@@ -193,6 +194,7 @@ function normalizeIniLine(line: string): string {
 
 function findIniSeparator(line: string): { index: number; character: "=" | ":" } | undefined {
   let escaped = false;
+  let firstColon: number | undefined;
   for (let index = 0; index < line.length; index += 1) {
     const character = line[index];
     if (escaped) {
@@ -203,12 +205,23 @@ function findIniSeparator(line: string): { index: number; character: "=" | ":" }
       escaped = true;
       continue;
     }
-    if (character === "=" || character === ":") return { index, character };
+    if (character === "=") {
+      // If `:` appeared earlier followed by whitespace (e.g. `url: https://x/?a=1`),
+      // treat `:` as the separator; otherwise (e.g. `.npmrc` `@scope:registry=...`
+      // or `//registry.npmjs.org/:_authToken=...`), `:` is part of the key name.
+      if (firstColon !== undefined && /\s/.test(line[firstColon + 1] ?? "")) {
+        return { index: firstColon, character: ":" };
+      }
+      return { index, character: "=" };
+    }
+    if (character === ":" && firstColon === undefined && !line.startsWith("//", index + 1)) {
+      firstColon = index;
+    }
   }
-  return undefined;
+  return firstColon !== undefined ? { index: firstColon, character: ":" } : undefined;
 }
 
-function matchIniAssignment(line: string): IniAssignment | undefined {
+export function matchIniAssignment(line: string): IniAssignment | undefined {
   const separator = findIniSeparator(line);
   if (!separator) return undefined;
   const before = line.slice(0, separator.index);
@@ -334,7 +347,7 @@ function formatIniValue(value: unknown): string {
   return ini.safe(String(value ?? ""));
 }
 
-function splitIniValueAndComment(raw: string): { value: string; comment: string } {
+export function splitIniValueAndComment(raw: string): { value: string; comment: string } {
   let quote: "'" | '"' | undefined;
   let escaped = false;
   for (let index = 0; index < raw.length; index += 1) {
@@ -360,7 +373,7 @@ function splitIniValueAndComment(raw: string): { value: string; comment: string 
   return { value: raw, comment: "" };
 }
 
-function parseIniSection(raw: string): string[] {
+export function parseIniSection(raw: string): string[] {
   const section = ini.unsafe(raw);
   const segments: string[] = [];
   let start = 0;

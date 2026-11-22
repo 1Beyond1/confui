@@ -20,10 +20,10 @@ const api: ConfuiAPI = {
   scanProject: (root: string, githubUrl?: string) => ipcRenderer.invoke("confui:scanProject", root, githubUrl),
   inferSchema: (root: string, file: string, options?: InferOptions) =>
     ipcRenderer.invoke("confui:inferSchema", root, file, options),
-  explainField: (root: string, file: string, field: FieldAssistField, githubUrl?: string, locale?: Locale) =>
-    ipcRenderer.invoke("confui:explainField", root, file, field, githubUrl, locale),
-  previewSave: (root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion) =>
-    ipcRenderer.invoke("confui:previewSave", root, file, changes, expectedVersion),
+  explainField: (root: string, file: string, field: FieldAssistField, githubUrl?: string, locale?: Locale, documentIndex?: number) =>
+    ipcRenderer.invoke("confui:explainField", root, file, field, githubUrl, locale, documentIndex),
+  previewSave: (root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion, documentIndex?: number) =>
+    ipcRenderer.invoke("confui:previewSave", root, file, changes, expectedVersion, documentIndex),
   saveConfig: (root: string, preview: SavePreview) =>
     ipcRenderer.invoke("confui:saveConfig", root, preview),
   getBackupStatus: (root: string, file: string) =>

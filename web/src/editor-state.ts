@@ -5,12 +5,46 @@ import type {
   FieldSpec,
   FieldType,
   FileVersion,
+  ItemFieldSpec,
   Locale,
   PathSegment,
   SavePreview,
 } from "../../shared/schema.ts";
-import { isForbiddenKey, isHexColor } from "../../shared/validation.ts";
+import {
+  containsSecretValuePattern,
+  isForbiddenKey,
+  isHexColor,
+  isSensitiveKey,
+  setSafeProperty,
+} from "../../shared/validation.ts";
 import { translate } from "./i18n/index.tsx";
+
+export const MAX_NESTED_TREE_DEPTH = 4;
+const MAX_DEEP_INDEX_ENTRIES = 2_000;
+const MAX_DEEP_INDEX_DEPTH = 8;
+const DEEP_SECRET_MASK = "••••••••";
+
+export interface DeepFocusTarget {
+  path: string;
+  segments?: readonly PathSegment[];
+  token: number;
+}
+
+export type DeepFieldKind = "field" | "card" | "nested";
+
+export interface DeepFieldEntry {
+  path: string;
+  segments: PathSegment[];
+  parentFieldPath: string;
+  label: string;
+  description?: string;
+  kind: DeepFieldKind;
+  secret: boolean;
+  /** Masked preview when secret is true; otherwise compact string value. */
+  preview: string;
+  /** Non-secret searchable value string (always empty for secrets so secret values are never matched). */
+  searchableValue: string;
+}
 
 const MAX_REGEX_PATTERN_LENGTH = 512;
 const MAX_REGEX_TEST_VALUE_LENGTH = 4_096;
@@ -329,15 +363,337 @@ export function isEditableScalar(value: unknown): value is string | number | boo
     || (typeof value === "number" && Number.isFinite(value));
 }
 
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date);
+}
+
 export function isScalarArray(value: unknown): value is Array<string | number | boolean | null> {
   return Array.isArray(value) && value.every(isEditableScalar);
 }
 
+export function isObjectArray(
+  value: unknown,
+  itemFields?: readonly ItemFieldSpec[],
+): value is Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return false;
+  if (value.length === 0) return Boolean(itemFields && itemFields.length > 0);
+  return value.every(isPlainObject);
+}
+
 export function isFlatScalarObject(value: unknown): value is Record<string, string | number | boolean | null> {
-  return value !== null
-    && typeof value === "object"
-    && !Array.isArray(value)
-    && Object.values(value as Record<string, unknown>).every(isEditableScalar);
+  return isPlainObject(value)
+    && Object.values(value).every(isEditableScalar);
+}
+
+/**
+ * Formats a segment path identically to `core/paths.ts#formatPath`
+ * (e.g. `configurations[0].program` or `server.tls.port`).
+ */
+export function formatSegmentPath(segments: readonly PathSegment[]): string {
+  return segments
+    .map((segment, index) => {
+      if (typeof segment === "number") return `[${segment}]`;
+      if (/^[A-Za-z_$][\w$-]*$/.test(segment)) return `${index ? "." : ""}${segment}`;
+      return `[${JSON.stringify(segment)}]`;
+    })
+    .join("");
+}
+
+/**
+ * Determines whether a nested object key or array-card property must be
+ * treated as sensitive (masked by default with one-click reveal).
+ */
+export function isNestedKeySensitive(
+  key: string,
+  fullSegments?: readonly PathSegment[],
+  value?: unknown,
+  itemSpec?: Pick<ItemFieldSpec, "secret" | "type">,
+): boolean {
+  if (itemSpec?.secret === true || itemSpec?.type === "secret") return true;
+  if (isSensitiveKey(key)) return true;
+  if (fullSegments?.some((seg) => typeof seg === "string" && isSensitiveKey(seg))) return true;
+  if (fullSegments && fullSegments.length > 1 && isSensitiveKey(formatSegmentPath(fullSegments))) return true;
+  if (typeof value === "string" && containsSecretValuePattern(value)) return true;
+  return false;
+}
+
+const CARD_TITLE_PRIORITY_KEYS = [
+  "name",
+  "title",
+  "id",
+  "label",
+  "uses",
+  "type",
+  "request",
+  "src",
+  "source",
+  "path",
+  "host",
+  "program",
+  "command",
+  "run",
+  "bin",
+];
+
+const CARD_BADGE_PRIORITY_KEYS = [
+  "type",
+  "request",
+  "uses",
+  "path",
+  "dest",
+  "destination",
+  "status",
+  "statusCode",
+  "port",
+  "host",
+  "runtime",
+  "method",
+  "target",
+  "env",
+  "shell",
+  "if",
+  "run",
+];
+
+export interface CardSummary {
+  title?: string;
+  badges: Array<{ key: string; value: string }>;
+}
+
+/**
+ * Extracts a human-readable card title and up to 3 compact summary badges for
+ * an object-array item while strictly refusing to leak sensitive keys or
+ * credential-shaped values into titles or badges.
+ */
+export function extractCardSummary(
+  item: Record<string, unknown>,
+  itemFields?: readonly ItemFieldSpec[],
+): CardSummary {
+  const specByKey = new Map((itemFields ?? []).map((spec) => [spec.key, spec]));
+  let titleKey: string | undefined;
+  let title: string | undefined;
+
+  for (const key of CARD_TITLE_PRIORITY_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
+    const raw = item[key];
+    if (typeof raw !== "string" && typeof raw !== "number") continue;
+    const str = String(raw).trim();
+    if (!str) continue;
+    if (isNestedKeySensitive(key, [key], raw, specByKey.get(key))) continue;
+    titleKey = key;
+    title = str.length > 48 ? `${str.slice(0, 47)}…` : str;
+    break;
+  }
+
+  const badges: Array<{ key: string; value: string }> = [];
+  const used = new Set<string>(titleKey ? [titleKey] : []);
+
+  const tryPushBadge = (key: string): void => {
+    if (badges.length >= 3 || used.has(key) || !Object.prototype.hasOwnProperty.call(item, key)) return;
+    const raw = item[key];
+    if (raw === undefined || raw === null || raw === "") return;
+    if (!isEditableScalar(raw)) return;
+    const sensitive = isNestedKeySensitive(key, [key], raw, specByKey.get(key));
+    used.add(key);
+    const displayVal = sensitive
+      ? "••••"
+      : String(raw).trim().length > 28
+        ? `${String(raw).trim().slice(0, 27)}…`
+        : String(raw).trim();
+    if (!displayVal) return;
+    badges.push({ key, value: displayVal });
+  };
+
+  for (const key of CARD_BADGE_PRIORITY_KEYS) tryPushBadge(key);
+  for (const key of Object.keys(item)) {
+    if (badges.length >= 3) break;
+    tryPushBadge(key);
+  }
+
+  return { title, badges };
+}
+
+/**
+ * Builds a clean initial object when adding a new card to an object array,
+ * seeding defaults from `itemFields` or cloning the key shape of the first item.
+ */
+export function createDefaultObjectItem(
+  existingItems: readonly Record<string, unknown>[],
+  itemFields?: readonly ItemFieldSpec[],
+): Record<string, unknown> {
+  const next: Record<string, unknown> = {};
+  if (itemFields?.length) {
+    for (const spec of itemFields) {
+      if (isForbiddenKey(spec.key)) continue;
+      if (spec.default !== undefined) {
+        setSafeProperty(next, spec.key, structuredClone(spec.default));
+      } else if (spec.required) {
+        setSafeProperty(next, spec.key, spec.enum?.[0] ?? defaultValueForType(spec.type));
+      }
+    }
+    if (Object.keys(next).length > 0) return next;
+    // If no field had a default or required flag, seed the first few schema keys as empty defaults.
+    for (const spec of itemFields.slice(0, 3)) {
+      if (isForbiddenKey(spec.key)) continue;
+      setSafeProperty(next, spec.key, spec.enum?.[0] ?? defaultValueForType(spec.type));
+    }
+    return next;
+  }
+
+  const template = existingItems[0];
+  if (template) {
+    for (const [key, val] of Object.entries(template)) {
+      if (isForbiddenKey(key)) continue;
+      if (typeof val === "boolean") setSafeProperty(next, key, false);
+      else if (typeof val === "number") setSafeProperty(next, key, 0);
+      else if (Array.isArray(val)) setSafeProperty(next, key, []);
+      else if (isPlainObject(val)) setSafeProperty(next, key, {});
+      else setSafeProperty(next, key, "");
+    }
+  }
+  return next;
+}
+
+/**
+ * Builds a deep, secret-redacted index of all fields, nested object sub-keys,
+ * and object-array cards/properties in the active file for instant `Ctrl+K`
+ * navigation and auto-expand jumping.
+ */
+export function buildDeepFieldIndex(
+  fields: readonly FieldSpec[],
+  values: EditorValues,
+): DeepFieldEntry[] {
+  const entries: DeepFieldEntry[] = [];
+
+  for (const field of fields) {
+    if (entries.length >= MAX_DEEP_INDEX_ENTRIES) break;
+    const rawVal = effectiveValue(values[fieldKey(field)]);
+    const current = rawVal !== undefined ? rawVal : field.value;
+    const fieldSecret = Boolean(
+      field.secret
+      || field.type === "secret"
+      || isNestedKeySensitive(String(field.segments.at(-1) ?? ""), field.segments, current),
+    );
+
+    if (field.type === "array" && isObjectArray(current, field.itemFields)) {
+      const specByKey = new Map((field.itemFields ?? []).map((spec) => [spec.key, spec]));
+      for (let idx = 0; idx < current.length; idx += 1) {
+        if (entries.length >= MAX_DEEP_INDEX_ENTRIES) break;
+        const item = current[idx]!;
+        const cardSegments: PathSegment[] = [...field.segments, idx];
+        const cardPath = formatSegmentPath(cardSegments);
+        const summary = extractCardSummary(item, field.itemFields);
+        const cardLabel = summary.title
+          ? `${field.label} #${idx + 1} · ${summary.title}`
+          : `${field.label} #${idx + 1}`;
+        const badgePreview = summary.badges.map((b) => `${b.key}=${b.value}`).join(" · ");
+        entries.push({
+          path: cardPath,
+          segments: cardSegments,
+          parentFieldPath: field.path,
+          label: cardLabel,
+          description: field.description,
+          kind: "card",
+          secret: fieldSecret,
+          preview: fieldSecret ? DEEP_SECRET_MASK : (badgePreview || `{${Object.keys(item).length}}`),
+          searchableValue: fieldSecret ? "" : `${summary.title ?? ""} ${badgePreview}`.trim(),
+        });
+        indexNestedObject(
+          entries,
+          item,
+          cardSegments,
+          field.path,
+          cardLabel,
+          fieldSecret,
+          specByKey,
+          1,
+        );
+      }
+      continue;
+    }
+
+    if (field.type === "json" && isPlainObject(current)) {
+      indexNestedObject(
+        entries,
+        current,
+        field.segments,
+        field.path,
+        field.label,
+        fieldSecret,
+        undefined,
+        1,
+      );
+      continue;
+    }
+
+    const previewText = formatCompactPreview(current);
+    entries.push({
+      path: field.path,
+      segments: [...field.segments],
+      parentFieldPath: field.path,
+      label: field.label,
+      description: field.description,
+      kind: "field",
+      secret: fieldSecret,
+      preview: fieldSecret ? DEEP_SECRET_MASK : previewText,
+      searchableValue: fieldSecret ? "" : previewText,
+    });
+  }
+
+  return entries;
+}
+
+function indexNestedObject(
+  out: DeepFieldEntry[],
+  obj: Record<string, unknown>,
+  parentSegments: readonly PathSegment[],
+  parentFieldPath: string,
+  parentLabel: string,
+  ancestorSecret: boolean,
+  itemSpecByKey: ReadonlyMap<string, ItemFieldSpec> | undefined,
+  depth: number,
+): void {
+  if (depth > MAX_DEEP_INDEX_DEPTH || out.length >= MAX_DEEP_INDEX_ENTRIES) return;
+  for (const [key, val] of Object.entries(obj)) {
+    if (out.length >= MAX_DEEP_INDEX_ENTRIES) return;
+    if (isForbiddenKey(key)) continue;
+    const segments: PathSegment[] = [...parentSegments, key];
+    const path = formatSegmentPath(segments);
+    const spec = depth === 1 ? itemSpecByKey?.get(key) : undefined;
+    const secret = ancestorSecret || isNestedKeySensitive(key, segments, val, spec);
+    const label = spec?.label ? `${parentLabel} › ${spec.label}` : `${parentLabel} › ${key}`;
+    const previewText = formatCompactPreview(val);
+
+    out.push({
+      path,
+      segments,
+      parentFieldPath,
+      label,
+      description: spec?.description,
+      kind: "nested",
+      secret,
+      preview: secret ? DEEP_SECRET_MASK : previewText,
+      searchableValue: secret ? "" : previewText,
+    });
+
+    if (isPlainObject(val) && depth < MAX_DEEP_INDEX_DEPTH) {
+      indexNestedObject(out, val, segments, parentFieldPath, label, secret, undefined, depth + 1);
+    } else if (Array.isArray(val) && val.length > 0 && val.every(isPlainObject) && depth < MAX_DEEP_INDEX_DEPTH) {
+      for (let i = 0; i < val.length; i += 1) {
+        if (out.length >= MAX_DEEP_INDEX_ENTRIES) return;
+        indexNestedObject(out, val[i]!, [...segments, i], parentFieldPath, `${label}[${i}]`, secret, undefined, depth + 1);
+      }
+    }
+  }
+}
+
+function formatCompactPreview(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value.length > 80 ? `${value.slice(0, 79)}…` : value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return `[${value.length}]`;
+  if (isPlainObject(value)) return `{${Object.keys(value).length}}`;
+  return "";
 }
 
 export function allowedCustomFieldTypes(format: ConfigFormat): FieldType[] {

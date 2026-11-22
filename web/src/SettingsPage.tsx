@@ -361,6 +361,34 @@ export function SettingsPage({
 
       <section class="settings-card">
         <header class="settings-card__header">
+          <span class="settings-card__icon settings-card__icon--blue"><Icon name="shield"/></span>
+          <div><h2>{t("settings.schemaStoreTitle")}</h2><p>{t("settings.schemaStoreDesc")}</p></div>
+          <button
+            type="button"
+            class={`toggle ${draft.schemaStore.enabled ? "toggle--on" : ""}`}
+            role="switch"
+            aria-label={t("settings.schemaStoreEnableAria")}
+            aria-checked={draft.schemaStore.enabled}
+            disabled={saving}
+            onClick={() => setDraft((current) => ({
+              ...current,
+              schemaStore: { enabled: !current.schemaStore.enabled },
+            }))}
+          ><i/></button>
+        </header>
+        <div class="settings-card__body">
+          <div class="setting-field setting-field--wide">
+            <small class="secure-note">
+              <Icon name={draft.schemaStore.enabled ? "check" : "shield"} size={14}/>
+              {draft.schemaStore.enabled ? t("settings.schemaStoreStatusOn") : t("settings.schemaStoreStatusOff")}
+            </small>
+            <small>{t("settings.schemaStoreNote")}</small>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-card">
+        <header class="settings-card__header">
           <span class="settings-card__icon settings-card__icon--blue"><Icon name="code"/></span>
           <div><h2>{t("settings.languageTitle")}</h2><p>{t("settings.languageDesc")}</p></div>
         </header>

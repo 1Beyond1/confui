@@ -16,6 +16,7 @@ export type CandidateProperties = Partial<Pick<
   | "placeholder"
   | "secret"
   | "group"
+  | "itemFields"
 >>;
 
 export interface FieldCandidate extends CandidateProperties {

@@ -45,6 +45,7 @@ import {
   needsJsonEditor,
   reconcileSavedState,
   validationErrors,
+  type DeepFieldEntry,
 } from "./editor-state.ts";
 import { useEditorHistory } from "./hooks/useEditorHistory.ts";
 import { I18nProvider, translate } from "./i18n/index.tsx";
@@ -64,7 +65,8 @@ type EditorTab = "form" | "raw";
 type BusyState = "scan" | "infer" | "preview" | "save" | "restore" | null;
 type ToastType = "success" | "error" | "info";
 type PendingAction =
-  | { kind: "file"; file: ConfigFile; focusFieldPath?: string; focusFieldSegments?: PathSegment[]; focusLine?: number; openRaw?: boolean }
+  | { kind: "file"; file: ConfigFile; focusFieldPath?: string; focusFieldSegments?: PathSegment[]; focusLine?: number; openRaw?: boolean; documentIndex?: number }
+  | { kind: "yaml-doc"; documentIndex: number }
   | { kind: "home" }
   | { kind: "settings" }
   | { kind: "reload" }
@@ -370,7 +372,7 @@ export function App() {
     root = project?.root,
     githubUrl = githubInput,
     targetLocale = locale,
-    focusTarget?: { focusFieldPath?: string; focusFieldSegments?: PathSegment[]; focusLine?: number; openRaw?: boolean },
+    focusTarget?: { focusFieldPath?: string; focusFieldSegments?: PathSegment[]; focusLine?: number; openRaw?: boolean; documentIndex?: number },
   ): Promise<void> {
     if (!root) return;
     if (file.status === "too-large" || file.status === "unsupported" || file.status === "unreadable") {
@@ -391,6 +393,7 @@ export function App() {
       const result = await window.confui.inferSchema(root, file.path, {
         githubUrl: githubUrl || undefined,
         locale: targetLocale,
+        documentIndex: focusTarget?.documentIndex,
       });
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       if (sequence !== openSequence.current) return;
@@ -426,7 +429,13 @@ export function App() {
       setPendingSettingsAction(action);
       return;
     }
-    const sameFile = view !== "home" && action.kind === "file" && action.file.path === activeFile?.path;
+    if (action.kind === "yaml-doc" && action.documentIndex === (schema?.activeDocumentIndex ?? 0)) {
+      return;
+    }
+    const sameFile = view !== "home"
+      && action.kind === "file"
+      && action.file.path === activeFile?.path
+      && (action.documentIndex === undefined || action.documentIndex === (schema?.activeDocumentIndex ?? 0));
     if (sameFile && !loadError) {
       setView("editor");
       if (action.openRaw) {
@@ -488,7 +497,15 @@ export function App() {
           focusFieldSegments: action.focusFieldSegments,
           focusLine: action.focusLine,
           openRaw: action.openRaw,
+          documentIndex: action.documentIndex,
         });
+        return;
+      case "yaml-doc":
+        if (activeFile) {
+          await loadFile(activeFile, project?.root, githubInput, locale, {
+            documentIndex: action.documentIndex,
+          });
+        }
         return;
       case "home":
         window.confui.stopWatching();
@@ -499,7 +516,11 @@ export function App() {
         setView("settings");
         return;
       case "reload":
-        if (activeFile) await loadFile(activeFile);
+        if (activeFile) {
+          await loadFile(activeFile, project?.root, githubInput, locale, {
+            documentIndex: schema?.activeDocumentIndex,
+          });
+        }
         return;
       case "rescan":
         if (project) await openProject(project.root, githubInput);
@@ -532,7 +553,13 @@ export function App() {
     }
     setBusy("preview");
     try {
-      const result = await window.confui.previewSave(project.root, schema.file, changes, schema.version);
+      const result = await window.confui.previewSave(
+        project.root,
+        schema.file,
+        changes,
+        schema.version,
+        schema.activeDocumentIndex,
+      );
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       if (!result.data.changes.length) {
         const nextFields = schema.fields.map((field) => ({ ...field, value: effectiveValue(values[fieldKey(field)]) }));
@@ -657,19 +684,24 @@ export function App() {
 
   async function saveSettings(next: AppSettings): Promise<void> {
     const previousLocale = settings?.locale;
+    const previousSchemaStore = settings?.schemaStore.enabled;
     const result = await window.confui.setSettings(next);
     if (!result.ok) throw new Error(result.error.detail || result.error.message);
     setSettings(result.data);
     setPreviewLocale(undefined);
     applyTheme(result.data.theme);
-    // Refresh built-in template descriptions if locale changed while a file is loaded cleanly.
-    if (previousLocale !== result.data.locale && activeFile && project && !dirty) {
+    // Refresh schema/descriptions if locale or SchemaStore toggle changed while a file is loaded cleanly.
+    const inferenceSettingChanged = previousLocale !== result.data.locale
+      || previousSchemaStore !== result.data.schemaStore.enabled;
+    if (inferenceSettingChanged && activeFile && project && !dirty) {
       const seq = openSequence.current;
       const targetRoot = project.root;
       const targetFile = activeFile.path;
+      const targetDoc = schema?.activeDocumentIndex;
       void window.confui.inferSchema(targetRoot, targetFile, {
         githubUrl: githubInput || undefined,
         locale: result.data.locale,
+        documentIndex: targetDoc,
       }).then((refreshed) => {
         if (!refreshed.ok) return;
         if (seq !== openSequence.current || dirtyRef.current) return;
@@ -748,7 +780,14 @@ export function App() {
       secret: field.secret,
       group: field.group,
     };
-    const result = await window.confui.explainField(project.root, schema.file, request, githubInput || undefined, locale);
+    const result = await window.confui.explainField(
+      project.root,
+      schema.file,
+      request,
+      githubInput || undefined,
+      locale,
+      schema.activeDocumentIndex,
+    );
     if (!result.ok) throw new Error(result.error.detail || result.error.message);
     return result.data;
   }
@@ -789,6 +828,19 @@ export function App() {
       focusFieldSegments: hit.segments,
       focusLine: hit.line,
       openRaw,
+      documentIndex: hit.documentIndex,
+    });
+  }
+
+  function handleSelectDeepField(entry: DeepFieldEntry): void {
+    if (!schema) return;
+    setView("editor");
+    setEditorTab("form");
+    setFocusFieldRequest({
+      file: schema.file,
+      path: entry.path,
+      segments: [...entry.segments],
+      token: Date.now(),
     });
   }
 
@@ -1125,13 +1177,14 @@ export function App() {
                   busy={busy !== null}
                   canCompare={openableFiles.length >= 2}
                   hasEnvGroup={activeFileHasEnvGroup}
+                  onSelectYamlDocument={(documentIndex) => requestAction({ kind: "yaml-doc", documentIndex })}
                   onOpenCompare={() => setCompareOpen(true)}
                   onOpenExportRedacted={() => setExportOpen(true)}
                   onRestoreBackup={() => void beginRestoreBackup()}
                 />
                 {allFields.length ? (
                   <FieldEditor
-                    fileKey={`${project?.root ?? ""}:${schema.file}`}
+                    fileKey={`${project?.root ?? ""}:${schema.file}:${schema.activeDocumentIndex ?? 0}`}
                     fields={allFields}
                     customKeys={customKeys}
                     values={values}
@@ -1279,11 +1332,15 @@ export function App() {
         {commandPaletteOpen && (
           <CommandPalette
             project={project}
+            activeSchema={schema}
+            activeFields={allFields}
+            activeValues={values}
             openableFiles={openableFiles}
             commands={paletteCommands}
             onClose={() => setCommandPaletteOpen(false)}
             onSelectFile={(file) => requestAction({ kind: "file", file })}
             onSelectSearchHit={handleSelectSearchHit}
+            onSelectDeepField={handleSelectDeepField}
           />
         )}
 

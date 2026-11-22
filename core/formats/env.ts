@@ -100,7 +100,7 @@ export function formatEnvValue(value: unknown, previous = ""): string {
   return `${quote}${escaped}${quote}`;
 }
 
-function splitEnvValueAndComment(raw: string): { value: string; comment: string } {
+export function splitEnvValueAndComment(raw: string): { value: string; comment: string } {
   const leadingWhitespace = raw.match(/^\s*/)?.[0].length ?? 0;
   const firstChar = raw[leadingWhitespace];
   if (firstChar === "'" || firstChar === '"') {
