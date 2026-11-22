@@ -26,7 +26,7 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
 
-      # typecheck + vitest + electron-vite build, per PROJECT_SPEC §7.
+      # typecheck + vitest (unit, integration & E2E) + electron-vite build, per PROJECT_SPEC §7.
       - run: npm run check
 
       - name: Verify release tag matches package version
