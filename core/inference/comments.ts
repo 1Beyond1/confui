@@ -1,11 +1,12 @@
 import * as ini from "ini";
 import { createScanner, parseTree, SyntaxKind, type Node as JsoncNode, type ParseError } from "jsonc-parser";
 import { isCollection, isMap, isNode, isPair, isScalar, isSeq } from "yaml";
+import { maskDocumentLines } from "../../shared/diff.ts";
 import type { ConfigFormat, Locale, PathSegment } from "../../shared/schema.ts";
-import { isForbiddenKey } from "../../shared/validation.ts";
+import { isForbiddenKey, PEM_BEGIN_RE } from "../../shared/validation.ts";
 import { stripBom } from "../formats/common.ts";
 import { splitEnvValueAndComment } from "../formats/env.ts";
-import { matchIniAssignment, parseIniSection, splitIniValueAndComment } from "../formats/ini.ts";
+import { matchIniAssignment, matchIniSectionHeader, parseIniSection, splitIniValueAndComment } from "../formats/ini.ts";
 import { groupPropertyLines, joinPropertyLines, unescapeProperty } from "../formats/properties.ts";
 import { scanTomlLines } from "../formats/toml.ts";
 import { parseYamlDocuments } from "../formats/yaml.ts";
@@ -557,9 +558,9 @@ function extractIniComments(source: string): RawCommentEntry[] {
       pending.push(trimmed.slice(1));
       continue;
     }
-    const sectionMatch = line.match(/^\s*\[([^\]]+)]\s*(?:[#;].*)?$/);
-    if (sectionMatch?.[1]) {
-      section = parseIniSection(sectionMatch[1]);
+    const sectionHeader = matchIniSectionHeader(line);
+    if (sectionHeader) {
+      section = parseIniSection(sectionHeader.rawSection);
       pending.length = 0;
       continue;
     }
@@ -645,9 +646,12 @@ function sanitizeCommentBlock(
 ): string | undefined {
   if (!raw) return undefined;
   // Run `maskDocumentSecrets` on the full multi-line comment block FIRST so
-  // multi-line PEM keys, DSNs, Bearer/Digest tokens, and `key=secret` examples
-  // are neutralized before any further processing.
+  // multi-line PEM keys, DSNs, Bearer/Digest/Token headers, and `key=secret`
+  // examples are neutralized before any further processing.
   let masked = maskDocumentSecrets(raw);
+  if (PEM_BEGIN_RE.test(masked)) {
+    masked = maskDocumentLines(masked, { mask: "***", secretValues }).lines.join("\n");
+  }
   for (const secret of secretValues) {
     if (masked.includes(secret)) {
       masked = masked.split(secret).join("***");

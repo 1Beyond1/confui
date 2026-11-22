@@ -16,6 +16,7 @@ import {
   isHexColor,
   isSensitiveKey,
   setSafeProperty,
+  valueContainsSecret,
 } from "../../shared/validation.ts";
 import { translate } from "./i18n/index.tsx";
 
@@ -57,6 +58,8 @@ export interface JsonDraft {
   text: string;
   parsed: unknown;
   error?: string;
+  /** Sub-editor (single-card JSON / deep fallback JSON) syntax errors keyed by sub-path. */
+  subErrors?: Record<string, string>;
 }
 
 export type EditorValues = Record<string, unknown>;
@@ -112,6 +115,32 @@ export function reconcileSavedState(
   customFields: FieldSpec[];
   hasRemainingDirty: boolean;
 } {
+  const refreshedYamlDocs = savePreview.yamlDocuments ?? schema.yamlDocuments;
+  const activeDocIdx = schema.activeDocumentIndex ?? 0;
+  const previewDocIdx = savePreview.documentIndex ?? 0;
+  const isDifferentYamlDoc = schema.format === "yaml"
+    && Boolean((refreshedYamlDocs?.length ?? 0) > 1 || (schema.yamlDocuments?.length ?? 0) > 1)
+    && activeDocIdx !== previewDocIdx;
+
+  // Never apply operations targeting another YAML document onto the active
+  // document's fields/values baseline; only advance rawText, version, and doc summaries.
+  if (isDifferentYamlDoc) {
+    const nextSchema: ConfigFormSchema = {
+      ...schema,
+      rawText: savePreview.output,
+      version: savedVersion,
+      ...(refreshedYamlDocs ? { yamlDocuments: refreshedYamlDocs } : {}),
+    };
+    const preservedCustom = [...customFields];
+    const preservedValues = { ...values };
+    return {
+      schema: nextSchema,
+      values: preservedValues,
+      customFields: preservedCustom,
+      hasRemainingDirty: isEditorDirty([...schema.fields, ...preservedCustom], preservedValues),
+    };
+  }
+
   const savedValues = new Map(
     savePreview.operations.map((operation) => [JSON.stringify(operation.segments), operation.value]),
   );
@@ -149,6 +178,7 @@ export function reconcileSavedState(
     fields: nextFields,
     rawText: savePreview.output,
     version: savedVersion,
+    ...(refreshedYamlDocs ? { yamlDocuments: refreshedYamlDocs } : {}),
   };
   const combinedFields = [...nextFields, ...nextCustomFields];
   return {
@@ -200,6 +230,63 @@ export function isJsonDraft(value: unknown): value is JsonDraft {
   return value !== null && typeof value === "object" && (value as JsonDraft).__confuiJsonDraft === true;
 }
 
+export function hasJsonDraftError(value: unknown): boolean {
+  if (!isJsonDraft(value)) return false;
+  if (value.error) return true;
+  return Boolean(value.subErrors && Object.keys(value.subErrors).length > 0);
+}
+
+export function firstJsonDraftError(value: unknown): string | undefined {
+  if (!isJsonDraft(value)) return undefined;
+  if (value.error) return value.error;
+  if (!value.subErrors) return undefined;
+  for (const msg of Object.values(value.subErrors)) {
+    if (msg) return msg;
+  }
+  return undefined;
+}
+
+export function withJsonDraftSubError(
+  draft: JsonDraft,
+  subKey: string,
+  error?: string,
+): JsonDraft {
+  const prev = draft.subErrors ?? {};
+  const existing = prev[subKey];
+  if (existing === error) return draft;
+  const nextSubErrors: Record<string, string> = {};
+  for (const [k, v] of Object.entries(prev)) {
+    if (k !== subKey && v) nextSubErrors[k] = v;
+  }
+  if (error) nextSubErrors[subKey] = error;
+  const hasAny = Object.keys(nextSubErrors).length > 0;
+  return {
+    ...draft,
+    subErrors: hasAny ? nextSubErrors : undefined,
+  };
+}
+
+export function clearJsonDraftSubErrors(draft: JsonDraft, keyPrefix?: string): JsonDraft {
+  if (!draft.subErrors || Object.keys(draft.subErrors).length === 0) return draft;
+  if (!keyPrefix) {
+    return { ...draft, subErrors: undefined };
+  }
+  const nextSubErrors: Record<string, string> = {};
+  let changed = false;
+  for (const [k, v] of Object.entries(draft.subErrors)) {
+    if (k === keyPrefix || k.startsWith(`${keyPrefix}.`) || k.startsWith(`${keyPrefix}[`)) {
+      changed = true;
+      continue;
+    }
+    nextSubErrors[k] = v;
+  }
+  if (!changed) return draft;
+  return {
+    ...draft,
+    subErrors: Object.keys(nextSubErrors).length > 0 ? nextSubErrors : undefined,
+  };
+}
+
 export function effectiveValue(value: unknown): unknown {
   return isJsonDraft(value) ? value.parsed : value;
 }
@@ -226,7 +313,11 @@ export function validateField(
   format?: ConfigFormat,
   locale: Locale = "zh-CN",
 ): string | undefined {
-  if (isJsonDraft(editorValue) && editorValue.error) return translate(locale, "validation.jsonSyntax");
+  if (isJsonDraft(editorValue)) {
+    if (editorValue.error) return translate(locale, "validation.jsonSyntax");
+    const subError = firstJsonDraftError(editorValue);
+    if (subError) return subError;
+  }
   const value = effectiveValue(editorValue);
   if (
     field.required
@@ -350,7 +441,7 @@ export function initialFieldEditorValue(field: FieldSpec): unknown {
 }
 
 export function isFieldModified(field: FieldSpec, editorValue: unknown): boolean {
-  if (isJsonDraft(editorValue) && editorValue.error) return true;
+  if (hasJsonDraftError(editorValue)) return true;
   const value = effectiveValue(editorValue);
   const original = normalizeEditorValue(field, field.value);
   return !deepEqual(value, original);
@@ -461,28 +552,62 @@ export interface CardSummary {
 }
 
 /**
+ * Returns true when an object-array item or nested object contains either a
+ * keyword/pattern secret OR a non-empty property marked `secret: true` /
+ * `type: "secret"` in schema `itemFields` (e.g. `writeOnly: true` / `format: "password"`).
+ */
+export function objectHasSchemaSecret(
+  item: Record<string, unknown>,
+  itemFields?: readonly ItemFieldSpec[],
+  ancestorSecret = false,
+): boolean {
+  if (ancestorSecret || valueContainsSecret(item)) return true;
+  if (!itemFields?.length) return false;
+  for (const spec of itemFields) {
+    if (!Object.prototype.hasOwnProperty.call(item, spec.key)) continue;
+    const raw = item[spec.key];
+    if (raw === undefined || raw === null || raw === "") continue;
+    if (spec.secret === true || spec.type === "secret") return true;
+    if (spec.itemFields?.length && Array.isArray(raw)) {
+      for (const child of raw) {
+        if (isPlainObject(child) && objectHasSchemaSecret(child, spec.itemFields, false)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Extracts a human-readable card title and up to 3 compact summary badges for
- * an object-array item while strictly refusing to leak sensitive keys or
- * credential-shaped values into titles or badges.
+ * an object-array item while strictly refusing to leak sensitive keys,
+ * schema-marked secrets, ancestor-secret fields, or credential-shaped values
+ * (including inline `KEY=VALUE` assignments such as `PGPASSWORD=...`).
  */
 export function extractCardSummary(
   item: Record<string, unknown>,
   itemFields?: readonly ItemFieldSpec[],
+  parentSegments?: readonly PathSegment[],
+  ancestorSecret = false,
 ): CardSummary {
   const specByKey = new Map((itemFields ?? []).map((spec) => [spec.key, spec]));
   let titleKey: string | undefined;
   let title: string | undefined;
 
-  for (const key of CARD_TITLE_PRIORITY_KEYS) {
-    if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
-    const raw = item[key];
-    if (typeof raw !== "string" && typeof raw !== "number") continue;
-    const str = String(raw).trim();
-    if (!str) continue;
-    if (isNestedKeySensitive(key, [key], raw, specByKey.get(key))) continue;
-    titleKey = key;
-    title = str.length > 48 ? `${str.slice(0, 47)}…` : str;
-    break;
+  if (!ancestorSecret) {
+    for (const key of CARD_TITLE_PRIORITY_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
+      const raw = item[key];
+      if (typeof raw !== "string" && typeof raw !== "number") continue;
+      const str = String(raw).trim();
+      if (!str) continue;
+      const fullSegments: PathSegment[] = parentSegments ? [...parentSegments, key] : [key];
+      if (isNestedKeySensitive(key, fullSegments, raw, specByKey.get(key))) continue;
+      titleKey = key;
+      title = str.length > 48 ? `${str.slice(0, 47)}…` : str;
+      break;
+    }
   }
 
   const badges: Array<{ key: string; value: string }> = [];
@@ -493,7 +618,8 @@ export function extractCardSummary(
     const raw = item[key];
     if (raw === undefined || raw === null || raw === "") return;
     if (!isEditableScalar(raw)) return;
-    const sensitive = isNestedKeySensitive(key, [key], raw, specByKey.get(key));
+    const fullSegments: PathSegment[] = parentSegments ? [...parentSegments, key] : [key];
+    const sensitive = ancestorSecret || isNestedKeySensitive(key, fullSegments, raw, specByKey.get(key));
     used.add(key);
     const displayVal = sensitive
       ? "••••"
@@ -582,7 +708,7 @@ export function buildDeepFieldIndex(
         const item = current[idx]!;
         const cardSegments: PathSegment[] = [...field.segments, idx];
         const cardPath = formatSegmentPath(cardSegments);
-        const summary = extractCardSummary(item, field.itemFields);
+        const summary = extractCardSummary(item, field.itemFields, cardSegments, fieldSecret);
         const cardLabel = summary.title
           ? `${field.label} #${idx + 1} · ${summary.title}`
           : `${field.label} #${idx + 1}`;
@@ -626,6 +752,7 @@ export function buildDeepFieldIndex(
       continue;
     }
 
+    const leafSecret = fieldSecret || valueContainsSecret(current);
     const previewText = formatCompactPreview(current);
     entries.push({
       path: field.path,
@@ -634,9 +761,9 @@ export function buildDeepFieldIndex(
       label: field.label,
       description: field.description,
       kind: "field",
-      secret: fieldSecret,
-      preview: fieldSecret ? DEEP_SECRET_MASK : previewText,
-      searchableValue: fieldSecret ? "" : previewText,
+      secret: leafSecret,
+      preview: leafSecret ? DEEP_SECRET_MASK : previewText,
+      searchableValue: leafSecret ? "" : previewText,
     });
   }
 
@@ -659,8 +786,10 @@ function indexNestedObject(
     if (isForbiddenKey(key)) continue;
     const segments: PathSegment[] = [...parentSegments, key];
     const path = formatSegmentPath(segments);
-    const spec = depth === 1 ? itemSpecByKey?.get(key) : undefined;
-    const secret = ancestorSecret || isNestedKeySensitive(key, segments, val, spec);
+    const spec = itemSpecByKey?.get(key);
+    const selfSecret = ancestorSecret || isNestedKeySensitive(key, segments, val, spec);
+    const isScalarOrCollapsedArray = Array.isArray(val) && !(val.length > 0 && val.every(isPlainObject));
+    const entrySecret = selfSecret || (isScalarOrCollapsedArray && valueContainsSecret(val));
     const label = spec?.label ? `${parentLabel} › ${spec.label}` : `${parentLabel} › ${key}`;
     const previewText = formatCompactPreview(val);
 
@@ -671,17 +800,20 @@ function indexNestedObject(
       label,
       description: spec?.description,
       kind: "nested",
-      secret,
-      preview: secret ? DEEP_SECRET_MASK : previewText,
-      searchableValue: secret ? "" : previewText,
+      secret: entrySecret,
+      preview: entrySecret ? DEEP_SECRET_MASK : previewText,
+      searchableValue: entrySecret ? "" : previewText,
     });
 
     if (isPlainObject(val) && depth < MAX_DEEP_INDEX_DEPTH) {
-      indexNestedObject(out, val, segments, parentFieldPath, label, secret, undefined, depth + 1);
+      indexNestedObject(out, val, segments, parentFieldPath, label, selfSecret, undefined, depth + 1);
     } else if (Array.isArray(val) && val.length > 0 && val.every(isPlainObject) && depth < MAX_DEEP_INDEX_DEPTH) {
+      const childSpecMap = spec?.itemFields?.length
+        ? new Map(spec.itemFields.map((itemSpec) => [itemSpec.key, itemSpec]))
+        : undefined;
       for (let i = 0; i < val.length; i += 1) {
         if (out.length >= MAX_DEEP_INDEX_ENTRIES) return;
-        indexNestedObject(out, val[i]!, [...segments, i], parentFieldPath, `${label}[${i}]`, secret, undefined, depth + 1);
+        indexNestedObject(out, val[i]!, [...segments, i], parentFieldPath, `${label}[${i}]`, selfSecret, childSpecMap, depth + 1);
       }
     }
   }

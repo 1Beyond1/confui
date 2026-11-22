@@ -29,17 +29,26 @@ export function SaveConfirmModal({
   const [tab, setTab] = useState<DiffTab>("fields");
   const [revealSecrets, setRevealSecrets] = useState(false);
   const matchesActiveSchema = Boolean(schema && schema.file === savePreview.file);
-  const fields = matchesActiveSchema ? (allFields ?? schema?.fields ?? []) : [];
+  const matchesActiveDocument = matchesActiveSchema
+    && (savePreview.documentIndex ?? 0) === (schema?.activeDocumentIndex ?? 0);
+  const fields = matchesActiveDocument ? (allFields ?? schema?.fields ?? []) : [];
 
   useEffect(() => {
     setTab("fields");
     setRevealSecrets(false);
   }, [savePreview]);
 
-  const { secretKeys, secretValues } = useMemo(
-    () => collectSecretsFromFields(fields, savePreview.changes),
-    [fields, savePreview.changes],
-  );
+  const { secretKeys, secretValues } = useMemo(() => {
+    const base = collectSecretsFromFields(fields, savePreview.changes);
+    const docMeta = matchesActiveSchema
+      ? schema?.documentSecrets?.find((item) => item.documentIndex === (savePreview.documentIndex ?? 0))
+      : undefined;
+    if (!docMeta) return base;
+    return {
+      secretKeys: [...new Set([...base.secretKeys, ...docMeta.secretKeys])],
+      secretValues: [...new Set([...base.secretValues, ...docMeta.secretValues])],
+    };
+  }, [fields, savePreview.changes, savePreview.documentIndex, matchesActiveSchema, schema?.documentSecrets]);
 
   const changeSecretFlags = useMemo(
     () => savePreview.changes.map((change) => {

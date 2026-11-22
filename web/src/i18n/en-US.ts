@@ -285,6 +285,8 @@ export const enUS: TranslationDict = {
   "compare.envGroupsLabel": "Env groups:",
   "compare.sourceLabel": "Source Config (read from)",
   "compare.targetLabel": "Target Config (sync into)",
+  "compare.sourceDocLabel": "Source YAML Document",
+  "compare.targetDocLabel": "Target YAML Document",
   "compare.swap": "Swap source and target",
   "compare.sameFileHint": "Select two different configuration files to compare.",
   "compare.targetDirtyBlocked": "\"{file}\" has unsaved edits. Save or discard your current changes before syncing into it, or select another unmodified target file.",

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import type {
+  CompareConfigOptions,
   CompareEntryStatus,
   ConfigCompareResult,
   ConfigEnvGroup,
@@ -21,6 +22,7 @@ export function CompareSyncModal({
   openableFiles,
   envGroups,
   activeFilePath,
+  activeDocumentIndex,
   activeFileDirty = false,
   onClose,
   onPreviewReady,
@@ -29,6 +31,7 @@ export function CompareSyncModal({
   openableFiles: readonly ConfigFile[];
   envGroups: readonly ConfigEnvGroup[];
   activeFilePath?: string;
+  activeDocumentIndex?: number;
   activeFileDirty?: boolean;
   onClose: () => void;
   onPreviewReady: (preview: SavePreview) => void;
@@ -40,6 +43,12 @@ export function CompareSyncModal({
   );
   const [sourceFile, setSourceFile] = useState(initialPair.source);
   const [targetFile, setTargetFile] = useState(initialPair.target);
+  const [sourceDocIndex, setSourceDocIndex] = useState<number>(
+    initialPair.source === activeFilePath ? (activeDocumentIndex ?? 0) : 0,
+  );
+  const [targetDocIndex, setTargetDocIndex] = useState<number>(
+    initialPair.target === activeFilePath ? (activeDocumentIndex ?? 0) : 0,
+  );
   const [filter, setFilter] = useState<CompareFilter>("actionable");
   const [revealSecrets, setRevealSecrets] = useState(false);
   const [result, setResult] = useState<ConfigCompareResult>();
@@ -47,6 +56,23 @@ export function CompareSyncModal({
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string>();
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
+
+  const sourceIsYaml = useMemo(
+    () => openableFiles.find((file) => file.path === sourceFile)?.format === "yaml",
+    [openableFiles, sourceFile],
+  );
+  const targetIsYaml = useMemo(
+    () => openableFiles.find((file) => file.path === targetFile)?.format === "yaml",
+    [openableFiles, targetFile],
+  );
+
+  function buildCompareOptions(): CompareConfigOptions | undefined {
+    if (!sourceIsYaml && !targetIsYaml) return undefined;
+    return {
+      ...(sourceIsYaml ? { sourceDocumentIndex: sourceDocIndex } : {}),
+      ...(targetIsYaml ? { targetDocumentIndex: targetDocIndex } : {}),
+    };
+  }
 
   useEffect(() => {
     if (!sourceFile || !targetFile || sourceFile === targetFile) {
@@ -59,7 +85,8 @@ export function CompareSyncModal({
     setLoading(true);
     setError(undefined);
     setRevealSecrets(false);
-    void window.confui.compareConfigs(projectRoot, sourceFile, targetFile).then((response) => {
+    const compareOptions = buildCompareOptions();
+    void window.confui.compareConfigs(projectRoot, sourceFile, targetFile, compareOptions).then((response) => {
       if (cancelled) return;
       setLoading(false);
       if (!response.ok) {
@@ -77,7 +104,7 @@ export function CompareSyncModal({
       setSelected(defaultSelected);
     });
     return () => { cancelled = true; };
-  }, [projectRoot, sourceFile, targetFile]);
+  }, [projectRoot, sourceFile, targetFile, sourceDocIndex, targetDocIndex, sourceIsYaml, targetIsYaml]);
 
   const visibleEntries = useMemo(() => {
     if (!result) return [];
@@ -120,6 +147,18 @@ export function CompareSyncModal({
   function swapPair(): void {
     setSourceFile(targetFile);
     setTargetFile(sourceFile);
+    setSourceDocIndex(targetDocIndex);
+    setTargetDocIndex(sourceDocIndex);
+  }
+
+  function selectSourceFile(nextFile: string): void {
+    setSourceFile(nextFile);
+    setSourceDocIndex(nextFile === activeFilePath ? (activeDocumentIndex ?? 0) : 0);
+  }
+
+  function selectTargetFile(nextFile: string): void {
+    setTargetFile(nextFile);
+    setTargetDocIndex(nextFile === activeFilePath ? (activeDocumentIndex ?? 0) : 0);
   }
 
   const isTargetActiveDirty = Boolean(activeFileDirty && activeFilePath && targetFile === activeFilePath);
@@ -136,12 +175,20 @@ export function CompareSyncModal({
     setSyncing(true);
     setError(undefined);
     try {
+      const syncOptions: CompareConfigOptions | undefined =
+        result.sourceDocumentIndex !== undefined || result.targetDocumentIndex !== undefined
+          ? {
+            ...(result.sourceDocumentIndex !== undefined ? { sourceDocumentIndex: result.sourceDocumentIndex } : {}),
+            ...(result.targetDocumentIndex !== undefined ? { targetDocumentIndex: result.targetDocumentIndex } : {}),
+          }
+          : buildCompareOptions();
       const response = await window.confui.previewSyncConfig(
         projectRoot,
         result.sourceFile,
         result.targetFile,
         segmentsList,
         result.targetVersion,
+        syncOptions,
       );
       if (!response.ok) throw new Error(response.error.detail || response.error.message);
       onPreviewReady(response.data);
@@ -195,8 +242,8 @@ export function CompareSyncModal({
                   const first = group.files[0];
                   const second = group.files[1];
                   if (first && second) {
-                    setSourceFile(first);
-                    setTargetFile(second);
+                    selectSourceFile(first);
+                    selectTargetFile(second);
                   }
                 }}
               >
@@ -217,7 +264,7 @@ export function CompareSyncModal({
               class="control"
               value={sourceFile}
               disabled={syncing}
-              onChange={(event) => setSourceFile(event.currentTarget.value)}
+              onChange={(event) => selectSourceFile(event.currentTarget.value)}
             >
               {openableFiles.map((file) => (
                 <option key={file.path} value={file.path}>{file.path}</option>
@@ -225,6 +272,24 @@ export function CompareSyncModal({
             </select>
             <Icon name="chevron-down" size={16}/>
           </div>
+          {result?.sourceFile === sourceFile && result.sourceYamlDocuments && result.sourceYamlDocuments.length > 1 && (
+            <div class="select-wrap" style={{ marginTop: "6px" }}>
+              <select
+                aria-label={t("compare.sourceDocLabel")}
+                class="control"
+                value={String(sourceDocIndex)}
+                disabled={syncing}
+                onChange={(event) => setSourceDocIndex(Number(event.currentTarget.value) || 0)}
+              >
+                {result.sourceYamlDocuments.map((doc) => (
+                  <option key={doc.index} value={String(doc.index)}>
+                    #{doc.index + 1} · {doc.label || t("editor.yamlDocFallback", { index: doc.index + 1 })}
+                  </option>
+                ))}
+              </select>
+              <Icon name="chevron-down" size={16}/>
+            </div>
+          )}
         </div>
         <button
           type="button"
@@ -244,7 +309,7 @@ export function CompareSyncModal({
               class="control"
               value={targetFile}
               disabled={syncing}
-              onChange={(event) => setTargetFile(event.currentTarget.value)}
+              onChange={(event) => selectTargetFile(event.currentTarget.value)}
             >
               {openableFiles.map((file) => (
                 <option key={file.path} value={file.path}>{file.path}</option>
@@ -252,6 +317,24 @@ export function CompareSyncModal({
             </select>
             <Icon name="chevron-down" size={16}/>
           </div>
+          {result?.targetFile === targetFile && result.targetYamlDocuments && result.targetYamlDocuments.length > 1 && (
+            <div class="select-wrap" style={{ marginTop: "6px" }}>
+              <select
+                aria-label={t("compare.targetDocLabel")}
+                class="control"
+                value={String(targetDocIndex)}
+                disabled={syncing}
+                onChange={(event) => setTargetDocIndex(Number(event.currentTarget.value) || 0)}
+              >
+                {result.targetYamlDocuments.map((doc) => (
+                  <option key={doc.index} value={String(doc.index)}>
+                    #{doc.index + 1} · {doc.label || t("editor.yamlDocFallback", { index: doc.index + 1 })}
+                  </option>
+                ))}
+              </select>
+              <Icon name="chevron-down" size={16}/>
+            </div>
+          )}
         </div>
       </div>
 

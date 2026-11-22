@@ -594,8 +594,15 @@ export function coerceTomlValue(
     return special;
   }
   if (Array.isArray(current) && Array.isArray(value)) {
+    const homogeneousWitness = current.length > 0 && (
+      current.every((item) => item instanceof TomlDate)
+      || current.every((item) => typeof item === "bigint")
+      || current.every((item) => typeof item === "number" && !Number.isFinite(item))
+    )
+      ? current[0]
+      : undefined;
     return value.map((item, index) => {
-      const currentItem = current[index] ?? current[0];
+      const currentItem = index < current.length ? current[index] : homogeneousWitness;
       const converted = coerceTomlValue(currentItem, item, [...segments, index], false);
       if (converted === TOML_DELETE) {
         throw new ConfuiError("SAVE_ERROR", "TOML 数组中的日期或特殊数值不能为空");

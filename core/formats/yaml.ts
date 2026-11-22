@@ -15,7 +15,7 @@ import type { ConfigChange, PathSegment, YamlDocumentSummary } from "../../share
 import { containsSecretValuePattern, setSafeProperty } from "../../shared/validation.ts";
 import { ConfuiError } from "../errors.ts";
 import { deleteAtPath, getAtPath, setAtPath } from "../paths.ts";
-import { isRecordObject, normalizeLineEndings, stripBom } from "./common.ts";
+import { isRecordObject, normalizeLineEndings, stripBom, UTF8_BOM } from "./common.ts";
 import type { UpdateConfigResult } from "./types.ts";
 
 const YAML_DELETE = Symbol("yaml-delete");
@@ -56,10 +56,24 @@ export function parseYamlDocuments(rawSource: string): ParsedYamlDocument[] {
 
   const hasSiblingProfiles = values.some((val) => Boolean(extractSpringProfile(val)));
 
+  const spanEnds: number[] = docs.map((doc, index) => {
+    if (index === docs.length - 1) return source.length;
+    let end = doc.range?.[2] ?? source.length;
+    const nextStart = docs[index + 1]?.range?.[0] ?? source.length;
+    // Empty YAML documents (`---\n---`) end their `range[2]` right after `---`,
+    // BEFORE the terminating line break. Include that line break in this doc's
+    // span so splicing the following document never merges `---` + `---` -> `------`.
+    if (end < nextStart) {
+      if (source.startsWith("\r\n", end) && end + 2 <= nextStart) end += 2;
+      else if (source.startsWith("\n", end) && end + 1 <= nextStart) end += 1;
+    }
+    return Math.min(end, nextStart);
+  });
+
   return docs.map((doc, index) => {
     const value = values[index]!;
-    const prevEnd = index === 0 ? 0 : (docs[index - 1]!.range?.[2] ?? 0);
-    const spanEnd = index === docs.length - 1 ? source.length : (doc.range?.[2] ?? source.length);
+    const prevEnd = index === 0 ? 0 : spanEnds[index - 1]!;
+    const spanEnd = spanEnds[index]!;
     const spanStart = Math.min(prevEnd, spanEnd);
     const contentOffset = doc.range?.[0] ?? spanStart;
     const startLine = lineNumberAtOffset(source, contentOffset);
@@ -108,10 +122,12 @@ export function stringifyYaml(value: unknown, originalText = ""): string {
 }
 
 export function updateYaml(
-  source: string,
+  rawSource: string,
   changes: readonly ConfigChange[],
   documentIndex = 0,
 ): UpdateConfigResult {
+  const bom = rawSource.startsWith(UTF8_BOM) ? UTF8_BOM : "";
+  const source = bom ? rawSource.slice(1) : rawSource;
   const docs = parseYamlDocuments(source);
   if (!Number.isSafeInteger(documentIndex) || documentIndex < 0 || documentIndex >= docs.length) {
     throw new ConfuiError("INVALID_INPUT", "YAML 文档索引超出范围");
@@ -120,6 +136,7 @@ export function updateYaml(
   const isMultiDoc = docs.length > 1;
   const targetSlice = isMultiDoc ? source.slice(target.spanStart, target.spanEnd) : source;
   const preserveDocStart = (isMultiDoc && documentIndex > 0) || target.document.directives?.docStart === true;
+  const preserveDocEnd = target.document.directives?.docEnd === true;
 
   const updatedSliceResult = updateSingleYamlDocument(
     target.document,
@@ -127,31 +144,43 @@ export function updateYaml(
     targetSlice,
     changes,
     preserveDocStart,
+    preserveDocEnd,
     isMultiDoc && documentIndex < docs.length - 1,
   );
 
   if (!isMultiDoc) {
     const normalized = normalizeLineEndings(updatedSliceResult.output, source);
     parseYamlDocuments(normalized);
-    return { output: normalized, warnings: updatedSliceResult.warnings };
+    return { output: bom + normalized, warnings: updatedSliceResult.warnings };
   }
 
   let sliceText = updatedSliceResult.output;
   if (documentIndex > 0 && !/^(?:[ \t]*(?:#[^\r\n]*)?\r?\n)*[ \t]*---(?:\s|$)/.test(sliceText)) {
     sliceText = `---\n${sliceText}`;
   }
+  const prefix = source.slice(0, target.spanStart);
+  const suffix = source.slice(target.spanEnd);
+  if (
+    prefix.length > 0
+    && !prefix.endsWith("\n")
+    && !prefix.endsWith("\r")
+    && !sliceText.startsWith("\n")
+    && !sliceText.startsWith("\r")
+  ) {
+    sliceText = `\n${sliceText}`;
+  }
   if (documentIndex < docs.length - 1 && !sliceText.endsWith("\n")) {
     sliceText += "\n";
   }
 
   // Splice ONLY the edited document's span; all sibling documents remain 100% byte-for-byte untouched.
-  const combined = `${source.slice(0, target.spanStart)}${sliceText}${source.slice(target.spanEnd)}`;
+  const combined = `${prefix}${sliceText}${suffix}`;
   const normalized = normalizeLineEndings(combined, source);
   const verified = parseYamlDocuments(normalized);
   if (verified.length !== docs.length) {
     throw new ConfuiError("SAVE_ERROR", "多文档 YAML 结构校验失败，已取消保存");
   }
-  return { output: normalized, warnings: updatedSliceResult.warnings };
+  return { output: bom + normalized, warnings: updatedSliceResult.warnings };
 }
 
 function updateSingleYamlDocument(
@@ -160,6 +189,7 @@ function updateSingleYamlDocument(
   sliceSource: string,
   changes: readonly ConfigChange[],
   preserveDocStart: boolean,
+  preserveDocEnd: boolean,
   hasFollowingDocument: boolean,
 ): UpdateConfigResult {
   const crossesAlias = changes.some((change) => pathCrossesAlias(doc, change.segments));
@@ -170,6 +200,7 @@ function updateSingleYamlDocument(
       changes,
       "本次保存涉及 YAML 锚点别名展开，已重新排版文件（键和值已保留，部分注释可能调整）。",
       preserveDocStart,
+      preserveDocEnd,
     );
   }
 
@@ -197,6 +228,9 @@ function updateSingleYamlDocument(
     if (preserveDocStart && doc.directives) {
       doc.directives.docStart = true;
     }
+    if (preserveDocEnd && doc.directives) {
+      doc.directives.docEnd = true;
+    }
     let rawOutput = doc.toString({ indent, lineWidth: 100 });
     if (hasFollowingDocument && !rawOutput.endsWith("\n")) rawOutput += "\n";
     // Verify the serialized document still parses cleanly without errors or cycles.
@@ -210,6 +244,7 @@ function updateSingleYamlDocument(
       changes,
       "本次保存涉及复杂 YAML 结构，已重新排版文件（键和值已保留，原有注释可能无法完整保留）。",
       preserveDocStart,
+      preserveDocEnd,
     );
   }
 }
@@ -220,6 +255,7 @@ function fallbackUpdateYaml(
   changes: readonly ConfigChange[],
   warning: string,
   preserveDocStart = false,
+  preserveDocEnd = false,
 ): UpdateConfigResult {
   // Detach shared YAML alias object references before mutating so editing one
   // aliased path does not silently overwrite the anchor or sibling aliases.
@@ -229,9 +265,11 @@ function fallbackUpdateYaml(
     else applyYamlChange(next, change.segments, change.value);
   }
   const serialized = stringifyYaml(next, source);
-  const prefixed = preserveDocStart ? `---\n${serialized}` : serialized;
+  const body = serialized.endsWith("\n") ? serialized : `${serialized}\n`;
+  const withStart = preserveDocStart ? `---\n${body}` : body;
+  const withEnd = preserveDocEnd ? `${withStart}...\n` : withStart;
   return {
-    output: normalizeLineEndings(prefixed, source),
+    output: normalizeLineEndings(withEnd, source),
     warnings: [warning],
   };
 }
@@ -321,8 +359,15 @@ function cloneWithoutSharedRefs(value: unknown): unknown {
 
 function applyCstUpdate(doc: Document, segments: readonly PathSegment[], value: unknown): void {
   if (!segments.length) return;
-  if (doc.contents === null || doc.contents === undefined) {
-    doc.contents = doc.createNode(typeof segments[0] === "number" ? [] : {});
+  if (doc.contents === null || doc.contents === undefined || (isScalar(doc.contents) && doc.contents.value === null)) {
+    const prevCommentBefore = isNode(doc.contents) ? doc.contents.commentBefore : undefined;
+    const prevComment = isNode(doc.contents) ? doc.contents.comment : undefined;
+    const rootNode = doc.createNode(typeof segments[0] === "number" ? [] : {});
+    const mergedComment = [prevCommentBefore, prevComment].filter(Boolean).join("\n");
+    if (mergedComment) {
+      rootNode.commentBefore = mergedComment;
+    }
+    doc.contents = rootNode;
   }
   const existing = doc.getIn(segments, true);
   if (isScalar(existing) && isYamlScalarJsValue(value)) {
@@ -375,6 +420,9 @@ function pathCrossesAlias(doc: Document, segments: readonly PathSegment[]): bool
       current = pair.value;
     } else if (isSeq(current) && typeof segment === "number") {
       current = current.items[segment];
+    } else if (isScalar(current) && current.value === null) {
+      // Empty YAML document (`---`) or empty mapping entry (`key:`) is a null Scalar in `yaml` v2, not an alias.
+      return false;
     } else {
       return isAlias(current) || (!isCollection(current) && current !== null && current !== undefined);
     }

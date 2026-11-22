@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppSettings,
+  CompareConfigOptions,
   ConfigChange,
   ConfuiAPI,
   FileChangedEvent,
@@ -10,6 +11,7 @@ import type {
   Locale,
   PathSegment,
   ProjectSearchOptions,
+  RedactedExportOptions,
   RestoreBackupPreview,
   SavePreview,
   TestAIRequest,
@@ -34,19 +36,20 @@ const api: ConfuiAPI = {
     ipcRenderer.invoke("confui:restoreBackup", root, preview),
   createFromExample: (root: string, exampleFile: string, targetFile?: string) =>
     ipcRenderer.invoke("confui:createFromExample", root, exampleFile, targetFile),
-  compareConfigs: (root: string, sourceFile: string, targetFile: string) =>
-    ipcRenderer.invoke("confui:compareConfigs", root, sourceFile, targetFile),
+  compareConfigs: (root: string, sourceFile: string, targetFile: string, options?: CompareConfigOptions) =>
+    ipcRenderer.invoke("confui:compareConfigs", root, sourceFile, targetFile, options),
   previewSyncConfig: (
     root: string,
     sourceFile: string,
     targetFile: string,
     selectedSegments: PathSegment[][],
     expectedTargetVersion: FileVersion,
-  ) => ipcRenderer.invoke("confui:previewSyncConfig", root, sourceFile, targetFile, selectedSegments, expectedTargetVersion),
-  previewRedactedExport: (root: string, file: string, secretPaths?: PathSegment[][]) =>
-    ipcRenderer.invoke("confui:previewRedactedExport", root, file, secretPaths),
-  saveRedactedExport: (root: string, file: string, secretPaths?: PathSegment[][]) =>
-    ipcRenderer.invoke("confui:saveRedactedExport", root, file, secretPaths),
+    options?: CompareConfigOptions,
+  ) => ipcRenderer.invoke("confui:previewSyncConfig", root, sourceFile, targetFile, selectedSegments, expectedTargetVersion, options),
+  previewRedactedExport: (root: string, file: string, secretPaths?: PathSegment[][], options?: RedactedExportOptions) =>
+    ipcRenderer.invoke("confui:previewRedactedExport", root, file, secretPaths, options),
+  saveRedactedExport: (root: string, file: string, secretPaths?: PathSegment[][], options?: RedactedExportOptions) =>
+    ipcRenderer.invoke("confui:saveRedactedExport", root, file, secretPaths, options),
   searchProject: (root: string, query: string, options?: ProjectSearchOptions) =>
     ipcRenderer.invoke("confui:searchProject", root, query, options),
   getSettings: () => ipcRenderer.invoke("confui:getSettings"),

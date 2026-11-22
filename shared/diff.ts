@@ -2,6 +2,7 @@ import type { ConfigFormat, FieldSpec, SaveChangePreview } from "./schema.ts";
 import {
   AUTH_BEARER_BASIC_RE,
   AUTH_DIGEST_RE,
+  AUTH_TOKEN_HEADER_RE,
   collectSecretStrings,
   containsSecretValuePattern,
   JWT_TOKEN_RE,
@@ -18,6 +19,15 @@ export type DiffLineKind = "context" | "add" | "remove";
 
 export const DIFF_SECRET_MASK = "••••••••";
 
+export interface DocumentLineSecrets {
+  /** 1-based inclusive start line for this document section. */
+  startLine: number;
+  /** Optional 1-based exclusive end line for this document section. */
+  endLine?: number;
+  secretKeys?: readonly string[];
+  secretValues?: readonly string[];
+}
+
 export interface MaskUnifiedDiffOptions {
   /** Optional format hint (e.g. `properties`, `toml`, `yaml`, `jsonc`) for format-accurate masking. */
   format?: ConfigFormat;
@@ -29,6 +39,8 @@ export interface MaskUnifiedDiffOptions {
   secretKeys?: readonly string[];
   /** Explicit known secret values (length >= 6) used as fallback redaction for multi-line values. */
   secretValues?: readonly string[];
+  /** Optional per-document secret scopes (used for multi-document YAML isolation). */
+  documentSecrets?: readonly DocumentLineSecrets[];
   /** Replacement mask string (defaults to `••••••••`). */
   mask?: string;
 }
@@ -278,6 +290,8 @@ const PROPERTIES_KV_LINE_RE = /^(\s*)((?:\\.|[^:=\s#!])+?)(\s*(?:[:=]|\s)\s*)(.*
 const WHITESPACE_SECRET_KV_RE = /^(\s*)((?:\\.|[A-Za-z_][\w.-]*))(\s+)(\S.*)$/;
 const YAML_SEQ_ITEM_RE = /^(\s*-\s+)(.*)$/;
 const COMMENT_LINE_RE = /^\s*(?:#|;|\/\/|\/\*|\*\/)/;
+const NPMRC_KEY_LINE_RE = /^\s*\/\/[^\s=\r\n]+\/[^=\r\n]*=/;
+const AUTH_SCHEME_VALUE_RE = /^((?:Bearer|Basic|Digest|Token|ApiKey|API-Key|JWT|OAuth)\s+)(.+)$/i;
 
 interface MaskConfig {
   mask: string;
@@ -391,15 +405,51 @@ export function maskDocumentLines(
   text: string,
   options: MaskUnifiedDiffOptions = {},
 ): MaskedDocumentLinesResult {
-  const config = buildMaskConfig(options);
+  const baseConfig = buildMaskConfig(options);
   const rawLines = text.replace(/\r\n/g, "\n").split("\n");
-  const state = createInitialState();
+  const scopedSections = options.documentSecrets?.length
+    ? [...options.documentSecrets]
+      .sort((left, right) => left.startLine - right.startLine)
+      .map((section) => ({
+        startLine: section.startLine,
+        endLine: section.endLine,
+        config: buildMaskConfig({
+          format: options.format,
+          mask: options.mask,
+          secretKeys: [...(options.secretKeys ?? []), ...(section.secretKeys ?? [])],
+          secretValues: [...(options.secretValues ?? []), ...(section.secretValues ?? [])],
+        }),
+      }))
+    : undefined;
+
+  let state = createInitialState();
+  let activeSectionIdx = -1;
   const maskedLines: string[] = new Array(rawLines.length);
   const maskedLineFlags: boolean[] = new Array(rawLines.length);
   let maskedLineCount = 0;
 
   for (let i = 0; i < rawLines.length; i += 1) {
     const rawLine = rawLines[i] ?? "";
+    let config = baseConfig;
+    if (scopedSections) {
+      const lineNumber = i + 1;
+      let matchedIdx = -1;
+      for (let s = 0; s < scopedSections.length; s += 1) {
+        const sec = scopedSections[s]!;
+        if (lineNumber >= sec.startLine && (sec.endLine === undefined || lineNumber < sec.endLine)) {
+          matchedIdx = s;
+        }
+      }
+      if (matchedIdx !== activeSectionIdx) {
+        if (activeSectionIdx !== -1 && matchedIdx !== -1) {
+          state = createInitialState();
+        }
+        activeSectionIdx = matchedIdx;
+      }
+      if (matchedIdx >= 0) {
+        config = scopedSections[matchedIdx]!.config;
+      }
+    }
     const result = maskLineWithState(rawLine, state, config);
     maskedLines[i] = result.text;
     maskedLineFlags[i] = result.masked;
@@ -593,8 +643,16 @@ function maskLineWithState(
     }
   }
 
-  // 7. Full-line comments: never treat as KV assignments, still redact leaked patterns/values
-  if (COMMENT_LINE_RE.test(text) || (format === "properties" && /^\s*!/.test(text))) {
+  // 7. Full-line comments: never treat as KV assignments, still redact leaked patterns/values.
+  // In INI / `.npmrc`, `//host/:_authToken=...` starts with `//` and is a real key assignment, NOT a comment.
+  const isCommentLine = format === "ini"
+    ? /^\s*[#;]/.test(text)
+    : format === "properties"
+      ? /^\s*[#!]/.test(text)
+      : format === "yaml" || format === "toml" || format === "env"
+        ? /^\s*#/.test(text)
+        : COMMENT_LINE_RE.test(text) && !NPMRC_KEY_LINE_RE.test(text);
+  if (isCommentLine) {
     const output = applyFallbackRedactions(text, mask, extraValues);
     return { text: output, masked: output !== text };
   }
@@ -674,7 +732,8 @@ function maskSecretAssignment(
   }
 
   // Inline or multi-line bracketed container (`[...]` / `{...}`)
-  if (trimmedRest.startsWith("[") || trimmedRest.startsWith("{")) {
+  const isNpmrcKey = format === "ini" && rawKey.trim().startsWith("//");
+  if (!isNpmrcKey && (trimmedRest.startsWith("[") || trimmedRest.startsWith("{"))) {
     const container = maskSecretContainerLine(rest, mask, [], format);
     if (container.nextStack.length > 0) state.secretContainerStack = container.nextStack;
     if (container.openedTripleQuote) state.tomlTripleQuote = container.openedTripleQuote;
@@ -693,8 +752,54 @@ function maskSecretAssignment(
     return `${prefix}${rawKey}${separator}${rest}`;
   }
 
-  const maskedRest = maskAssignedValue(rest, mask, { format, extraValues });
+  const maskedRest = maskAssignedValue(rest, mask, { format, extraValues, rawKey });
   return `${prefix}${rawKey}${separator}${maskedRest}`;
+}
+
+function matchIniKeyValueLine(
+  text: string,
+): { prefix: string; rawKey: string; separator: string; rest: string } | undefined {
+  let escaped = false;
+  let firstColon: number | undefined;
+  let sepIndex: number | undefined;
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === "=") {
+      if (firstColon !== undefined && /\s/.test(text[firstColon + 1] ?? "")) {
+        sepIndex = firstColon;
+      } else {
+        sepIndex = index;
+      }
+      break;
+    }
+    if (ch === ":" && firstColon === undefined && !text.startsWith("//", index + 1)) {
+      firstColon = index;
+    }
+  }
+  if (sepIndex === undefined) sepIndex = firstColon;
+  if (sepIndex === undefined) return undefined;
+  const before = text.slice(0, sepIndex);
+  const prefix = before.match(/^\s*/)?.[0] ?? "";
+  const keyWithTrailing = before.slice(prefix.length);
+  const rawKey = keyWithTrailing.replace(/\s+$/, "");
+  if (!rawKey) return undefined;
+  const keyTrailingWs = keyWithTrailing.slice(rawKey.length);
+  const after = text.slice(sepIndex + 1);
+  const valueLeadingWs = after.match(/^\s*/)?.[0] ?? "";
+  return {
+    prefix,
+    rawKey,
+    separator: `${keyTrailingWs}${text[sepIndex]!}${valueLeadingWs}`,
+    rest: after.slice(valueLeadingWs.length),
+  };
 }
 
 function matchKeyValueLine(
@@ -702,6 +807,9 @@ function matchKeyValueLine(
   format: ConfigFormat | undefined,
   extraKeys: ReadonlySet<string>,
 ): { prefix: string; rawKey: string; separator: string; rest: string } | undefined {
+  if (format === "ini" || NPMRC_KEY_LINE_RE.test(text)) {
+    return matchIniKeyValueLine(text);
+  }
   if (format === "properties") {
     const propMatch = text.match(PROPERTIES_KV_LINE_RE);
     if (propMatch) {
@@ -809,9 +917,9 @@ function findClosingQuote(text: string, openIdx: number, quote: string, allowEsc
 function maskAssignedValue(
   rest: string,
   mask: string,
-  options: { format?: ConfigFormat; extraValues?: readonly string[] } = {},
+  options: { format?: ConfigFormat; extraValues?: readonly string[]; rawKey?: string } = {},
 ): string {
-  const { format, extraValues = [] } = options;
+  const { format, extraValues = [], rawKey } = options;
   const trimmed = rest.trim();
   if (!trimmed || trimmed === "null" || trimmed === "~") return rest;
 
@@ -826,9 +934,17 @@ function maskAssignedValue(
     if (end === 1) return rest; // Empty quoted string "" or ''
     const inner = end > 1 ? body.slice(1, end) : body.slice(1);
     const tail = end > 1 ? body.slice(end + 1) : "";
-    const authInside = inner.match(/^((?:Bearer|Basic|Digest)\s+)(.+)$/i);
+    const authInside = inner.match(AUTH_SCHEME_VALUE_RE);
     const maskedInner = authInside ? `${authInside[1]}${mask}` : mask;
     return `${leadingWs}${quote}${maskedInner}${quote}${tail}`;
+  }
+
+  // `.npmrc` scoped credential lines (`//host/:_authToken=...`, `//host/:_password=...`)
+  // must mask the entire unquoted value regardless of spaces, commas, semicolons, or hashes.
+  const isNpmrcKey = Boolean(rawKey?.trim().startsWith("//"));
+  if (isNpmrcKey) {
+    const trailingWs = body.match(/\s*$/)?.[0] ?? "";
+    return `${leadingWs}${mask}${trailingWs}`;
   }
 
   // Unquoted scalar value: compute inline comment boundary safely without splitting inside values
@@ -845,13 +961,15 @@ function maskAssignedValue(
 
   const valuePart = commentIdx >= 0 ? body.slice(0, commentIdx) : body;
   const commentPart = commentIdx >= 0 ? body.slice(commentIdx) : "";
-  const trailingMatch = valuePart.match(/^(.+?)(\s*,?\s*)$/);
+  const trailingMatch = format === "ini" || format === "env" || format === "properties"
+    ? valuePart.match(/^(.+?)(\s*)$/)
+    : valuePart.match(/^(.+?)(\s*,?\s*)$/);
   if (!trailingMatch) return rest;
   const coreValue = trailingMatch[1]!.trim();
   if (!coreValue || coreValue === "null" || coreValue === "~") return rest;
 
-  // Preserve leading Authorization scheme (Bearer / Basic / Digest) and mask entire credential payload
-  const authMatch = coreValue.match(/^((?:Bearer|Basic|Digest)\s+)(.+)$/i);
+  // Preserve leading Authorization scheme (Bearer / Basic / Digest / Token ...) and mask entire credential payload
+  const authMatch = coreValue.match(AUTH_SCHEME_VALUE_RE);
   if (authMatch) {
     return `${leadingWs}${authMatch[1]}${mask}${trailingMatch[2]}${commentPart}`;
   }
@@ -968,7 +1086,7 @@ function maskSecretContainerLine(
         out += token;
       } else {
         const inner = line.slice(i + 1, end);
-        const authInside = inner.match(/^((?:Bearer|Basic|Digest)\s+)(.+)$/i);
+        const authInside = inner.match(AUTH_SCHEME_VALUE_RE);
         out += authInside ? `${ch}${authInside[1]}${mask}${ch}` : `${ch}${mask}${ch}`;
       }
       i = end + 1;
@@ -1071,9 +1189,10 @@ function applyPatternRedactions(line: string, mask: string): string {
     .replace(URL_CREDENTIALS_RE, `$1${mask}:${mask}@`)
     .replace(AUTH_DIGEST_RE, `$1${mask}`)
     .replace(AUTH_BEARER_BASIC_RE, `$1${mask}`)
+    .replace(AUTH_TOKEN_HEADER_RE, `$1${mask}`)
     .replace(INLINE_KEY_VALUE_SECRET_RE, (_match, prefix: string, value: string) => {
       if (value.includes(mask)) return `${prefix}${value}`;
-      if (/auth(?:orization)?/i.test(prefix) && /^(?:Bearer|Basic|Digest)$/i.test(value)) {
+      if (/auth(?:orization)?/i.test(prefix) && /^(?:Bearer|Basic|Digest|Token|ApiKey|API-Key|JWT|OAuth)$/i.test(value)) {
         return `${prefix}${value}`;
       }
       if (/^(?:[|>])(?:[-+]\d*|\d*[-+]?)?$/.test(value.trim())) return `${prefix}${value}`;

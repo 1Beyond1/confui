@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type {
   AppSettings,
   BackupStatus,
@@ -17,6 +17,7 @@ import type {
   RecentProject,
   RestoreBackupPreview,
   SavePreview,
+  ScopedSecretPath,
   ThemePreference,
 } from "../../shared/schema.ts";
 import { normalizeGithubUrl } from "../../shared/validation.ts";
@@ -42,6 +43,7 @@ import {
   initializeEditorValues,
   isEditableKeyboardTarget,
   isEditorDirty,
+  isFieldModified,
   needsJsonEditor,
   reconcileSavedState,
   validationErrors,
@@ -108,7 +110,7 @@ export function App() {
   const [compareOpen, setCompareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [focusFieldRequest, setFocusFieldRequest] = useState<{ file: string; path: string; segments?: PathSegment[]; token: number }>();
+  const [focusFieldRequest, setFocusFieldRequest] = useState<{ file: string; documentIndex?: number; path: string; segments?: PathSegment[]; token: number }>();
   const [focusLineRequest, setFocusLineRequest] = useState<{ file: string; line: number; token: number }>();
   const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [settingsDirty, setSettingsDirty] = useState(false);
@@ -118,7 +120,19 @@ export function App() {
   const [appVersion, setAppVersion] = useState("");
   const toastTimer = useRef<number>();
   const openSequence = useRef(0);
+  const focusTokenRef = useRef(0);
   const mainContentRef = useRef<HTMLDivElement>(null);
+
+  const nextFocusToken = (): number => {
+    focusTokenRef.current += 1;
+    return focusTokenRef.current;
+  };
+  const consumeFocusFieldRequest = useCallback((token: number) => {
+    setFocusFieldRequest((current) => (current?.token === token ? undefined : current));
+  }, []);
+  const consumeFocusLineRequest = useCallback((token: number) => {
+    setFocusLineRequest((current) => (current?.token === token ? undefined : current));
+  }, []);
 
   const locale: Locale = previewLocale ?? settings?.locale ?? "zh-CN";
   const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) =>
@@ -139,6 +153,10 @@ export function App() {
   const errors = useMemo(
     () => schema ? validationErrors(allFields, values, schema.format, locale) : new Map<string, string>(),
     [schema, allFields, values, locale],
+  );
+  const modifiedCount = useMemo(
+    () => (schema ? allFields.filter((field) => isFieldModified(field, values[fieldKey(field)])).length : 0),
+    [schema, allFields, values],
   );
   const dirty = useMemo(
     () => (schema ? isEditorDirty(allFields, values) : false),
@@ -175,6 +193,32 @@ export function App() {
       .map((field) => [...field.segments]),
     [allFields],
   );
+
+  const scopedSecretPathsForExport = useMemo<ScopedSecretPath[] | undefined>(() => {
+    if (!schema || schema.format !== "yaml" || !schema.yamlDocuments || schema.yamlDocuments.length <= 1) {
+      return undefined;
+    }
+    const activeDocIdx = schema.activeDocumentIndex ?? 0;
+    const seen = new Set<string>();
+    const scoped: ScopedSecretPath[] = [];
+    const pushScoped = (docIdx: number, segments: readonly PathSegment[]): void => {
+      const id = `${docIdx}:${JSON.stringify(segments)}`;
+      if (seen.has(id)) return;
+      seen.add(id);
+      scoped.push({ documentIndex: docIdx, segments: [...segments] });
+    };
+    for (const meta of schema.documentSecrets ?? []) {
+      for (const segments of meta.secretPaths) {
+        pushScoped(meta.documentIndex, segments);
+      }
+    }
+    for (const field of allFields) {
+      if (field.secret || field.type === "secret") {
+        pushScoped(activeDocIdx, field.segments);
+      }
+    }
+    return scoped;
+  }, [schema, allFields]);
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -381,6 +425,8 @@ export function App() {
     }
     const sequence = ++openSequence.current;
     setBusy("infer");
+    setFocusFieldRequest(undefined);
+    setFocusLineRequest(undefined);
     setActiveFile(file);
     setSchema(undefined);
     setBackupStatus(undefined);
@@ -405,12 +451,13 @@ export function App() {
       if (focusTarget?.focusFieldPath && !focusTarget.openRaw) {
         setFocusFieldRequest({
           file: result.data.file,
+          documentIndex: result.data.activeDocumentIndex ?? 0,
           path: focusTarget.focusFieldPath,
           segments: focusTarget.focusFieldSegments,
-          token: Date.now(),
+          token: nextFocusToken(),
         });
       } else if (focusTarget?.focusLine && focusTarget.openRaw) {
-        setFocusLineRequest({ file: result.data.file, line: focusTarget.focusLine, token: Date.now() });
+        setFocusLineRequest({ file: result.data.file, line: focusTarget.focusLine, token: nextFocusToken() });
       }
     } catch (error) {
       if (sequence === openSequence.current) {
@@ -441,15 +488,16 @@ export function App() {
       if (action.openRaw) {
         setEditorTab("raw");
         if (action.focusLine) {
-          setFocusLineRequest({ file: action.file.path, line: action.focusLine, token: Date.now() });
+          setFocusLineRequest({ file: action.file.path, line: action.focusLine, token: nextFocusToken() });
         }
       } else if (action.focusFieldPath) {
         setEditorTab("form");
         setFocusFieldRequest({
           file: action.file.path,
+          documentIndex: schema?.activeDocumentIndex ?? 0,
           path: action.focusFieldPath,
           segments: action.focusFieldSegments,
-          token: Date.now(),
+          token: nextFocusToken(),
         });
       }
       return;
@@ -509,6 +557,8 @@ export function App() {
         return;
       case "home":
         window.confui.stopWatching();
+        setFocusFieldRequest(undefined);
+        setFocusLineRequest(undefined);
         setExternalChange(false);
         setView("home");
         return;
@@ -534,7 +584,7 @@ export function App() {
   }
 
   async function beginSave(continuation?: PendingAction): Promise<void> {
-    if (!schema || !project || !changes.length) return;
+    if (!schema || !project) return;
     if (errors.size) {
       notify(t("toast.fixFieldErrors", { count: errors.size }), "error");
       setEditorTab("form");
@@ -542,15 +592,17 @@ export function App() {
       if (firstInvalid) {
         setFocusFieldRequest({
           file: schema.file,
+          documentIndex: schema.activeDocumentIndex ?? 0,
           path: firstInvalid.path,
           segments: [...firstInvalid.segments],
-          token: Date.now(),
+          token: nextFocusToken(),
         });
       } else {
         window.setTimeout(() => document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus(), 0);
       }
       return;
     }
+    if (!changes.length) return;
     setBusy("preview");
     try {
       const result = await window.confui.previewSave(
@@ -586,12 +638,20 @@ export function App() {
       const result = await window.confui.saveConfig(project.root, savePreview);
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       const isActiveTarget = Boolean(schema && savePreview.file === schema.file);
-      const hasUnlistedKeys = isActiveTarget && savePreview.operations.some(
+      const sameDocument = !isActiveTarget
+        || (savePreview.documentIndex ?? 0) === (schema?.activeDocumentIndex ?? 0);
+      const hasUnlistedKeys = isActiveTarget && sameDocument && savePreview.operations.some(
         (operation) => !allFields.some((field) => fieldKey(field) === JSON.stringify(operation.segments)),
       );
       setSavePreview(undefined);
       const backupName = result.data.backupPath.split(/[\\/]/).at(-1) ?? ".bak";
-      if (isActiveTarget && schema && !hasUnlistedKeys) {
+      if (isActiveTarget && schema && !sameDocument) {
+        const reconciled = reconcileSavedState(schema, values, customFields, savePreview, result.data.version);
+        setSchema(reconciled.schema);
+        setExternalChange(false);
+        void refreshBackupStatus(project.root, schema.file);
+        notify(t("toast.savedWithBackup", { backup: backupName }), "success");
+      } else if (isActiveTarget && schema && !hasUnlistedKeys) {
         const reconciled = reconcileSavedState(schema, values, customFields, savePreview, result.data.version);
         setSchema(reconciled.schema);
         history.reset({ values: reconciled.values, customFields: reconciled.customFields });
@@ -601,7 +661,9 @@ export function App() {
       } else if (isActiveTarget && schema && activeFile && !dirty) {
         setBusy(null);
         notify(t("toast.savedWithBackup", { backup: backupName }), "success");
-        await loadFile(activeFile, project.root, githubInput);
+        await loadFile(activeFile, project.root, githubInput, locale, {
+          documentIndex: schema.activeDocumentIndex,
+        });
       } else if (isActiveTarget && schema) {
         const reconciled = reconcileSavedState(schema, values, customFields, savePreview, result.data.version);
         setSchema(reconciled.schema);
@@ -646,7 +708,9 @@ export function App() {
       setRestorePreview(undefined);
       setBusy(null);
       notify(t("toast.restoredFromBackup", { file: restoredFile }), "success");
-      await loadFile(activeFile, project.root, githubInput);
+      await loadFile(activeFile, project.root, githubInput, locale, {
+        documentIndex: schema?.activeDocumentIndex,
+      });
     } catch (error) {
       notify(errorMessage(error, t("common.actionFailed")), "error");
       setBusy(null);
@@ -838,9 +902,10 @@ export function App() {
     setEditorTab("form");
     setFocusFieldRequest({
       file: schema.file,
+      documentIndex: schema.activeDocumentIndex ?? 0,
       path: entry.path,
       segments: [...entry.segments],
-      token: Date.now(),
+      token: nextFocusToken(),
     });
   }
 
@@ -1073,7 +1138,7 @@ export function App() {
                     busy={busy === "preview" || busy === "save"}
                     onClick={() => void beginSave()}
                   >
-                    {changes.length ? t("topbar.saveCount", { count: changes.length }) : t("topbar.saved")}
+                    {modifiedCount ? t("topbar.saveCount", { count: modifiedCount }) : t("topbar.saved")}
                   </Button>
                 </>
               )}
@@ -1200,7 +1265,14 @@ export function App() {
                     aiAvailable={settings.ai.enabled && Boolean(settings.ai.baseUrl.trim() && settings.ai.model.trim())}
                     onExplain={askAiAboutField}
                     onChange={updateField}
-                    focusRequest={focusFieldRequest?.file === schema.file ? focusFieldRequest : undefined}
+                    focusRequest={
+                      focusFieldRequest
+                      && focusFieldRequest.file === schema.file
+                      && (focusFieldRequest.documentIndex ?? 0) === (schema.activeDocumentIndex ?? 0)
+                        ? focusFieldRequest
+                        : undefined
+                    }
+                    onConsumeFocusRequest={consumeFocusFieldRequest}
                   />
                 ) : (
                   <div class="empty-card">
@@ -1223,15 +1295,16 @@ export function App() {
                 schema={schema}
                 fields={allFields}
                 focusLine={focusLineRequest?.file === schema.file ? focusLineRequest : undefined}
+                onConsumeFocusLine={consumeFocusLineRequest}
               />
             )}
           </div>
 
-          {view === "editor" && schema && changes.length > 0 && (
+          {view === "editor" && schema && (changes.length > 0 || dirty) && (
             <div class="editor-savebar">
               <div>
                 <i/>
-                <strong>{t("savebar.unsavedCount", { count: changes.length })}</strong>
+                <strong>{t("savebar.unsavedCount", { count: Math.max(changes.length, modifiedCount) })}</strong>
                 {errors.size > 0 && <span>{t("savebar.errorCount", { count: errors.size })}</span>}
               </div>
               <div>
@@ -1245,7 +1318,7 @@ export function App() {
                 <Button
                   variant="primary"
                   icon="save"
-                  disabled={errors.size > 0 || busy !== null}
+                  disabled={!changes.length || errors.size > 0 || busy !== null}
                   busy={busy === "preview"}
                   onClick={() => void beginSave()}
                 >
@@ -1306,6 +1379,7 @@ export function App() {
             openableFiles={openableFiles}
             envGroups={project.envGroups ?? []}
             activeFilePath={activeFile?.path}
+            activeDocumentIndex={schema?.activeDocumentIndex}
             activeFileDirty={dirty}
             onClose={() => setCompareOpen(false)}
             onPreviewReady={(preview) => {
@@ -1324,6 +1398,8 @@ export function App() {
             projectRoot={project.root}
             file={schema.file}
             secretPaths={secretPathsForExport}
+            documentIndex={schema.activeDocumentIndex}
+            scopedSecretPaths={scopedSecretPathsForExport}
             onClose={() => setExportOpen(false)}
             onToast={notify}
           />
@@ -1347,7 +1423,7 @@ export function App() {
         {pendingAction && (
           <UnsavedConfigModal
             kind={schema?.kind}
-            changeCount={changes.length}
+            changeCount={Math.max(changes.length, modifiedCount)}
             onCancel={() => setPendingAction(undefined)}
             onDiscard={discardAndContinue}
             onSaveAndContinue={saveAndContinue}

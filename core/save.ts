@@ -4,6 +4,7 @@ import { basename, dirname, extname, join, relative, resolve, sep } from "node:p
 import { isDeepStrictEqual } from "node:util";
 import type {
   BackupStatus,
+  CompareConfigOptions,
   CompareEntryStatus,
   ConfigChange,
   ConfigCompareEntry,
@@ -12,12 +13,15 @@ import type {
   CreateFromExampleResult,
   FileVersion,
   PathSegment,
+  RedactedExportOptions,
   RedactedExportPreview,
   RestoreBackupPreview,
   SavePreview,
   SaveResult,
+  ScopedSecretPath,
+  YamlDocumentSummary,
 } from "../shared/schema.ts";
-import { maskDocumentLines } from "../shared/diff.ts";
+import { maskDocumentLines, type DocumentLineSecrets } from "../shared/diff.ts";
 import {
   collectSecretStrings,
   containsSecretValuePattern,
@@ -28,9 +32,18 @@ import {
 } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { HARD_FILE_LIMIT, currentVersion, hashText, readTextSnapshot } from "./files.ts";
-import { assertEditableSyntax, detectFormat, parseConfig, parseYamlDocuments, updateConfigText } from "./formats.ts";
+import {
+  assertEditableSyntax,
+  detectFormat,
+  extractYamlDocumentSummaries,
+  parseConfig,
+  parseYamlDocuments,
+  updateConfigText,
+} from "./formats.ts";
+import { stripBom } from "./formats/common.ts";
 import { isSecretPath, toEditorValue } from "./inference/common.ts";
 import { maskDocumentSecrets } from "./inference/heuristic.ts";
+import { extractSchemaDirective, inferJsonSchemaFields } from "./inference/json-schema.ts";
 import {
   ensurePathInsideProject,
   formatPath,
@@ -71,6 +84,11 @@ export async function previewSave(
   });
   const result = updateConfigText(snapshot.text, format, operations, { documentIndex });
   assertWritableSize(result.output);
+  let yamlDocuments: YamlDocumentSummary[] | undefined;
+  if (format === "yaml") {
+    const summaries = extractYamlDocumentSummaries(result.output);
+    if (summaries.length > 1) yamlDocuments = summaries;
+  }
   return {
     projectRoot,
     file: relativeFile.replace(/\\/g, "/"),
@@ -85,6 +103,7 @@ export async function previewSave(
     warnings: result.warnings,
     expectedVersion: snapshot.version,
     ...(documentIndex !== undefined ? { documentIndex } : {}),
+    ...(yamlDocuments ? { yamlDocuments } : {}),
   };
 }
 
@@ -667,7 +686,11 @@ export async function compareConfigFiles(
   root: string,
   sourceRelativeFile: string,
   targetRelativeFile: string,
+  options: CompareConfigOptions = {},
 ): Promise<ConfigCompareResult> {
+  assertOptionalDocumentIndex(options.sourceDocumentIndex);
+  assertOptionalDocumentIndex(options.targetDocumentIndex);
+
   const sourceResolved = await resolveExistingProjectPath(root, sourceRelativeFile);
   const targetResolved = await resolveExistingProjectPath(root, targetRelativeFile);
   await assertStableTarget(sourceResolved.root, sourceResolved.path);
@@ -686,8 +709,57 @@ export async function compareConfigFiles(
   assertEditableSyntax(sourceRelativeFile, sourceSnap.text);
   assertEditableSyntax(targetRelativeFile, targetSnap.text);
 
-  const sourceParsed = parseConfig(sourceSnap.text, sourceFormat);
-  const targetParsed = parseConfig(targetSnap.text, targetFormat);
+  let sourceParsed: unknown;
+  let sourceDocumentIndex: number | undefined;
+  let sourceYamlDocuments: YamlDocumentSummary[] | undefined;
+  if (sourceFormat === "yaml") {
+    const docs = parseYamlDocuments(sourceSnap.text);
+    const idx = options.sourceDocumentIndex ?? 0;
+    if (idx >= docs.length) {
+      throw new ConfuiError("INVALID_INPUT", "YAML 文档索引超出范围");
+    }
+    sourceParsed = docs[idx]!.value;
+    if (docs.length > 1) {
+      sourceDocumentIndex = idx;
+      sourceYamlDocuments = docs.map((d) => ({
+        index: d.index,
+        label: d.label,
+        kind: d.kind,
+        name: d.name,
+        profile: d.profile,
+        startLine: d.startLine,
+        keyCount: d.keyCount,
+      }));
+    }
+  } else {
+    sourceParsed = parseConfig(sourceSnap.text, sourceFormat);
+  }
+
+  let targetParsed: unknown;
+  let targetDocumentIndex: number | undefined;
+  let targetYamlDocuments: YamlDocumentSummary[] | undefined;
+  if (targetFormat === "yaml") {
+    const docs = parseYamlDocuments(targetSnap.text);
+    const idx = options.targetDocumentIndex ?? 0;
+    if (idx >= docs.length) {
+      throw new ConfuiError("INVALID_INPUT", "YAML 文档索引超出范围");
+    }
+    targetParsed = docs[idx]!.value;
+    if (docs.length > 1) {
+      targetDocumentIndex = idx;
+      targetYamlDocuments = docs.map((d) => ({
+        index: d.index,
+        label: d.label,
+        kind: d.kind,
+        name: d.name,
+        profile: d.profile,
+        startLine: d.startLine,
+        keyCount: d.keyCount,
+      }));
+    }
+  } else {
+    targetParsed = parseConfig(targetSnap.text, targetFormat);
+  }
 
   const rawSourceLeaves = flattenConfigLeaves(sourceParsed);
   const rawTargetLeaves = flattenConfigLeaves(targetParsed);
@@ -755,6 +827,10 @@ export async function compareConfigFiles(
     targetFile: targetRelativeFile.replace(/\\/g, "/"),
     sourceFormat,
     targetFormat,
+    ...(sourceDocumentIndex !== undefined ? { sourceDocumentIndex } : {}),
+    ...(targetDocumentIndex !== undefined ? { targetDocumentIndex } : {}),
+    ...(sourceYamlDocuments ? { sourceYamlDocuments } : {}),
+    ...(targetYamlDocuments ? { targetYamlDocuments } : {}),
     targetVersion: targetSnap.version,
     entries,
     summary,
@@ -772,10 +848,14 @@ export async function previewSyncFromFile(
   targetRelativeFile: string,
   selectedSegments: readonly (readonly PathSegment[])[],
   expectedTargetVersion: FileVersion,
+  options: CompareConfigOptions = {},
 ): Promise<SavePreview> {
   if (!Array.isArray(selectedSegments) || selectedSegments.length === 0 || selectedSegments.length > MAX_SAVE_CHANGES) {
     throw new ConfuiError("INVALID_INPUT", "请选择至少一项需要补齐的配置项");
   }
+  assertOptionalDocumentIndex(options.sourceDocumentIndex);
+  assertOptionalDocumentIndex(options.targetDocumentIndex);
+
   const sourceResolved = await resolveExistingProjectPath(root, sourceRelativeFile);
   await assertStableTarget(sourceResolved.root, sourceResolved.path);
   const sourceFormat = detectFormat(sourceRelativeFile);
@@ -785,7 +865,9 @@ export async function previewSyncFromFile(
   }
   const sourceSnap = await readTextSnapshot(sourceResolved.path);
   assertEditableSyntax(sourceRelativeFile, sourceSnap.text);
-  const sourceParsed = parseConfig(sourceSnap.text, sourceFormat);
+  const sourceParsed = parseConfig(sourceSnap.text, sourceFormat, {
+    documentIndex: sourceFormat === "yaml" ? options.sourceDocumentIndex : undefined,
+  });
 
   const changes: ConfigChange[] = [];
   for (const segments of selectedSegments) {
@@ -801,20 +883,34 @@ export async function previewSyncFromFile(
     changes.push({ segments: [...segments], value: adaptedValue });
   }
 
-  return previewSave(root, targetRelativeFile, changes, expectedTargetVersion);
+  return previewSave(
+    root,
+    targetRelativeFile,
+    changes,
+    expectedTargetVersion,
+    targetFormat === "yaml" ? options.targetDocumentIndex : undefined,
+  );
+}
+
+export interface GenerateRedactedExportOptions extends RedactedExportOptions {
+  enableSchemaStore?: boolean;
+  schemaStoreCacheDir?: string;
+  schemaFetcher?: typeof fetch;
 }
 
 /**
  * Generates a redacted, comment-preserving copy of a configuration file for
  * sharing or publishing as a template. Masks both structured secret fields
- * (including caller-provided schema-marked secret paths) and pattern-matched
- * inline credentials via `maskDocumentSecrets`.
+ * (including caller-provided schema-marked secret paths scoped per YAML
+ * document) and pattern-matched inline credentials via `maskDocumentSecrets`.
  */
 export async function generateRedactedExport(
   root: string,
   relativeFile: string,
   extraSecretPaths: readonly (readonly PathSegment[])[] = [],
+  options: GenerateRedactedExportOptions = {},
 ): Promise<RedactedExportPreview> {
+  assertOptionalDocumentIndex(options.documentIndex);
   const resolved = await resolveExistingProjectPath(root, relativeFile);
   await assertStableTarget(resolved.root, resolved.path);
   const format = detectFormat(relativeFile);
@@ -822,41 +918,139 @@ export async function generateRedactedExport(
 
   const snapshot = await readTextSnapshot(resolved.path);
   assertEditableSyntax(relativeFile, snapshot.text);
+  const cleanText = stripBom(snapshot.text);
+  const normalizedRelative = relativeFile.replace(/\\/g, "/");
 
   const validExtraPaths = extraSecretPaths.filter(
     (segments) => Array.isArray(segments) && segments.length > 0 && segments.length <= 32,
   );
-  const extraPathKeys = new Set<string>(validExtraPaths.map((segments) => pathKey(segments)));
-  const extraSecretKeys = new Set<string>();
-  const extraSecretValues = new Set<string>();
-  for (const segments of validExtraPaths) {
-    extraSecretKeys.add(formatPath(segments));
-    const leaf = segments.at(-1);
-    if (typeof leaf === "string" && leaf.trim()) extraSecretKeys.add(leaf);
-  }
+  const validScopedPaths: ScopedSecretPath[] = (options.scopedSecretPaths ?? []).filter(
+    (item) =>
+      Array.isArray(item.segments)
+      && item.segments.length > 0
+      && item.segments.length <= 32
+      && (item.documentIndex === undefined || (Number.isSafeInteger(item.documentIndex) && item.documentIndex >= 0)),
+  );
 
   let updatedText = snapshot.text;
-  const documentValues: Array<{ index?: number; value: unknown }> = format === "yaml"
-    ? parseYamlDocuments(snapshot.text).map((doc) => ({ index: doc.index, value: doc.value }))
+  const isYaml = format === "yaml";
+  const parsedYamlDocs = isYaml ? parseYamlDocuments(snapshot.text) : undefined;
+  const isMultiDocYaml = Boolean(parsedYamlDocs && parsedYamlDocs.length > 1);
+  const documentValues: Array<{ index?: number; value: unknown; spanStart?: number; spanEnd?: number }> = parsedYamlDocs
+    ? parsedYamlDocs.map((doc) => ({
+      index: doc.index,
+      value: doc.value,
+      spanStart: doc.spanStart,
+      spanEnd: doc.spanEnd,
+    }))
     : [{ value: parseConfig(snapshot.text, format) }];
 
+  const supportsSchema = format === "json" || format === "jsonc" || format === "yaml" || format === "toml";
+  const perDocLineSecrets = new Map<number, { keys: Set<string>; values: Set<string> }>();
+
   for (const docEntry of documentValues) {
+    const docIdx = docEntry.index ?? 0;
+    const docExtraPaths: Array<readonly PathSegment[]> = [];
+    const seenDocPaths = new Set<string>();
+    const addDocPath = (segments: readonly PathSegment[]): void => {
+      const k = pathKey(segments);
+      if (seenDocPaths.has(k)) return;
+      seenDocPaths.add(k);
+      docExtraPaths.push(segments);
+    };
+
+    // Apply caller flat `extraSecretPaths` strictly to `options.documentIndex` when specified,
+    // or to the sole document (or all documents for legacy unscoped callers when `scopedSecretPaths` is absent).
+    const applyFlatToDoc = !isMultiDocYaml
+      || (options.documentIndex !== undefined
+        ? options.documentIndex === docIdx
+        : validScopedPaths.length === 0);
+    if (applyFlatToDoc) {
+      for (const segments of validExtraPaths) addDocPath(segments);
+    }
+
+    // Apply caller per-document scoped secret paths strictly to their owning document.
+    for (const scoped of validScopedPaths) {
+      if (scoped.documentIndex === undefined || scoped.documentIndex === docIdx) {
+        addDocPath(scoped.segments);
+      }
+    }
+
+    // Auto-discover schema `writeOnly: true` / `format: "password"` paths for EVERY document
+    // (critical for multi-document YAML so sibling docs' schema secrets are never exported in plaintext).
+    if (supportsSchema) {
+      const docSlice = isMultiDocYaml && docEntry.spanStart !== undefined && docEntry.spanEnd !== undefined
+        ? cleanText.slice(docEntry.spanStart, docEntry.spanEnd)
+        : cleanText;
+      const directiveText = isYaml && extractSchemaDirective(docSlice, "yaml") ? docSlice : cleanText;
+      const schemaRes = await inferJsonSchemaFields(
+        resolved.path,
+        resolved.root,
+        docEntry.value,
+        options.schemaFetcher ?? fetch,
+        {
+          format,
+          rawText: directiveText,
+          relativeFile: normalizedRelative,
+          enableSchemaStore: options.enableSchemaStore === true,
+          schemaStoreCacheDir: options.schemaStoreCacheDir,
+        },
+      );
+      for (const field of schemaRes.fields) {
+        if (field.secret === true || field.type === "secret") {
+          addDocPath(field.segments);
+        } else if (field.itemFields?.length) {
+          const arrVal = getAtPath(docEntry.value, field.segments);
+          if (Array.isArray(arrVal)) {
+            for (let i = 0; i < arrVal.length; i += 1) {
+              for (const itemSpec of field.itemFields) {
+                if (itemSpec.secret === true || itemSpec.type === "secret") {
+                  addDocPath([...field.segments, i, itemSpec.key]);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const docExtraPathKeys = new Set<string>(docExtraPaths.map((segments) => pathKey(segments)));
+    const docSecretKeys = new Set<string>();
+    const docSecretValues = new Set<string>();
+    for (const segments of docExtraPaths) {
+      docSecretKeys.add(formatPath(segments));
+      const leaf = segments.at(-1);
+      if (typeof leaf === "string" && leaf.trim()) docSecretKeys.add(leaf);
+    }
+
     const leaves = flattenConfigLeaves(docEntry.value);
     const redactChanges: ConfigChange[] = [];
     for (const [key, leaf] of leaves) {
       const isMarkedSecret = isSecretPath(leaf.segments)
-        || extraPathKeys.has(key)
-        || validExtraPaths.some((prefix) => isStrictPrefix(prefix, leaf.segments));
+        || docExtraPathKeys.has(key)
+        || docExtraPaths.some((prefix) => isStrictPrefix(prefix, leaf.segments));
+      const hasNestedMarkedSecret = !isMarkedSecret
+        && docExtraPaths.some((target) => isStrictPrefix(leaf.segments, target));
       if (leaf.value === undefined || leaf.value === null || leaf.value === "") continue;
-      if (!isMarkedSecret && !valueContainsSecret(leaf.value)) continue;
+      if (!isMarkedSecret && !hasNestedMarkedSecret && !valueContainsSecret(leaf.value)) continue;
       if (isMarkedSecret) {
-        collectSecretStrings(leaf.value, extraSecretValues);
+        collectSecretStrings(leaf.value, docSecretValues);
+      } else if (hasNestedMarkedSecret) {
+        for (const target of docExtraPaths) {
+          if (isStrictPrefix(leaf.segments, target)) {
+            const nestedVal = getAtPath(docEntry.value, target);
+            if (nestedVal !== undefined) collectSecretStrings(nestedVal, docSecretValues);
+          }
+        }
       }
-      const redacted = redactStructuredValue(leaf.value, isMarkedSecret);
+      const redacted = redactStructuredValue(leaf.value, isMarkedSecret, 0, leaf.segments, docExtraPathKeys);
       if (redacted.changed) {
         redactChanges.push({ segments: [...leaf.segments], value: redacted.value });
       }
     }
+
+    perDocLineSecrets.set(docIdx, { keys: docSecretKeys, values: docSecretValues });
+
     if (redactChanges.length > 0) {
       try {
         updatedText = updateConfigText(updatedText, format, redactChanges, {
@@ -867,23 +1061,51 @@ export async function generateRedactedExport(
       }
     }
   }
+
   const eol = updatedText.includes("\r\n") ? "\r\n" : "\n";
-  const lineMasked = maskDocumentLines(updatedText, {
-    format,
-    secretKeys: [...extraSecretKeys],
-    secretValues: [...extraSecretValues],
-    mask: "***",
-  }).lines.join(eol);
+  let lineMasked: string;
+  if (isMultiDocYaml) {
+    const updatedDocs = parseYamlDocuments(updatedText);
+    const documentSecrets: DocumentLineSecrets[] = updatedDocs.map((doc, idx) => {
+      const scoped = perDocLineSecrets.get(doc.index);
+      const nextDoc = updatedDocs[idx + 1];
+      return {
+        startLine: idx === 0 ? 1 : doc.startLine,
+        endLine: nextDoc?.startLine,
+        secretKeys: scoped ? [...scoped.keys] : [],
+        secretValues: scoped ? [...scoped.values] : [],
+      };
+    });
+    lineMasked = maskDocumentLines(updatedText, {
+      format,
+      documentSecrets,
+      mask: "***",
+    }).lines.join(eol);
+  } else {
+    const sole = perDocLineSecrets.get(0);
+    lineMasked = maskDocumentLines(updatedText, {
+      format,
+      secretKeys: sole ? [...sole.keys] : [],
+      secretValues: sole ? [...sole.values] : [],
+      mask: "***",
+    }).lines.join(eol);
+  }
   const content = maskDocumentSecrets(lineMasked);
   const redactedCount = countChangedLines(snapshot.text, content);
 
   return {
-    sourceFile: relativeFile.replace(/\\/g, "/"),
+    sourceFile: normalizedRelative,
     format,
     suggestedFileName: suggestRedactedFileName(basename(relativeFile)),
     content,
     redactedCount,
   };
+}
+
+function assertOptionalDocumentIndex(value: number | undefined): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+    throw new ConfuiError("INVALID_INPUT", "文档索引参数无效");
+  }
 }
 
 /**
@@ -895,9 +1117,10 @@ export async function writeRedactedExport(
   sourceRelativeFile: string,
   targetRelativeFile: string,
   extraSecretPaths: readonly (readonly PathSegment[])[] = [],
+  options: GenerateRedactedExportOptions = {},
 ): Promise<CreateFromExampleResult> {
   const resolvedSource = await resolveExistingProjectPath(root, sourceRelativeFile);
-  const preview = await generateRedactedExport(root, sourceRelativeFile, extraSecretPaths);
+  const preview = await generateRedactedExport(root, sourceRelativeFile, extraSecretPaths, options);
   const lexicalTarget = safeJoin(resolvedSource.root, targetRelativeFile);
   if (samePath(lexicalTarget, resolvedSource.path)) {
     throw new ConfuiError("INVALID_INPUT", "导出目标不能覆盖原配置文件");
@@ -1124,12 +1347,15 @@ function redactStructuredValue(
   value: unknown,
   insideSecret: boolean,
   depth = 0,
+  segments: readonly PathSegment[] = [],
+  extraSecretPathKeys?: ReadonlySet<string>,
 ): { value: unknown; changed: boolean } {
   if (depth > 16 || value === undefined || value === null || value === "") {
     return { value, changed: false };
   }
+  const effectiveSecret = insideSecret || Boolean(extraSecretPathKeys && segments.length > 0 && extraSecretPathKeys.has(pathKey(segments)));
   if (typeof value === "string") {
-    if (insideSecret) {
+    if (effectiveSecret) {
       return { value: "***", changed: value !== "***" };
     }
     if (containsSecretValuePattern(value)) {
@@ -1139,12 +1365,12 @@ function redactStructuredValue(
     return { value, changed: false };
   }
   if (typeof value === "number" || typeof value === "boolean") {
-    return insideSecret ? { value: "***", changed: true } : { value, changed: false };
+    return effectiveSecret ? { value: "***", changed: true } : { value, changed: false };
   }
   if (Array.isArray(value)) {
     let changed = false;
-    const next = value.map((item) => {
-      const res = redactStructuredValue(item, insideSecret, depth + 1);
+    const next = value.map((item, idx) => {
+      const res = redactStructuredValue(item, effectiveSecret, depth + 1, [...segments, idx], extraSecretPathKeys);
       if (res.changed) changed = true;
       return res.value;
     });
@@ -1154,8 +1380,9 @@ function redactStructuredValue(
     let changed = false;
     const next: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      const keySecret = insideSecret || SECRET_KEY_PATTERN.test(key);
-      const res = redactStructuredValue(item, keySecret, depth + 1);
+      const nextSegs = [...segments, key];
+      const keySecret = effectiveSecret || SECRET_KEY_PATTERN.test(key);
+      const res = redactStructuredValue(item, keySecret, depth + 1, nextSegs, extraSecretPathKeys);
       if (res.changed) changed = true;
       setSafeProperty(next, key, res.value);
     }

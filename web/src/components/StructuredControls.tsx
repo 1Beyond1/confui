@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { FieldSpec, ItemFieldSpec, PathSegment } from "../../../shared/schema.ts";
 import {
+  containsSecretValuePattern,
   isForbiddenKey,
   isHexColor6,
   setSafeProperty,
   valueContainsSecret,
 } from "../../../shared/validation.ts";
 import {
+  clearJsonDraftSubErrors,
   createDefaultObjectItem,
   createJsonDraft,
   enumValueEqual,
@@ -19,8 +21,11 @@ import {
   isPlainObject,
   isScalarArray,
   MAX_NESTED_TREE_DEPTH,
+  objectHasSchemaSecret,
   parseJsonDraft,
+  withJsonDraftSubError,
   type DeepFocusTarget,
+  type JsonDraft,
 } from "../editor-state.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
@@ -65,12 +70,26 @@ function ScalarArrayControl({
   const parsed = draft.error ? undefined : draft.parsed;
   const visualEligible = !draft.error && (parsed === undefined || isScalarArray(parsed));
   const [jsonMode, setJsonMode] = useState(!visualEligible);
+  const [jsonRevealed, setJsonRevealed] = useState(false);
+  const [revealedItems, setRevealedItems] = useState<Record<number, boolean>>({});
   const useJson = jsonMode || !visualEligible;
 
   const items: Array<string | number | boolean | null> = Array.isArray(parsed) && isScalarArray(parsed)
     ? parsed
     : [];
   const allNumeric = items.length > 0 && items.every((item) => typeof item === "number");
+  const fieldSecret = useMemo(
+    () => Boolean(
+      field.secret
+      || field.type === "secret"
+      || isNestedKeySensitive(String(field.segments.at(-1) ?? ""), field.segments),
+    ),
+    [field.secret, field.type, field.segments],
+  );
+  const hasSecret = useMemo(
+    () => fieldSecret || valueContainsSecret(items) || (draft.text.length > 0 && containsSecretValuePattern(draft.text)),
+    [fieldSecret, items, draft.text],
+  );
 
   function emitArray(next: Array<string | number | boolean | null>): void {
     onChange(createJsonDraft(next));
@@ -100,10 +119,12 @@ function ScalarArrayControl({
     const next = [...items];
     const [moved] = next.splice(index, 1);
     next.splice(target, 0, moved!);
+    setRevealedItems({});
     emitArray(next);
   }
 
   function removeItem(index: number): void {
+    setRevealedItems({});
     emitArray(items.filter((_, i) => i !== index));
   }
 
@@ -123,95 +144,154 @@ function ScalarArrayControl({
           class="structured-mode-toggle"
           disabled={disabled || (useJson && !visualEligible)}
           title={!visualEligible && useJson ? t("structured.nestedOnlyJson") : undefined}
-          onClick={() => setJsonMode(!useJson)}
+          onClick={() => {
+            setJsonRevealed(false);
+            setJsonMode(!useJson);
+          }}
         >
           <Icon name={useJson ? "layers" : "code"} size={13}/>
           <span>{useJson ? t("structured.visualList") : t("structured.jsonSource")}</span>
         </button>
       </div>
       {useJson ? (
-        <textarea
-          id={id}
-          class={`control control--code ${error ? "control--error" : ""}`}
-          value={draft.text}
-          rows={Math.min(14, Math.max(4, draft.text.split("\n").length + 1))}
-          spellcheck={false}
-          aria-describedby={describedBy}
-          aria-invalid={Boolean(error)}
-          aria-required={field.required}
-          disabled={disabled}
-          onInput={(event) => onChange(parseJsonDraft(event.currentTarget.value))}
-        />
+        hasSecret && !jsonRevealed ? (
+          <div class="structured-secret-gate">
+            <div class="structured-secret-gate__info">
+              <Icon name="shield" size={15}/>
+              <span>{t("structured.treeSecretMasked")}</span>
+            </div>
+            <button
+              type="button"
+              class="structured-mode-toggle"
+              disabled={disabled}
+              onClick={() => setJsonRevealed(true)}
+            >
+              <Icon name="eye" size={13}/>
+              <span>{t("structured.treeRevealJson")}</span>
+            </button>
+          </div>
+        ) : (
+          <div class="structured-json-wrap">
+            {hasSecret && (
+              <div class="structured-secret-gate structured-secret-gate--inline">
+                <span><Icon name="shield" size={13}/> {t("structured.treeSecretMasked")}</span>
+                <button type="button" class="structured-mode-toggle" onClick={() => setJsonRevealed(false)}>
+                  <Icon name="eye-off" size={12}/>
+                  <span>{t("structured.treeHideJson")}</span>
+                </button>
+              </div>
+            )}
+            <textarea
+              id={id}
+              class={`control control--code ${error ? "control--error" : ""}`}
+              value={draft.text}
+              rows={Math.min(14, Math.max(4, draft.text.split("\n").length + 1))}
+              spellcheck={false}
+              aria-describedby={describedBy}
+              aria-invalid={Boolean(error)}
+              aria-required={field.required}
+              disabled={disabled}
+              onInput={(event) => onChange(parseJsonDraft(event.currentTarget.value))}
+            />
+          </div>
+        )
       ) : (
         <div class="structured-list" id={id} aria-describedby={describedBy}>
           {items.length === 0 ? (
             <div class="structured-empty">{t("structured.emptyArray")}</div>
           ) : (
-            items.map((item, index) => (
-              <div class="structured-row" key={index}>
-                <span class="structured-row__index">{index + 1}</span>
-                {typeof item === "boolean" ? (
-                  <button
-                    type="button"
-                    class={`switch-control structured-bool ${item ? "switch-control--on" : ""}`}
-                    role="switch"
-                    aria-checked={item}
-                    disabled={disabled}
-                    onClick={() => {
-                      const next = [...items];
-                      next[index] = !item;
-                      emitArray(next);
-                    }}
-                  >
-                    <span class="switch-control__track"><i/></span>
-                    <span>{item ? "true" : "false"}</span>
-                  </button>
-                ) : (
-                  <input
-                    class="control structured-row__input"
-                    type="text"
-                    inputMode={typeof item === "number" ? "decimal" : undefined}
-                    value={item === null ? "" : String(item)}
-                    placeholder={item === null ? "null" : t("structured.inputValuePlaceholder")}
-                    disabled={disabled}
-                    aria-label={t("structured.itemAria", { label: field.label, index: index + 1 })}
-                    onInput={(event) => updateItem(index, event.currentTarget.value)}
-                  />
-                )}
-                <div class="structured-row__actions">
-                  <button
-                    type="button"
-                    class="icon-button"
-                    disabled={disabled || index === 0}
-                    onClick={() => moveItem(index, -1)}
-                    aria-label={t("structured.moveUp")}
-                    title={t("structured.moveUp")}
-                  >
-                    <Icon name="arrow-up" size={14}/>
-                  </button>
-                  <button
-                    type="button"
-                    class="icon-button"
-                    disabled={disabled || index === items.length - 1}
-                    onClick={() => moveItem(index, 1)}
-                    aria-label={t("structured.moveDown")}
-                    title={t("structured.moveDown")}
-                  >
-                    <Icon name="arrow-down" size={14}/>
-                  </button>
-                  <button
-                    type="button"
-                    class="icon-button structured-row__delete"
-                    disabled={disabled}
-                    onClick={() => removeItem(index)}
-                    aria-label={t("structured.deleteItem")}
-                    title={t("structured.deleteItem")}
-                  >
-                    <Icon name="trash" size={14}/>
-                  </button>
+            items.map((item, index) => {
+              const itemSecret = fieldSecret || (typeof item === "string" && containsSecretValuePattern(item));
+              const isItemRevealed = Boolean(revealedItems[index]);
+              return (
+                <div class="structured-row" key={index}>
+                  <span class="structured-row__index">{index + 1}</span>
+                  {typeof item === "boolean" && !itemSecret ? (
+                    <button
+                      type="button"
+                      class={`switch-control structured-bool ${item ? "switch-control--on" : ""}`}
+                      role="switch"
+                      aria-checked={item}
+                      disabled={disabled}
+                      onClick={() => {
+                        const next = [...items];
+                        next[index] = !item;
+                        emitArray(next);
+                      }}
+                    >
+                      <span class="switch-control__track"><i/></span>
+                      <span>{item ? "true" : "false"}</span>
+                    </button>
+                  ) : itemSecret ? (
+                    <div class="input-with-action structured-row__input">
+                      <input
+                        class="control"
+                        type={isItemRevealed ? "text" : "password"}
+                        value={item === null ? "" : String(item)}
+                        placeholder={t("field.secretPlaceholder")}
+                        autocomplete="off"
+                        disabled={disabled}
+                        aria-label={t("structured.itemAria", { label: field.label, index: index + 1 })}
+                        onInput={(event) => updateItem(index, event.currentTarget.value)}
+                      />
+                      <button
+                        type="button"
+                        class="icon-button"
+                        disabled={disabled}
+                        onClick={() => setRevealedItems((prev) => ({ ...prev, [index]: !prev[index] }))}
+                        aria-label={isItemRevealed ? t("field.hideSecret") : t("field.showSecret")}
+                        title={isItemRevealed ? t("field.hideSecret") : t("field.showSecret")}
+                      >
+                        <Icon name={isItemRevealed ? "eye-off" : "eye"} size={14}/>
+                      </button>
+                    </div>
+                  ) : (
+                    <input
+                      class="control structured-row__input"
+                      type="text"
+                      inputMode={typeof item === "number" ? "decimal" : undefined}
+                      value={item === null ? "" : String(item)}
+                      placeholder={item === null ? "null" : t("structured.inputValuePlaceholder")}
+                      disabled={disabled}
+                      aria-label={t("structured.itemAria", { label: field.label, index: index + 1 })}
+                      onInput={(event) => updateItem(index, event.currentTarget.value)}
+                    />
+                  )}
+                  <div class="structured-row__actions">
+                    <button
+                      type="button"
+                      class="icon-button"
+                      disabled={disabled || index === 0}
+                      onClick={() => moveItem(index, -1)}
+                      aria-label={t("structured.moveUp")}
+                      title={t("structured.moveUp")}
+                    >
+                      <Icon name="arrow-up" size={14}/>
+                    </button>
+                    <button
+                      type="button"
+                      class="icon-button"
+                      disabled={disabled || index === items.length - 1}
+                      onClick={() => moveItem(index, 1)}
+                      aria-label={t("structured.moveDown")}
+                      title={t("structured.moveDown")}
+                    >
+                      <Icon name="arrow-down" size={14}/>
+                    </button>
+                    <button
+                      type="button"
+                      class="icon-button structured-row__delete"
+                      disabled={disabled}
+                      onClick={() => removeItem(index)}
+                      aria-label={t("structured.deleteItem")}
+                      title={t("structured.deleteItem")}
+                    >
+                      <Icon name="trash" size={14}/>
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
           <div class="structured-footer">
             <button type="button" class="structured-add-btn" disabled={disabled} onClick={addItem}>
@@ -259,13 +339,56 @@ export function StructuredObjectArrayControl({
   const [revealedSecrets, setRevealedSecrets] = useState<Record<string, boolean>>({});
   const [addingPropForCard, setAddingPropForCard] = useState<Record<number, { key: string; val: string; error?: string }>>({});
   const [highlightedDeepPath, setHighlightedDeepPath] = useState<string>();
+  const lastEmittedDraftRef = useRef<unknown>(value);
+  const [externalSyncVersion, setExternalSyncVersion] = useState(0);
 
   const useGroupJson = groupJsonMode || !cardEligible;
-  const hasGroupSecret = useMemo(() => valueContainsSecret(items), [items]);
+  const fieldSecret = useMemo(
+    () => Boolean(
+      field.secret
+      || field.type === "secret"
+      || isNestedKeySensitive(String(field.segments.at(-1) ?? ""), field.segments),
+    ),
+    [field.secret, field.type, field.segments],
+  );
+  const hasGroupSecret = useMemo(
+    () => fieldSecret || items.some((item) => objectHasSchemaSecret(item, field.itemFields, false)),
+    [fieldSecret, items, field.itemFields],
+  );
   const itemSpecByKey = useMemo(
     () => new Map((field.itemFields ?? []).map((spec) => [spec.key, spec])),
     [field.itemFields],
   );
+
+  function emitDraft(nextDraft: JsonDraft): void {
+    lastEmittedDraftRef.current = nextDraft;
+    onChange(nextDraft);
+  }
+
+  function reportSubError(subKey: string, err?: string): void {
+    const nextDraft = withJsonDraftSubError(draft, subKey, err);
+    if (nextDraft !== draft) emitDraft(nextDraft);
+  }
+
+  // Synchronize open single-card JSON drafts and nested fallback blocks when
+  // `value` changes externally (Ctrl+Z Undo, Restore Value, Revert All, file switch).
+  useEffect(() => {
+    if (value === lastEmittedDraftRef.current) return;
+    lastEmittedDraftRef.current = value;
+    setExternalSyncVersion((prev) => prev + 1);
+    setCardJsonDrafts((prev) => {
+      const keys = Object.keys(prev);
+      if (!keys.length) return prev;
+      const next: Record<number, { text: string; error?: string }> = {};
+      for (const k of keys) {
+        const idx = Number(k);
+        if (Number.isSafeInteger(idx) && idx >= 0 && idx < items.length) {
+          next[idx] = { text: JSON.stringify(items[idx], null, 2) };
+        }
+      }
+      return next;
+    });
+  }, [value, items]);
 
   // Auto-expand card & exit JSON mode when Ctrl+K jumps into a card or nested property inside this array.
   useEffect(() => {
@@ -288,6 +411,9 @@ export function StructuredObjectArrayControl({
       delete next[cardIdx];
       return next;
     });
+    if (draft.subErrors?.[`card:${cardIdx}`]) {
+      reportSubError(`card:${cardIdx}`, undefined);
+    }
     setHighlightedDeepPath(deepFocusTarget.path);
     const timer = window.setTimeout(() => {
       setHighlightedDeepPath((current) => (current === deepFocusTarget.path ? undefined : current));
@@ -295,17 +421,25 @@ export function StructuredObjectArrayControl({
     return () => window.clearTimeout(timer);
   }, [deepFocusTarget?.path, deepFocusTarget?.segments, deepFocusTarget?.token, field.segments, items.length, cardEligible]);
 
-  function emitCards(next: Array<Record<string, unknown>>): void {
-    onChange(createJsonDraft(next));
+  function emitCards(next: Array<Record<string, unknown>>, clearSubErrorPrefix?: string): void {
+    const baseDraft = createJsonDraft(next);
+    if (!draft.subErrors || Object.keys(draft.subErrors).length === 0 || clearSubErrorPrefix === "*") {
+      emitDraft(baseDraft);
+      return;
+    }
+    const cleaned = clearSubErrorPrefix
+      ? clearJsonDraftSubErrors({ ...baseDraft, subErrors: draft.subErrors }, clearSubErrorPrefix)
+      : { ...baseDraft, subErrors: draft.subErrors };
+    emitDraft(cleaned);
   }
 
-  function updateCardObject(index: number, nextObj: Record<string, unknown>): void {
+  function updateCardObject(index: number, nextObj: Record<string, unknown>, clearSubErrorPrefix?: string): void {
     const next = [...items];
     next[index] = nextObj;
-    emitCards(next);
+    emitCards(next, clearSubErrorPrefix);
   }
 
-  function updateCardProp(index: number, key: string, nextVal: unknown): void {
+  function updateCardProp(index: number, key: string, nextVal: unknown, clearSubErrorPrefix?: string): void {
     const current = items[index] ?? {};
     const cloned: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(current)) {
@@ -315,7 +449,7 @@ export function StructuredObjectArrayControl({
     if (nextVal !== undefined) {
       setSafeProperty(cloned, key, nextVal);
     }
-    updateCardObject(index, cloned);
+    updateCardObject(index, cloned, clearSubErrorPrefix);
   }
 
   function moveCard(index: number, delta: -1 | 1): void {
@@ -334,7 +468,7 @@ export function StructuredObjectArrayControl({
       copy[target] = a;
       return copy;
     });
-    emitCards(next);
+    emitCards(next, "*");
   }
 
   function duplicateCard(index: number): void {
@@ -354,14 +488,14 @@ export function StructuredObjectArrayControl({
       shifted[index + 1] = false;
       return shifted;
     });
-    emitCards(next);
+    emitCards(next, "*");
   }
 
   function removeCard(index: number): void {
     setCardJsonDrafts({});
     setRevealedSecrets({});
     setCollapsedCards({});
-    emitCards(items.filter((_, i) => i !== index));
+    emitCards(items.filter((_, i) => i !== index), "*");
   }
 
   function addCard(): void {
@@ -378,6 +512,7 @@ export function StructuredObjectArrayControl({
         delete next[index];
         return next;
       });
+      reportSubError(`card:${index}`, undefined);
       return;
     }
     const card = items[index] ?? {};
@@ -389,22 +524,26 @@ export function StructuredObjectArrayControl({
   }
 
   function handleCardJsonInput(index: number, rawText: string): void {
+    const errMsg = t("structured.cardJsonError");
+    const subKey = `card:${index}`;
     try {
       const parsedCard = JSON.parse(rawText);
       if (!isPlainObject(parsedCard)) {
         setCardJsonDrafts((prev) => ({
           ...prev,
-          [index]: { text: rawText, error: t("structured.cardJsonError") },
+          [index]: { text: rawText, error: errMsg },
         }));
+        reportSubError(subKey, errMsg);
         return;
       }
       setCardJsonDrafts((prev) => ({ ...prev, [index]: { text: rawText } }));
-      updateCardObject(index, parsedCard);
+      updateCardObject(index, parsedCard, subKey);
     } catch {
       setCardJsonDrafts((prev) => ({
         ...prev,
-        [index]: { text: rawText, error: t("structured.cardJsonError") },
+        [index]: { text: rawText, error: errMsg },
       }));
+      reportSubError(subKey, errMsg);
     }
   }
 
@@ -466,6 +605,11 @@ export function StructuredObjectArrayControl({
             title={!cardEligible && useGroupJson ? t("structured.nestedOnlyJson") : undefined}
             onClick={() => {
               setGroupJsonRevealed(false);
+              if (!useGroupJson) {
+                setCardJsonDrafts({});
+                const cleared = clearJsonDraftSubErrors(draft);
+                if (cleared !== draft) emitDraft(cleared);
+              }
               setGroupJsonMode(!useGroupJson);
             }}
           >
@@ -513,7 +657,7 @@ export function StructuredObjectArrayControl({
               aria-invalid={Boolean(error)}
               aria-required={field.required}
               disabled={disabled}
-              onInput={(event) => onChange(parseJsonDraft(event.currentTarget.value))}
+              onInput={(event) => emitDraft(parseJsonDraft(event.currentTarget.value))}
             />
           </div>
         )
@@ -527,9 +671,9 @@ export function StructuredObjectArrayControl({
               const cardPath = formatSegmentPath(cardSegments);
               const collapsed = Boolean(collapsedCards[cardIdx]);
               const cardJson = cardJsonDrafts[cardIdx];
-              const summary = extractCardSummary(item, field.itemFields);
+              const summary = extractCardSummary(item, field.itemFields, cardSegments, fieldSecret);
               const cardTitle = summary.title || t("structured.cardFallbackTitle", { index: cardIdx + 1 });
-              const cardSecret = valueContainsSecret(item);
+              const cardSecret = objectHasSchemaSecret(item, field.itemFields, fieldSecret);
               const cardJsonRevealKey = `card-json:${cardIdx}`;
               const cardHighlighted = highlightedDeepPath === cardPath;
 
@@ -658,6 +802,7 @@ export function StructuredObjectArrayControl({
                               value={cardJson.text}
                               rows={Math.min(14, Math.max(4, cardJson.text.split("\n").length + 1))}
                               spellcheck={false}
+                              aria-invalid={Boolean(cardJson.error)}
                               disabled={disabled}
                               onInput={(event) => handleCardJsonInput(cardIdx, event.currentTarget.value)}
                             />
@@ -675,7 +820,8 @@ export function StructuredObjectArrayControl({
                               const propSegments: PathSegment[] = [...cardSegments, propKey];
                               const propPath = formatSegmentPath(propSegments);
                               const isHighlighted = highlightedDeepPath === propPath;
-                              const sensitive = isNestedKeySensitive(propKey, propSegments, propVal, spec);
+                              const isFallbackHighlighted = isDeepTargetWithin(highlightedDeepPath, propSegments);
+                              const sensitive = fieldSecret || isNestedKeySensitive(propKey, propSegments, propVal, spec);
                               const secretRevealId = `card:${cardIdx}:${propKey}`;
                               const isRevealed = Boolean(revealedSecrets[secretRevealId]);
                               const hasProp = Object.prototype.hasOwnProperty.call(item, propKey);
@@ -712,14 +858,19 @@ export function StructuredObjectArrayControl({
                                       }
                                       disabled={disabled}
                                       deepFocusTarget={deepFocusTarget}
-                                      onChange={(nextVal) => updateCardProp(cardIdx, propKey, nextVal)}
+                                      highlighted={isFallbackHighlighted}
+                                      externalSyncVersion={externalSyncVersion}
+                                      onSubError={reportSubError}
+                                      onChange={(nextVal, clearSubErrorPrefix) =>
+                                        updateCardProp(cardIdx, propKey, nextVal, clearSubErrorPrefix ?? propPath)
+                                      }
                                     />
                                     {hasProp && !spec?.required && (
                                       <button
                                         type="button"
                                         class="icon-button structured-row__delete card-field-row__remove"
                                         disabled={disabled}
-                                        onClick={() => updateCardProp(cardIdx, propKey, undefined)}
+                                        onClick={() => updateCardProp(cardIdx, propKey, undefined, propPath)}
                                         aria-label={t("structured.kvDeleteAria", { key: propKey })}
                                         title={t("common.delete")}
                                       >
@@ -813,6 +964,9 @@ function CardPropertyInput({
   onToggleReveal,
   disabled,
   deepFocusTarget,
+  highlighted = false,
+  externalSyncVersion,
+  onSubError,
   onChange,
 }: {
   propKey: string;
@@ -824,9 +978,13 @@ function CardPropertyInput({
   onToggleReveal: () => void;
   disabled: boolean;
   deepFocusTarget?: DeepFocusTarget;
-  onChange: (nextVal: unknown) => void;
+  highlighted?: boolean;
+  externalSyncVersion?: number;
+  onSubError?: (subKey: string, error?: string) => void;
+  onChange: (nextVal: unknown, clearSubErrorPrefix?: string) => void;
 }) {
   const { t } = useI18n();
+  const propPath = formatSegmentPath(segments);
 
   // Nested plain object inside a card -> delegate to NestedObjectTree (recursive up to 4 levels!)
   if (isPlainObject(value)) {
@@ -837,14 +995,17 @@ function CardPropertyInput({
           baseSegments={segments}
           depth={1}
           disabled={disabled}
+          ancestorSecret={sensitive}
           deepFocusTarget={deepFocusTarget}
-          onChange={onChange}
+          externalSyncVersion={externalSyncVersion}
+          onSubError={onSubError}
+          onChange={(nextObj, clearSubErrorPrefix) => onChange(nextObj, clearSubErrorPrefix)}
         />
       </div>
     );
   }
 
-  // Nested array inside a card -> inline JSON or scalar comma-list
+  // Nested array inside a card -> inline JSON fallback with error propagation & highlight
   if (Array.isArray(value) || spec?.type === "array") {
     return (
       <DeepJsonFallbackBlock
@@ -852,7 +1013,11 @@ function CardPropertyInput({
         sensitive={sensitive || valueContainsSecret(value)}
         disabled={disabled}
         compact
-        onChange={onChange}
+        deepPath={propPath}
+        highlighted={highlighted}
+        externalSyncVersion={externalSyncVersion}
+        onErrorChange={(err) => onSubError?.(propPath, err)}
+        onChange={(nextVal) => onChange(nextVal, propPath)}
       />
     );
   }
@@ -1026,13 +1191,54 @@ export function StructuredObjectControl({
   const [jsonMode, setJsonMode] = useState(!treeEligible);
   const [jsonRevealed, setJsonRevealed] = useState(false);
   const useJson = jsonMode || !treeEligible;
+  const lastEmittedDraftRef = useRef<unknown>(value);
+  const [externalSyncVersion, setExternalSyncVersion] = useState(0);
 
   const objectVal: Record<string, unknown> = isPlainObject(parsed) ? parsed : {};
   const isNested = useMemo(
     () => Object.values(objectVal).some((v) => !isEditableScalar(v)),
     [objectVal],
   );
-  const hasSecret = useMemo(() => valueContainsSecret(objectVal), [objectVal]);
+  const fieldSecret = useMemo(
+    () => Boolean(
+      field.secret
+      || field.type === "secret"
+      || isNestedKeySensitive(String(field.segments.at(-1) ?? ""), field.segments),
+    ),
+    [field.secret, field.type, field.segments],
+  );
+  const hasSecret = useMemo(
+    () => fieldSecret || valueContainsSecret(objectVal) || (draft.text.length > 0 && containsSecretValuePattern(draft.text)),
+    [fieldSecret, objectVal, draft.text],
+  );
+
+  function emitDraft(nextDraft: JsonDraft): void {
+    lastEmittedDraftRef.current = nextDraft;
+    onChange(nextDraft);
+  }
+
+  function reportSubError(subKey: string, err?: string): void {
+    const nextDraft = withJsonDraftSubError(draft, subKey, err);
+    if (nextDraft !== draft) emitDraft(nextDraft);
+  }
+
+  function emitObject(nextObj: Record<string, unknown>, clearSubErrorPrefix?: string): void {
+    const baseDraft = createJsonDraft(nextObj);
+    if (!draft.subErrors || Object.keys(draft.subErrors).length === 0 || clearSubErrorPrefix === "*") {
+      emitDraft(baseDraft);
+      return;
+    }
+    const cleaned = clearSubErrorPrefix
+      ? clearJsonDraftSubErrors({ ...baseDraft, subErrors: draft.subErrors }, clearSubErrorPrefix)
+      : { ...baseDraft, subErrors: draft.subErrors };
+    emitDraft(cleaned);
+  }
+
+  useEffect(() => {
+    if (value === lastEmittedDraftRef.current) return;
+    lastEmittedDraftRef.current = value;
+    setExternalSyncVersion((prev) => prev + 1);
+  }, [value]);
 
   useEffect(() => {
     if (!deepFocusTarget?.segments?.length || !treeEligible) return;
@@ -1062,6 +1268,10 @@ export function StructuredObjectControl({
           title={!treeEligible && useJson ? t("structured.nestedOnlyJson") : undefined}
           onClick={() => {
             setJsonRevealed(false);
+            if (!useJson) {
+              const cleared = clearJsonDraftSubErrors(draft);
+              if (cleared !== draft) emitDraft(cleared);
+            }
             setJsonMode(!useJson);
           }}
         >
@@ -1112,7 +1322,7 @@ export function StructuredObjectControl({
               aria-invalid={Boolean(error)}
               aria-required={field.required}
               disabled={disabled}
-              onInput={(event) => onChange(parseJsonDraft(event.currentTarget.value))}
+              onInput={(event) => emitDraft(parseJsonDraft(event.currentTarget.value))}
             />
           </div>
         )
@@ -1123,8 +1333,11 @@ export function StructuredObjectControl({
             baseSegments={field.segments}
             depth={1}
             disabled={disabled}
+            ancestorSecret={fieldSecret}
             deepFocusTarget={deepFocusTarget}
-            onChange={(nextObj) => onChange(createJsonDraft(nextObj))}
+            externalSyncVersion={externalSyncVersion}
+            onSubError={reportSubError}
+            onChange={(nextObj, clearSubErrorPrefix) => emitObject(nextObj, clearSubErrorPrefix)}
           />
         </div>
       )}
@@ -1140,8 +1353,12 @@ export interface NestedObjectTreeProps {
   /** Current 1-based depth within the nested tree (max 4; deeper objects gracefully fall back to JSON). */
   depth: number;
   disabled: boolean;
+  /** True when any enclosing field or ancestor object is marked secret (e.g. schema `writeOnly: true`). */
+  ancestorSecret?: boolean;
   deepFocusTarget?: DeepFocusTarget;
-  onChange: (next: Record<string, unknown>) => void;
+  externalSyncVersion?: number;
+  onSubError?: (subKey: string, error?: string) => void;
+  onChange: (next: Record<string, unknown>, clearSubErrorPrefix?: string) => void;
 }
 
 export function NestedObjectTree({
@@ -1149,7 +1366,10 @@ export function NestedObjectTree({
   baseSegments,
   depth,
   disabled,
+  ancestorSecret = false,
   deepFocusTarget,
+  externalSyncVersion,
+  onSubError,
   onChange,
 }: NestedObjectTreeProps) {
   const { t } = useI18n();
@@ -1192,16 +1412,16 @@ export function NestedObjectTree({
     return () => window.clearTimeout(timer);
   }, [deepFocusTarget?.path, deepFocusTarget?.segments, deepFocusTarget?.token, baseSegments]);
 
-  function emitWithEntries(nextEntries: Array<[string, unknown]>): void {
+  function emitWithEntries(nextEntries: Array<[string, unknown]>, clearSubErrorPrefix?: string): void {
     const next: Record<string, unknown> = {};
     for (const [k, v] of nextEntries) {
       setSafeProperty(next, k, v);
     }
-    onChange(next);
+    onChange(next, clearSubErrorPrefix);
   }
 
-  function updateValue(key: string, nextVal: unknown): void {
-    emitWithEntries(entries.map(([k, v]) => (k === key ? [k, nextVal] : [k, v])));
+  function updateValue(key: string, nextVal: unknown, clearSubErrorPrefix?: string): void {
+    emitWithEntries(entries.map(([k, v]) => (k === key ? [k, nextVal] : [k, v])), clearSubErrorPrefix);
   }
 
   function renameKey(oldKey: string, candidateKey: string): void {
@@ -1215,7 +1435,8 @@ export function NestedObjectTree({
       return;
     }
     setKvError(undefined);
-    emitWithEntries(entries.map(([k, v]) => (k === oldKey ? [trimmed, v] : [k, v])));
+    const oldPath = formatSegmentPath([...baseSegments, oldKey]);
+    emitWithEntries(entries.map(([k, v]) => (k === oldKey ? [trimmed, v] : [k, v])), oldPath);
   }
 
   function removeKey(key: string): void {
@@ -1226,7 +1447,8 @@ export function NestedObjectTree({
       delete next[key];
       return next;
     });
-    emitWithEntries(entries.filter(([k]) => k !== key));
+    const removedPath = formatSegmentPath([...baseSegments, key]);
+    emitWithEntries(entries.filter(([k]) => k !== key), removedPath);
   }
 
   function addChild(): void {
@@ -1283,8 +1505,9 @@ export function NestedObjectTree({
         entries.map(([key, val]) => {
           const childSegments: PathSegment[] = [...baseSegments, key];
           const childPath = formatSegmentPath(childSegments);
-          const sensitive = isNestedKeySensitive(key, childSegments, val);
+          const sensitive = ancestorSecret || isNestedKeySensitive(key, childSegments, val);
           const isHighlighted = highlightedPath === childPath;
+          const isFallbackHighlighted = isDeepTargetWithin(highlightedPath, childSegments);
 
           // Nested plain object child
           if (isPlainObject(val)) {
@@ -1304,7 +1527,10 @@ export function NestedObjectTree({
                     type="button"
                     class="nested-node__toggle"
                     aria-expanded={expanded}
-                    onClick={() => setExpandedNodes((prev) => ({ ...prev, [key]: !expanded }))}
+                    onClick={() => {
+                      if (expanded && exceedsDepth) onSubError?.(childPath, undefined);
+                      setExpandedNodes((prev) => ({ ...prev, [key]: !expanded }));
+                    }}
                   >
                     <Icon name="chevron-down" size={13} class={`nested-node__chevron ${expanded ? "" : "icon-rotate-neg90"}`}/>
                     <code class="nested-node__key">{key}</code>
@@ -1339,7 +1565,11 @@ export function NestedObjectTree({
                           value={val}
                           sensitive={subtreeHasSecret}
                           disabled={disabled}
-                          onChange={(nextVal) => updateValue(key, nextVal)}
+                          deepPath={childPath}
+                          highlighted={isFallbackHighlighted}
+                          externalSyncVersion={externalSyncVersion}
+                          onErrorChange={(err) => onSubError?.(childPath, err)}
+                          onChange={(nextVal) => updateValue(key, nextVal, childPath)}
                         />
                       </div>
                     ) : (
@@ -1348,8 +1578,11 @@ export function NestedObjectTree({
                         baseSegments={childSegments}
                         depth={depth + 1}
                         disabled={disabled}
+                        ancestorSecret={sensitive}
                         deepFocusTarget={deepFocusTarget}
-                        onChange={(nextChild) => updateValue(key, nextChild)}
+                        externalSyncVersion={externalSyncVersion}
+                        onSubError={onSubError}
+                        onChange={(nextChild, clearSubErrorPrefix) => updateValue(key, nextChild, clearSubErrorPrefix)}
                       />
                     )}
                   </div>
@@ -1373,7 +1606,10 @@ export function NestedObjectTree({
                     type="button"
                     class="nested-node__toggle"
                     aria-expanded={expanded}
-                    onClick={() => setExpandedNodes((prev) => ({ ...prev, [key]: !expanded }))}
+                    onClick={() => {
+                      if (expanded) onSubError?.(childPath, undefined);
+                      setExpandedNodes((prev) => ({ ...prev, [key]: !expanded }));
+                    }}
                   >
                     <Icon name="chevron-down" size={13} class={`nested-node__chevron ${expanded ? "" : "icon-rotate-neg90"}`}/>
                     <code class="nested-node__key">{key}</code>
@@ -1401,7 +1637,11 @@ export function NestedObjectTree({
                       value={val}
                       sensitive={arrayHasSecret}
                       disabled={disabled}
-                      onChange={(nextVal) => updateValue(key, nextVal)}
+                      deepPath={childPath}
+                      highlighted={isFallbackHighlighted}
+                      externalSyncVersion={externalSyncVersion}
+                      onErrorChange={(err) => onSubError?.(childPath, err)}
+                      onChange={(nextVal) => updateValue(key, nextVal, childPath)}
                     />
                   </div>
                 )}
@@ -1549,39 +1789,66 @@ export function NestedObjectTree({
 /* Shared secret-aware structured JSON fallback block                         */
 /* -------------------------------------------------------------------------- */
 
+function isDeepTargetWithin(
+  highlightedPath: string | undefined,
+  prefixSegments: readonly PathSegment[],
+): boolean {
+  if (!highlightedPath) return false;
+  const prefixPath = formatSegmentPath(prefixSegments);
+  return highlightedPath === prefixPath
+    || highlightedPath.startsWith(`${prefixPath}.`)
+    || highlightedPath.startsWith(`${prefixPath}[`);
+}
+
 function DeepJsonFallbackBlock({
   value,
   sensitive,
   disabled,
   compact = false,
+  deepPath,
+  highlighted = false,
+  externalSyncVersion = 0,
+  onErrorChange,
   onChange,
 }: {
   value: unknown;
   sensitive: boolean;
   disabled: boolean;
   compact?: boolean;
+  deepPath?: string;
+  highlighted?: boolean;
+  externalSyncVersion?: number;
+  onErrorChange?: (error?: string) => void;
   onChange: (nextValue: unknown) => void;
 }) {
   const { t } = useI18n();
   const [revealed, setRevealed] = useState(false);
   const [text, setText] = useState(() => JSON.stringify(value, null, 2));
   const [parseError, setParseError] = useState<string>();
+  const lastEmittedValueRef = useRef<unknown>(value);
+  const lastSyncVersionRef = useRef<number>(externalSyncVersion);
 
   useEffect(() => {
-    try {
-      const currentParsed = JSON.parse(text);
-      if (JSON.stringify(currentParsed) === JSON.stringify(value)) return;
-    } catch {
-      // Keep invalid user draft while editing.
-      if (parseError) return;
+    // External history/reset/switch always overwrites any stale local draft or parseError.
+    if (externalSyncVersion !== lastSyncVersionRef.current) {
+      lastSyncVersionRef.current = externalSyncVersion;
+      lastEmittedValueRef.current = value;
+      setText(JSON.stringify(value, null, 2));
+      setParseError(undefined);
+      return;
     }
+    if (value === lastEmittedValueRef.current) return;
+    lastEmittedValueRef.current = value;
     setText(JSON.stringify(value, null, 2));
     setParseError(undefined);
-  }, [value]);
+  }, [value, externalSyncVersion]);
 
   if (sensitive && !revealed) {
     return (
-      <div class="structured-secret-gate">
+      <div
+        data-deep-path={deepPath}
+        class={`structured-secret-gate ${highlighted ? "deep-node--highlighted" : ""}`}
+      >
         <div class="structured-secret-gate__info">
           <Icon name="shield" size={14}/>
           <span>{t("structured.treeSecretMasked")}</span>
@@ -1600,7 +1867,10 @@ function DeepJsonFallbackBlock({
   }
 
   return (
-    <div class="deep-json-fallback">
+    <div
+      data-deep-path={deepPath}
+      class={`deep-json-fallback ${highlighted ? "deep-node--highlighted" : ""}`}
+    >
       {sensitive && (
         <div class="structured-secret-gate structured-secret-gate--inline">
           <span><Icon name="shield" size={12}/> {t("structured.treeSecretMasked")}</span>
@@ -1615,6 +1885,7 @@ function DeepJsonFallbackBlock({
         value={text}
         rows={Math.min(compact ? 8 : 12, Math.max(3, text.split("\n").length + 1))}
         spellcheck={false}
+        aria-invalid={Boolean(parseError)}
         disabled={disabled}
         onInput={(event) => {
           const nextText = event.currentTarget.value;
@@ -1622,9 +1893,12 @@ function DeepJsonFallbackBlock({
           try {
             const parsed = JSON.parse(nextText);
             setParseError(undefined);
+            lastEmittedValueRef.current = parsed;
             onChange(parsed);
           } catch {
-            setParseError(t("structured.treeJsonInvalid"));
+            const errMsg = t("structured.treeJsonInvalid");
+            setParseError(errMsg);
+            onErrorChange?.(errMsg);
           }
         }}
       />

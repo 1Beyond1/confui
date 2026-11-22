@@ -46,6 +46,17 @@ interface SchemaTraversalState {
   truncated: boolean;
 }
 
+interface SchemaResolutionContext {
+  steps: number;
+  truncated: boolean;
+  refCache: Map<string, JsonSchema>;
+}
+
+interface CycleTracker {
+  hitCycle: boolean;
+  hitDepthLimit: boolean;
+}
+
 interface ResolvedSchemaDocument {
   schema: JsonSchema;
   source: Extract<FieldSource, "json-schema" | "schemastore">;
@@ -78,6 +89,7 @@ const MAX_SCHEMA_ENUM_VALUES = 100;
 const MAX_SCHEMA_TEXT_CHARS = 500;
 const MAX_SCHEMA_DEFAULT_CHARS = 4_000;
 const MAX_SCHEMA_RESOLUTION_DEPTH = 32;
+const MAX_RESOLUTION_STEPS = 4_096;
 const MAX_ITEM_FIELDS = 64;
 const MAX_ITEM_FIELD_DEPTH = 2;
 const DIRECTIVE_SCAN_LINES = 40;
@@ -138,19 +150,26 @@ export async function inferJsonSchemaFields(
   if (!resolved) return { fields: [], warnings, truncated: false };
   try {
     const state: SchemaTraversalState = { value: 0, truncated: false };
+    const resolutionCtx: SchemaResolutionContext = {
+      steps: 0,
+      truncated: false,
+      refCache: new Map<string, JsonSchema>(),
+    };
+    const fields = fieldsFromSchema(
+      resolved.schema,
+      resolved.schema,
+      value,
+      [],
+      state,
+      undefined,
+      resolved.source,
+      resolved.detail,
+      resolutionCtx,
+    );
     return {
-      fields: fieldsFromSchema(
-        resolved.schema,
-        resolved.schema,
-        value,
-        [],
-        state,
-        undefined,
-        resolved.source,
-        resolved.detail,
-      ),
+      fields,
       warnings,
-      truncated: state.truncated,
+      truncated: state.truncated || resolutionCtx.truncated,
       schemaStore: resolved.schemaStore,
     };
   } catch (error) {
@@ -276,7 +295,15 @@ async function readSchema(path: string, projectRoot: string): Promise<JsonSchema
     tooLargeMessage: "Schema 超过 2 MiB",
     invalidUtf8Message: "Schema 不是有效的 UTF-8 编码",
   });
-  return JSON.parse(text.replace(/^\uFEFF/, "")) as JsonSchema;
+  return parseSchemaDocument(text);
+}
+
+function parseSchemaDocument(text: string): JsonSchema {
+  const parsed: unknown = JSON.parse(text.replace(/^\uFEFF/, ""));
+  if (!isRecord(parsed)) {
+    throw new Error("Schema 根节点必须是 JSON 对象");
+  }
+  return parsed;
 }
 
 /**
@@ -366,7 +393,7 @@ async function fetchSchemaUncached(url: string, fetcher: typeof fetch): Promise<
         tooLargeMessage: "Schema 超过 2 MiB",
         invalidUtf8Message: "Schema 不是有效的 UTF-8 编码",
       });
-      return JSON.parse(text.replace(/^\uFEFF/, "")) as JsonSchema;
+      return parseSchemaDocument(text);
     }
     throw new Error("Schema 重定向次数过多");
   } finally {
@@ -383,20 +410,21 @@ function fieldsFromSchema(
   groupHint?: string,
   source: Extract<FieldSource, "json-schema" | "schemastore"> = "json-schema",
   detail = "来自项目声明的 JSON Schema",
+  resolutionCtx: SchemaResolutionContext = { steps: 0, truncated: false, refCache: new Map() },
 ): FieldCandidate[] {
-  if (order.truncated) return [];
-  const schema = resolveSchema(schemaInput, rootSchema);
+  if (order.truncated || resolutionCtx.truncated) return [];
+  const schema = resolveSchema(schemaInput, rootSchema, resolutionCtx);
   const properties = isRecord(schema.properties) ? schema.properties : {};
   const required = new Set(Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === "string") : []);
   const fields: FieldCandidate[] = [];
 
   for (const [key, rawChild] of Object.entries(properties)) {
-    if (order.value >= MAX_SCHEMA_FIELDS) {
+    if (order.value >= MAX_SCHEMA_FIELDS || resolutionCtx.truncated) {
       order.truncated = true;
       break;
     }
-    if (!isRecord(rawChild)) continue;
-    const child = resolveSchema(rawChild, rootSchema);
+    if (!key || isForbiddenKey(key) || !isRecord(rawChild)) continue;
+    const child = resolveSchema(rawChild, rootSchema, resolutionCtx);
     const segments = [...prefix, key];
     const current = getAtPath(value, segments);
     const type = schemaType(child, key, current);
@@ -415,6 +443,7 @@ function fieldsFromSchema(
         typeof child.title === "string" ? child.title : humanize(key),
         source,
         detail,
+        resolutionCtx,
       ));
       continue;
     }
@@ -427,7 +456,7 @@ function fieldsFromSchema(
     const secret = isSecretPath(segments) || child.writeOnly === true || child.format === "password";
     const defaultValue = child.default !== undefined ? child.default : child.const;
     const itemFields = type === "array"
-      ? extractItemFieldsFromArraySchema(child, rootSchema, 0)
+      ? extractItemFieldsFromArraySchema(child, rootSchema, 0, resolutionCtx)
       : undefined;
     fields.push({
       segments,
@@ -466,12 +495,13 @@ function extractItemFieldsFromArraySchema(
   arraySchema: JsonSchema,
   rootSchema: JsonSchema,
   depth: number,
+  resolutionCtx: SchemaResolutionContext,
 ): ItemFieldSpec[] | undefined {
-  if (depth >= MAX_ITEM_FIELD_DEPTH) return undefined;
+  if (depth >= MAX_ITEM_FIELD_DEPTH || resolutionCtx.truncated) return undefined;
   const rawItems = arraySchema.items;
   if (!isRecord(rawItems)) return undefined;
-  const resolvedItems = resolveSchema(rawItems, rootSchema);
-  const objectSchema = extractObjectItemSchema(resolvedItems, rootSchema);
+  const resolvedItems = resolveSchema(rawItems, rootSchema, resolutionCtx);
+  const objectSchema = extractObjectItemSchema(resolvedItems, rootSchema, resolutionCtx);
   if (!objectSchema || !isRecord(objectSchema.properties)) return undefined;
 
   const requiredSet = new Set(
@@ -481,9 +511,9 @@ function extractItemFieldsFromArraySchema(
   );
   const specs: ItemFieldSpec[] = [];
   for (const [propKey, rawProp] of Object.entries(objectSchema.properties)) {
-    if (specs.length >= MAX_ITEM_FIELDS) break;
+    if (specs.length >= MAX_ITEM_FIELDS || resolutionCtx.truncated) break;
     if (!propKey || isForbiddenKey(propKey) || !isRecord(rawProp)) continue;
-    const prop = resolveSchema(rawProp, rootSchema);
+    const prop = resolveSchema(rawProp, rootSchema, resolutionCtx);
     const propType = schemaType(prop, propKey, undefined);
     const enumValues = Array.isArray(prop.enum)
       ? prop.enum.filter((item): item is string | number => typeof item === "string" || typeof item === "number")
@@ -494,7 +524,7 @@ function extractItemFieldsFromArraySchema(
     const secret = isSecretPath([propKey]) || prop.writeOnly === true || prop.format === "password";
     const defaultValue = prop.default !== undefined ? prop.default : prop.const;
     const nestedItemFields = propType === "array"
-      ? extractItemFieldsFromArraySchema(prop, rootSchema, depth + 1)
+      ? extractItemFieldsFromArraySchema(prop, rootSchema, depth + 1, resolutionCtx)
       : undefined;
     specs.push({
       key: propKey,
@@ -519,7 +549,11 @@ function extractItemFieldsFromArraySchema(
   return specs.length ? specs : undefined;
 }
 
-function extractObjectItemSchema(schema: JsonSchema, rootSchema: JsonSchema): JsonSchema | undefined {
+function extractObjectItemSchema(
+  schema: JsonSchema,
+  rootSchema: JsonSchema,
+  resolutionCtx: SchemaResolutionContext,
+): JsonSchema | undefined {
   if (isRecord(schema.properties) && Object.keys(schema.properties).length > 0) {
     return schema;
   }
@@ -532,7 +566,7 @@ function extractObjectItemSchema(schema: JsonSchema, rootSchema: JsonSchema): Js
 
   const objectBranches = unionBranches
     .filter(isRecord)
-    .map((branch) => resolveSchema(branch, rootSchema))
+    .map((branch) => resolveSchema(branch, rootSchema, resolutionCtx))
     .filter((branch) => isRecord(branch.properties) && Object.keys(branch.properties).length > 0);
   if (!objectBranches.length) return undefined;
 
@@ -560,75 +594,144 @@ function extractObjectItemSchema(schema: JsonSchema, rootSchema: JsonSchema): Js
 function resolveSchema(
   schema: JsonSchema,
   root: JsonSchema,
+  ctx: SchemaResolutionContext,
   visited: ReadonlySet<string> = new Set(),
   depth = 0,
+  cycleTracker: CycleTracker = { hitCycle: false, hitDepthLimit: false },
 ): JsonSchema {
-  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) return schema;
+  const needsResolution = typeof schema.$ref === "string"
+    || Array.isArray(schema.allOf)
+    || Array.isArray(schema.oneOf)
+    || Array.isArray(schema.anyOf);
+  if (!needsResolution) return schema;
+  if (ctx.steps >= MAX_RESOLUTION_STEPS) {
+    ctx.truncated = true;
+    return schema;
+  }
+  ctx.steps += 1;
+  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) {
+    cycleTracker.hitDepthLimit = true;
+    return schema;
+  }
   const reference = schema.$ref;
   if (typeof reference !== "string" || !reference.startsWith("#/")) {
-    return resolveComposition(schema, root, visited, depth);
+    return resolveComposition(schema, root, ctx, visited, depth, cycleTracker);
   }
   const { $ref: _ignoredRef, ...siblings } = schema;
+  const hasSiblings = Object.keys(siblings).length > 0;
   if (visited.has(reference)) {
-    return resolveComposition(siblings, root, visited, depth + 1);
+    cycleTracker.hitCycle = true;
+    return resolveComposition(siblings, root, ctx, visited, depth + 1, cycleTracker);
+  }
+  const cached = ctx.refCache.get(reference);
+  if (cached !== undefined) {
+    if (!hasSiblings) return cached;
+    const combined = mergeSchemaObjects(cached, siblings);
+    return resolveComposition(combined, root, ctx, visited, depth + 1, cycleTracker);
   }
   const parts = reference.slice(2).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~"));
   let current: unknown = root;
   for (const part of parts) {
-    if (!isRecord(current)) return resolveComposition(siblings, root, visited, depth + 1);
+    if (!isRecord(current) || isForbiddenKey(part) || !Object.prototype.hasOwnProperty.call(current, part)) {
+      return resolveComposition(siblings, root, ctx, visited, depth + 1, cycleTracker);
+    }
     current = current[part];
   }
-  if (!isRecord(current)) return resolveComposition(siblings, root, visited, depth + 1);
+  if (!isRecord(current)) return resolveComposition(siblings, root, ctx, visited, depth + 1, cycleTracker);
   const nextVisited = new Set(visited);
   nextVisited.add(reference);
-  const resolvedTarget = resolveSchema(current, root, nextVisited, depth + 1);
+  const targetTracker: CycleTracker = { hitCycle: false, hitDepthLimit: false };
+  const resolvedTarget = resolveSchema(current, root, ctx, nextVisited, depth + 1, targetTracker);
+  if (targetTracker.hitCycle) {
+    cycleTracker.hitCycle = true;
+  }
+  if (targetTracker.hitDepthLimit) {
+    cycleTracker.hitDepthLimit = true;
+  }
+  if (!targetTracker.hitCycle && !targetTracker.hitDepthLimit && !ctx.truncated) {
+    ctx.refCache.set(reference, resolvedTarget);
+  }
+  if (!hasSiblings) return resolvedTarget;
   const combined = mergeSchemaObjects(resolvedTarget, siblings);
-  return resolveComposition(combined, root, nextVisited, depth + 1);
+  return resolveComposition(combined, root, ctx, nextVisited, depth + 1, cycleTracker);
 }
 
 function resolveComposition(
   schema: JsonSchema,
   root: JsonSchema,
+  ctx: SchemaResolutionContext,
   visited: ReadonlySet<string>,
   depth: number,
+  cycleTracker: CycleTracker,
 ): JsonSchema {
-  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) return schema;
-  const afterAllOf = mergeAllOf(schema, root, visited, depth);
-  return mergeOneOrAnyOf(afterAllOf, root, visited, depth);
+  if (ctx.steps >= MAX_RESOLUTION_STEPS) {
+    ctx.truncated = true;
+    return schema;
+  }
+  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) {
+    cycleTracker.hitDepthLimit = true;
+    return schema;
+  }
+  const afterAllOf = mergeAllOf(schema, root, ctx, visited, depth, cycleTracker);
+  return mergeOneOrAnyOf(afterAllOf, root, ctx, visited, depth, cycleTracker);
 }
 
 function mergeAllOf(
   schema: JsonSchema,
   root: JsonSchema,
+  ctx: SchemaResolutionContext,
   visited: ReadonlySet<string> = new Set(),
   depth = 0,
+  cycleTracker: CycleTracker = { hitCycle: false, hitDepthLimit: false },
 ): JsonSchema {
-  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) return schema;
+  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) {
+    cycleTracker.hitDepthLimit = true;
+    return schema;
+  }
+  if (ctx.truncated) return schema;
   if (!Array.isArray(schema.allOf)) return schema;
   const { allOf, ...rest } = schema;
-  return allOf.reduce<JsonSchema>((merged, item) => {
-    if (!isRecord(item)) return merged;
-    const child = resolveSchema(item, root, visited, depth + 1);
-    return mergeSchemaObjects(merged, child);
-  }, rest);
+  let merged: JsonSchema = rest;
+  for (const item of allOf) {
+    if (ctx.steps >= MAX_RESOLUTION_STEPS) {
+      ctx.truncated = true;
+      break;
+    }
+    if (!isRecord(item)) continue;
+    const child = resolveSchema(item, root, ctx, visited, depth + 1, cycleTracker);
+    merged = mergeSchemaObjects(merged, child);
+  }
+  return merged;
 }
 
 function mergeOneOrAnyOf(
   schema: JsonSchema,
   root: JsonSchema,
+  ctx: SchemaResolutionContext,
   visited: ReadonlySet<string>,
   depth: number,
+  cycleTracker: CycleTracker,
 ): JsonSchema {
-  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) return schema;
+  if (depth > MAX_SCHEMA_RESOLUTION_DEPTH) {
+    cycleTracker.hitDepthLimit = true;
+    return schema;
+  }
+  if (ctx.truncated) return schema;
   const rawBranches = Array.isArray(schema.oneOf)
     ? schema.oneOf
     : Array.isArray(schema.anyOf)
       ? schema.anyOf
       : undefined;
   if (!rawBranches?.length) return schema;
-  const resolvedBranches = rawBranches
-    .filter(isRecord)
-    .map((branch) => resolveSchema(branch, root, visited, depth + 1));
+  const resolvedBranches: JsonSchema[] = [];
+  for (const branch of rawBranches) {
+    if (ctx.steps >= MAX_RESOLUTION_STEPS) {
+      ctx.truncated = true;
+      break;
+    }
+    if (!isRecord(branch)) continue;
+    resolvedBranches.push(resolveSchema(branch, root, ctx, visited, depth + 1, cycleTracker));
+  }
   if (!resolvedBranches.length) return schema;
 
   const nonNullBranches = resolvedBranches.filter((branch) => !isNullOnlySchema(branch));
@@ -682,10 +785,18 @@ function mergeOneOrAnyOf(
 function mergeSchemaObjects(base: JsonSchema, override: JsonSchema): JsonSchema {
   const merged: JsonSchema = { ...base, ...override };
   if (isRecord(base.properties) || isRecord(override.properties)) {
-    merged.properties = {
-      ...(isRecord(base.properties) ? base.properties : {}),
-      ...(isRecord(override.properties) ? override.properties : {}),
-    };
+    const mergedProps: Record<string, unknown> = {};
+    if (isRecord(base.properties)) {
+      for (const [k, v] of Object.entries(base.properties)) {
+        if (!isForbiddenKey(k)) mergedProps[k] = v;
+      }
+    }
+    if (isRecord(override.properties)) {
+      for (const [k, v] of Object.entries(override.properties)) {
+        if (!isForbiddenKey(k)) mergedProps[k] = v;
+      }
+    }
+    merged.properties = mergedProps;
   }
   if (Array.isArray(base.required) || Array.isArray(override.required)) {
     merged.required = [

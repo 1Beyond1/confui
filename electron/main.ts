@@ -44,6 +44,7 @@ import { resolveTestAIApiKey, SettingsStore, type SecretCodec } from "../core/se
 import { checkForUpdates } from "../core/update.ts";
 import type {
   AppSettings,
+  CompareConfigOptions,
   ConfigChange,
   ConfigFile,
   FileChangedEvent,
@@ -54,9 +55,11 @@ import type {
   Locale,
   PathSegment,
   ProjectSearchOptions,
+  RedactedExportOptions,
   Result,
   RestoreBackupPreview,
   SavePreview,
+  ScopedSecretPath,
   TestAIRequest,
   ThemePreference,
 } from "../shared/schema.ts";
@@ -459,11 +462,12 @@ function registerIpcHandlers(): void {
     return created;
   });
 
-  handle("confui:compareConfigs", async (_event, root: unknown, sourceFile: unknown, targetFile: unknown) => {
+  handle("confui:compareConfigs", async (_event, root: unknown, sourceFile: unknown, targetFile: unknown, options?: unknown) => {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertString(sourceFile, "源配置文件路径", MAX_CONFIG_PATH_CHARS);
     assertString(targetFile, "目标配置文件路径", MAX_CONFIG_PATH_CHARS);
-    return compareConfigFiles(root, sourceFile, targetFile);
+    const safeOptions = parseOptionalCompareOptions(options);
+    return compareConfigFiles(root, sourceFile, targetFile, safeOptions);
   });
 
   handle(
@@ -475,6 +479,7 @@ function registerIpcHandlers(): void {
       targetFile: unknown,
       selectedSegments: unknown,
       expectedTargetVersion: unknown,
+      options?: unknown,
     ) => {
       assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
       assertString(sourceFile, "源配置文件路径", MAX_CONFIG_PATH_CHARS);
@@ -482,23 +487,36 @@ function registerIpcHandlers(): void {
       if (!isPathSegmentList(selectedSegments) || !isFileVersion(expectedTargetVersion)) {
         throw new ConfuiError("INVALID_INPUT", "配置补齐参数无效");
       }
-      return previewSyncFromFile(root, sourceFile, targetFile, selectedSegments, expectedTargetVersion);
+      const safeOptions = parseOptionalCompareOptions(options);
+      return previewSyncFromFile(root, sourceFile, targetFile, selectedSegments, expectedTargetVersion, safeOptions);
     },
   );
 
-  handle("confui:previewRedactedExport", async (_event, root: unknown, file: unknown, secretPaths?: unknown) => {
+  handle("confui:previewRedactedExport", async (_event, root: unknown, file: unknown, secretPaths?: unknown, options?: unknown) => {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
     const paths = secretPaths === undefined ? [] : parseOptionalSecretPaths(secretPaths);
-    return generateRedactedExport(root, file, paths);
+    const exportOptions = parseOptionalRedactedExportOptions(options);
+    const settings = await settingsStore.load();
+    return generateRedactedExport(root, file, paths, {
+      ...exportOptions,
+      enableSchemaStore: settings.schemaStore.enabled,
+      schemaStoreCacheDir: join(app.getPath("userData"), "schemastore-cache"),
+    });
   });
 
-  handle("confui:saveRedactedExport", async (_event, root: unknown, file: unknown, secretPaths?: unknown) => {
+  handle("confui:saveRedactedExport", async (_event, root: unknown, file: unknown, secretPaths?: unknown, options?: unknown) => {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
     const paths = secretPaths === undefined ? [] : parseOptionalSecretPaths(secretPaths);
+    const exportOptions = parseOptionalRedactedExportOptions(options);
+    const settings = await settingsStore.load();
     const resolved = await resolveExistingProjectPath(root, file);
-    const preview = await generateRedactedExport(root, file, paths);
+    const preview = await generateRedactedExport(root, file, paths, {
+      ...exportOptions,
+      enableSchemaStore: settings.schemaStore.enabled,
+      schemaStoreCacheDir: join(app.getPath("userData"), "schemastore-cache"),
+    });
     const isEn = currentLocale === "en-US";
     const saveOptions = {
       title: isEn ? "Export Redacted Copy" : "导出脱敏副本",
@@ -882,4 +900,69 @@ function parseOptionalSecretPaths(value: unknown): PathSegment[][] {
     throw new ConfuiError("INVALID_INPUT", "敏感字段路径列表无效");
   }
   return value;
+}
+
+function parseOptionalCompareOptions(value: unknown): CompareConfigOptions | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object") {
+    throw new ConfuiError("INVALID_INPUT", "对比选项参数无效");
+  }
+  const candidate = value as CompareConfigOptions;
+  const result: CompareConfigOptions = {};
+  if (candidate.sourceDocumentIndex !== undefined) {
+    if (typeof candidate.sourceDocumentIndex !== "number" || !Number.isSafeInteger(candidate.sourceDocumentIndex) || candidate.sourceDocumentIndex < 0) {
+      throw new ConfuiError("INVALID_INPUT", "源文档索引参数无效");
+    }
+    result.sourceDocumentIndex = candidate.sourceDocumentIndex;
+  }
+  if (candidate.targetDocumentIndex !== undefined) {
+    if (typeof candidate.targetDocumentIndex !== "number" || !Number.isSafeInteger(candidate.targetDocumentIndex) || candidate.targetDocumentIndex < 0) {
+      throw new ConfuiError("INVALID_INPUT", "目标文档索引参数无效");
+    }
+    result.targetDocumentIndex = candidate.targetDocumentIndex;
+  }
+  return result;
+}
+
+function parseOptionalRedactedExportOptions(value: unknown): RedactedExportOptions | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object") {
+    throw new ConfuiError("INVALID_INPUT", "脱敏导出选项无效");
+  }
+  const candidate = value as RedactedExportOptions;
+  const result: RedactedExportOptions = {};
+  if (candidate.documentIndex !== undefined) {
+    if (typeof candidate.documentIndex !== "number" || !Number.isSafeInteger(candidate.documentIndex) || candidate.documentIndex < 0) {
+      throw new ConfuiError("INVALID_INPUT", "文档索引参数无效");
+    }
+    result.documentIndex = candidate.documentIndex;
+  }
+  if (candidate.scopedSecretPaths !== undefined) {
+    if (!Array.isArray(candidate.scopedSecretPaths) || candidate.scopedSecretPaths.length > MAX_SAVE_OPERATIONS) {
+      throw new ConfuiError("INVALID_INPUT", "敏感字段路径列表无效");
+    }
+    const scoped: ScopedSecretPath[] = [];
+    for (const item of candidate.scopedSecretPaths) {
+      if (
+        item === null
+        || typeof item !== "object"
+        || !Array.isArray((item as ScopedSecretPath).segments)
+        || (item as ScopedSecretPath).segments.length < 1
+        || (item as ScopedSecretPath).segments.length > 32
+        || !(item as ScopedSecretPath).segments.every(isSafeAssistSegment)
+      ) {
+        throw new ConfuiError("INVALID_INPUT", "敏感字段路径列表无效");
+      }
+      const docIdx = (item as ScopedSecretPath).documentIndex;
+      if (docIdx !== undefined && (typeof docIdx !== "number" || !Number.isSafeInteger(docIdx) || docIdx < 0)) {
+        throw new ConfuiError("INVALID_INPUT", "文档索引参数无效");
+      }
+      scoped.push({
+        ...(docIdx !== undefined ? { documentIndex: docIdx } : {}),
+        segments: [...(item as ScopedSecretPath).segments],
+      });
+    }
+    result.scopedSecretPaths = scoped;
+  }
+  return result;
 }
