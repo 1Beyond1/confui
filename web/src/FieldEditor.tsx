@@ -102,7 +102,7 @@ export function FieldEditor({
     let required = 0;
     for (const field of fields) {
       const key = fieldKey(field);
-      if (customKeys?.has(key) || isFieldModified(field, values[key])) modified += 1;
+      if (isFieldModified(field, values[key])) modified += 1;
       if (errors.has(key)) errorCount += 1;
       if (field.required === true) required += 1;
     }
@@ -244,7 +244,7 @@ export function FieldEditor({
             let groupErrors = 0;
             for (const field of groupedFields) {
               const key = fieldKey(field);
-              if (customKeys?.has(key) || isFieldModified(field, values[key])) groupModified += 1;
+              if (isFieldModified(field, values[key])) groupModified += 1;
               if (errors.has(key)) groupErrors += 1;
             }
             return (
@@ -376,7 +376,7 @@ function FieldRow({
   }
 
   const currentEffective = effectiveValue(value);
-  const modified = isCustom || isFieldModified(field, value);
+  const modified = isFieldModified(field, value);
   const markedDeleted = !isCustom && field.value !== undefined && currentEffective === undefined;
   const canDelete = isCustom || field.value !== undefined;
   const inactiveExampleRequired = isInactiveExamplePlaceholder(field, currentEffective);

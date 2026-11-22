@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
-import type { FieldSpec } from "../shared/schema.ts";
+import type { ConfigFormSchema, FieldSpec, FileVersion, SavePreview } from "../shared/schema.ts";
 import {
   collectChanges,
+  createCustomFieldSpec,
+  createJsonDraft,
   fieldKey,
+  filterFieldsByStatus,
   initializeEditorValues,
+  isEditorDirty,
+  isSafeRegexPattern,
   parseJsonDraft,
+  reconcileSavedState,
   validationErrors,
 } from "../web/src/editor-state.ts";
 
@@ -167,5 +173,123 @@ describe("editor state", () => {
     // Schema-declared required fields remain enforced even when absent from the file.
     const schemaValues = initializeEditorValues([schemaRequired]);
     expect(validationErrors([schemaRequired], schemaValues).get(fieldKey(schemaRequired))).toBe("这是必填项");
+  });
+
+  it("blocks ReDoS patterns from untrusted schemas/AI while preserving valid pattern validation", () => {
+    // Dangerous nested quantifier / overlapping alternation / backreference / oversized patterns
+    expect(isSafeRegexPattern("(a+)+$")).toBe(false);
+    expect(isSafeRegexPattern("(a*)*$")).toBe(false);
+    expect(isSafeRegexPattern("([a-zA-Z]+)*$")).toBe(false);
+    expect(isSafeRegexPattern("(a|aa)+$")).toBe(false);
+    expect(isSafeRegexPattern("(\\w|\\d)+$")).toBe(false);
+    expect(isSafeRegexPattern("(a+)\\1")).toBe(false);
+    expect(isSafeRegexPattern("a".repeat(600))).toBe(false);
+    expect(isSafeRegexPattern(".*.*x")).toBe(false);
+
+    // Safe real-world schema patterns remain allowed
+    expect(isSafeRegexPattern("^[a-z0-9-]+$")).toBe(true);
+    expect(isSafeRegexPattern("^\\d{1,3}(\\.\\d{1,3}){3}$")).toBe(true);
+    expect(isSafeRegexPattern("^https?://.+")).toBe(true);
+    expect(isSafeRegexPattern("^[A-Za-z_][A-Za-z0-9_]*$")).toBe(true);
+
+    // Adversarial ReDoS payload against validateField returns immediately without hanging
+    const redosField = field({ path: "slug", segments: ["slug"], pattern: "(a+)+$" });
+    const evilInput = `${"a".repeat(32)}!`;
+    const started = performance.now();
+    const errs = validationErrors([redosField], { [fieldKey(redosField)]: evilInput });
+    expect(performance.now() - started).toBeLessThan(100);
+    expect(errs.size).toBe(0);
+
+    // Valid pattern still rejects invalid input and accepts valid input
+    const slugField = field({ path: "slug", segments: ["slug"], pattern: "^[a-z0-9-]+$" });
+    expect(validationErrors([slugField], { [fieldKey(slugField)]: "BAD SLUG" }).get(fieldKey(slugField))).toBeDefined();
+    expect(validationErrors([slugField], { [fieldKey(slugField)]: "good-slug-1" }).size).toBe(0);
+  });
+
+  it("never forges unwritten in-memory edits as saved during partial sync reconciliation", () => {
+    const portField = field({ path: "PORT", segments: ["PORT"], type: "integer", value: 3000 });
+    const logField = field({ path: "LOG_LEVEL", segments: ["LOG_LEVEL"], type: "string", value: "info" });
+    const baseVersion: FileVersion = { mtimeMs: 1, size: 30, hash: "a".repeat(64) };
+    const nextVersion: FileVersion = { mtimeMs: 2, size: 32, hash: "b".repeat(64) };
+    const schema: ConfigFormSchema = {
+      file: ".env",
+      kind: "env",
+      format: "env",
+      fields: [portField, logField],
+      sources: [],
+      writable: true,
+      warnings: [],
+      exampleFiles: [],
+      version: baseVersion,
+      rawText: "PORT=3000\nLOG_LEVEL=info\n",
+    };
+
+    const customField = createCustomFieldSpec(["UNSAVED_CUSTOM"], "string", "Custom");
+    const values = {
+      ...initializeEditorValues([portField, logField]),
+      [fieldKey(portField)]: 9999, // User edited PORT in-memory, NOT included in partial sync
+      [fieldKey(customField)]: "draft-only",
+    };
+
+    // Partial SavePreview writes ONLY LOG_LEVEL=warn to disk (PORT stays 3000 on disk!)
+    const partialPreview: SavePreview = {
+      projectRoot: "/tmp/proj",
+      file: ".env",
+      format: "env",
+      changes: [{ path: "LOG_LEVEL", before: "info", after: "warn" }],
+      operations: [{ segments: ["LOG_LEVEL"], value: "warn" }],
+      output: "PORT=3000\nLOG_LEVEL=warn\n",
+      warnings: [],
+      expectedVersion: baseVersion,
+    };
+
+    const reconciled = reconcileSavedState(schema, values, [customField], partialPreview, nextVersion);
+    // LOG_LEVEL advanced to its disk value "warn"
+    expect(reconciled.schema.fields.find((f) => f.path === "LOG_LEVEL")?.value).toBe("warn");
+    expect(reconciled.values[fieldKey(logField)]).toBe("warn");
+    // PORT on-disk baseline MUST remain 3000 while draft editor value remains 9999!
+    expect(reconciled.schema.fields.find((f) => f.path === "PORT")?.value).toBe(3000);
+    expect(reconciled.values[fieldKey(portField)]).toBe(9999);
+    // Unsaved custom field MUST NOT be dropped
+    expect(reconciled.customFields).toHaveLength(1);
+    expect(reconciled.values[fieldKey(customField)]).toBe("draft-only");
+    // Editor MUST remain dirty with both unwritten changes intact
+    expect(reconciled.hasRemainingDirty).toBe(true);
+    const remainingChanges = collectChanges([...reconciled.schema.fields, ...reconciled.customFields], reconciled.values);
+    expect(remainingChanges).toEqual([
+      { segments: ["PORT"], value: 9999 },
+      { segments: ["UNSAVED_CUSTOM"], value: "draft-only" },
+    ]);
+  });
+
+  it("does not mark an empty cleared custom field as dirty when there are no writable changes", () => {
+    const existing = field({ path: "PORT", segments: ["PORT"], type: "integer", value: 3000 });
+    const emptyCustom = createCustomFieldSpec(["EXTRA_JSON"], "json", "Custom");
+    const stringCustom = createCustomFieldSpec(["EXTRA_STR"], "string", "Custom");
+    const fields = [existing, emptyCustom];
+
+    // Custom JSON field cleared back to empty text (parsed === undefined, no error)
+    const clearedValues = {
+      ...initializeEditorValues([existing]),
+      [fieldKey(emptyCustom)]: createJsonDraft(undefined),
+    };
+    expect(collectChanges(fields, clearedValues)).toEqual([]);
+    expect(isEditorDirty(fields, clearedValues)).toBe(false);
+    expect(filterFieldsByStatus(fields, clearedValues, new Map(), new Set([fieldKey(emptyCustom)]), "modified")).toEqual([]);
+
+    // Custom JSON field with syntax error IS dirty
+    const invalidValues = {
+      ...initializeEditorValues([existing]),
+      [fieldKey(emptyCustom)]: parseJsonDraft("{bad"),
+    };
+    expect(isEditorDirty(fields, invalidValues)).toBe(true);
+
+    // Custom string field with explicit empty string "" IS a real writable change
+    const strValues = {
+      ...initializeEditorValues([existing]),
+      [fieldKey(stringCustom)]: "",
+    };
+    expect(collectChanges([existing, stringCustom], strValues)).toEqual([{ segments: ["EXTRA_STR"], value: "" }]);
+    expect(isEditorDirty([existing, stringCustom], strValues)).toBe(true);
   });
 });

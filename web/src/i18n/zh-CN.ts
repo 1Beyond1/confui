@@ -251,6 +251,8 @@ export const zhCN = {
   "compare.targetLabel": "目标配置（写入补齐）",
   "compare.swap": "交换源和目标",
   "compare.sameFileHint": "请选择两个不同的配置文件进行对比。",
+  "compare.targetDirtyBlocked": "当前文件「{file}」有未保存的更改。请先保存或放弃当前更改后再向本文件补齐，或切换目标文件以同步到其他未修改的配置。",
+  "compare.sourceDirtyHint": "提示：当前源文件「{file}」有未保存更改，对比读取的是磁盘上的已保存内容。",
   "compare.loading": "正在解析并对比配置文件...",
   "compare.filterActionable": "待处理 ({count})",
   "compare.filterMissing": "缺失 ({count})",

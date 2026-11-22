@@ -1,6 +1,22 @@
-import type { ConfigChange, ConfigFormat, FieldSpec, FieldType, Locale, PathSegment } from "../../shared/schema.ts";
+import type {
+  ConfigChange,
+  ConfigFormat,
+  ConfigFormSchema,
+  FieldSpec,
+  FieldType,
+  FileVersion,
+  Locale,
+  PathSegment,
+  SavePreview,
+} from "../../shared/schema.ts";
 import { isForbiddenKey, isHexColor } from "../../shared/validation.ts";
 import { translate } from "./i18n/index.tsx";
+
+const MAX_REGEX_PATTERN_LENGTH = 512;
+const MAX_REGEX_TEST_VALUE_LENGTH = 4_096;
+const MAX_REGEX_GROUP_DEPTH = 6;
+const MAX_REGEX_UNBOUNDED_QUANTIFIERS = 20;
+const MAX_REGEX_BRACE_BOUND = 1_000;
 
 export interface JsonDraft {
   __confuiJsonDraft: true;
@@ -16,14 +32,14 @@ export function filterFieldsByStatus(
   fields: readonly FieldSpec[],
   values: EditorValues,
   errors: ReadonlyMap<string, string>,
-  customKeys: ReadonlySet<string> | undefined,
+  _customKeys: ReadonlySet<string> | undefined,
   status: FieldStatusFilter,
 ): FieldSpec[] {
   if (status === "all") return [...fields];
   return fields.filter((field) => {
     const key = fieldKey(field);
     if (status === "modified") {
-      return Boolean(customKeys?.has(key)) || isFieldModified(field, values[key]);
+      return isFieldModified(field, values[key]);
     }
     if (status === "error") {
       return errors.has(key);
@@ -33,6 +49,80 @@ export function filterFieldsByStatus(
     }
     return true;
   });
+}
+
+/**
+ * Returns true when at least one field has an actual uncommitted change or
+ * invalid JSON draft. An added custom field whose value was cleared back to
+ * `undefined` without errors does not falsely keep the editor dirty.
+ */
+export function isEditorDirty(fields: readonly FieldSpec[], values: EditorValues): boolean {
+  return fields.some((field) => isFieldModified(field, values[fieldKey(field)]));
+}
+
+/**
+ * Reconciles in-memory schema and editor draft state after a `SavePreview` is
+ * committed to disk. Only keys actually present in `savePreview.operations`
+ * advance their on-disk baseline; any unwritten in-memory edits or unsaved
+ * custom fields are preserved intact so `dirty` is never falsely cleared.
+ */
+export function reconcileSavedState(
+  schema: ConfigFormSchema,
+  values: EditorValues,
+  customFields: readonly FieldSpec[],
+  savePreview: SavePreview,
+  savedVersion: FileVersion,
+): {
+  schema: ConfigFormSchema;
+  values: EditorValues;
+  customFields: FieldSpec[];
+  hasRemainingDirty: boolean;
+} {
+  const savedValues = new Map(
+    savePreview.operations.map((operation) => [JSON.stringify(operation.segments), operation.value]),
+  );
+
+  const nextValues: EditorValues = {};
+  const nextFields: FieldSpec[] = schema.fields.map((field) => {
+    const key = fieldKey(field);
+    if (savedValues.has(key)) {
+      const updatedField: FieldSpec = { ...field, value: savedValues.get(key) };
+      nextValues[key] = initialFieldEditorValue(updatedField);
+      return updatedField;
+    }
+    nextValues[key] = values[key];
+    return field;
+  });
+
+  const nextCustomFields: FieldSpec[] = [];
+  for (const field of customFields) {
+    const key = fieldKey(field);
+    if (savedValues.has(key)) {
+      const writtenValue = savedValues.get(key);
+      if (writtenValue !== undefined) {
+        const promoted: FieldSpec = { ...field, value: writtenValue };
+        nextFields.push(promoted);
+        nextValues[key] = initialFieldEditorValue(promoted);
+      }
+      continue;
+    }
+    nextCustomFields.push(field);
+    nextValues[key] = values[key];
+  }
+
+  const nextSchema: ConfigFormSchema = {
+    ...schema,
+    fields: nextFields,
+    rawText: savePreview.output,
+    version: savedVersion,
+  };
+  const combinedFields = [...nextFields, ...nextCustomFields];
+  return {
+    schema: nextSchema,
+    values: nextValues,
+    customFields: nextCustomFields,
+    hasRemainingDirty: isEditorDirty(combinedFields, nextValues),
+  };
 }
 
 export function fieldKey(field: Pick<FieldSpec, "segments">): string {
@@ -144,7 +234,7 @@ export function validateField(
     if (field.type === "color" && !isHexColor(value)) return translate(locale, "validation.colorExpected");
     if (field.minLength !== undefined && value.length < field.minLength) return translate(locale, "validation.minLength", { min: field.minLength });
     if (field.maxLength !== undefined && value.length > field.maxLength) return translate(locale, "validation.maxLength", { max: field.maxLength });
-    if (field.pattern) {
+    if (field.pattern && value.length <= MAX_REGEX_TEST_VALUE_LENGTH && isSafeRegexPattern(field.pattern)) {
       try {
         if (!new RegExp(field.pattern).test(value)) return translate(locale, "validation.pattern");
       } catch {
@@ -343,6 +433,171 @@ export function createCustomFieldSpec(
 
 function isStrictSegmentPrefix(prefix: readonly PathSegment[], full: readonly PathSegment[]): boolean {
   return prefix.length < full.length && prefix.every((part, idx) => part === full[idx]);
+}
+
+/**
+ * Static linear-time ReDoS guard for regex patterns sourced from untrusted
+ * `$schema` files or AI inference. Rejects overly long patterns, backreferences,
+ * nested quantifiers (star-height > 1), repeated alternation groups, and
+ * consecutive unbounded wildcard sequences.
+ */
+export function isSafeRegexPattern(pattern: string): boolean {
+  if (!pattern || pattern.length > MAX_REGEX_PATTERN_LENGTH) return false;
+  interface GroupFrame {
+    hasQuantifier: boolean;
+    hasAlternation: boolean;
+    isLookaround: boolean;
+  }
+  const stack: GroupFrame[] = [];
+  let lastToken: "none" | "atom" | "group" | "quantifier" = "none";
+  let lastAtomWasDot = false;
+  let lastClosedGroup: GroupFrame | undefined;
+  let unboundedCount = 0;
+  let prevWasWildcardRepeat = false;
+
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i]!;
+
+    if (ch === "\\") {
+      if (i + 1 >= pattern.length) return false;
+      const next = pattern[i + 1]!;
+      if ((next >= "1" && next <= "9") || next === "k") return false;
+      i += 1;
+      lastToken = "atom";
+      lastAtomWasDot = false;
+      prevWasWildcardRepeat = false;
+      continue;
+    }
+
+    if (ch === "[") {
+      let closed = false;
+      for (i += 1; i < pattern.length; i += 1) {
+        if (pattern[i] === "\\") {
+          i += 1;
+          continue;
+        }
+        if (pattern[i] === "]") {
+          closed = true;
+          break;
+        }
+      }
+      if (!closed) return false;
+      lastToken = "atom";
+      lastAtomWasDot = false;
+      prevWasWildcardRepeat = false;
+      continue;
+    }
+
+    if (ch === "(") {
+      if (stack.length >= MAX_REGEX_GROUP_DEPTH) return false;
+      let isLookaround = false;
+      if (pattern[i + 1] === "?") {
+        if (pattern.startsWith("(?<=", i) || pattern.startsWith("(?<!", i)) {
+          isLookaround = true;
+          i += 3;
+        } else if (pattern.startsWith("(?=", i) || pattern.startsWith("(?!", i)) {
+          isLookaround = true;
+          i += 2;
+        } else if (pattern.startsWith("(?:", i)) {
+          i += 2;
+        } else if (pattern.startsWith("(?<", i)) {
+          const endName = pattern.indexOf(">", i + 3);
+          if (endName < 0) return false;
+          i = endName;
+        }
+      }
+      stack.push({ hasQuantifier: false, hasAlternation: false, isLookaround });
+      lastToken = "none";
+      lastAtomWasDot = false;
+      prevWasWildcardRepeat = false;
+      continue;
+    }
+
+    if (ch === ")") {
+      const closed = stack.pop();
+      if (!closed) return false;
+      if (closed.isLookaround && closed.hasQuantifier) return false;
+      if (closed.hasQuantifier && stack.length > 0) {
+        stack.at(-1)!.hasQuantifier = true;
+      }
+      lastClosedGroup = closed;
+      lastToken = "group";
+      lastAtomWasDot = false;
+      prevWasWildcardRepeat = false;
+      continue;
+    }
+
+    if (ch === "|") {
+      if (stack.length > 0) stack.at(-1)!.hasAlternation = true;
+      lastToken = "none";
+      lastAtomWasDot = false;
+      prevWasWildcardRepeat = false;
+      continue;
+    }
+
+    if (ch === "?" && lastToken === "quantifier") {
+      // Lazy quantifier suffix (`*?`, `+?`, `{m,n}?`)
+      continue;
+    }
+
+    let quant: { min: number; max: number; isUnbounded: boolean } | undefined;
+    if (ch === "*") {
+      quant = { min: 0, max: Number.POSITIVE_INFINITY, isUnbounded: true };
+    } else if (ch === "+") {
+      quant = { min: 1, max: Number.POSITIVE_INFINITY, isUnbounded: true };
+    } else if (ch === "?") {
+      quant = { min: 0, max: 1, isUnbounded: false };
+    } else if (ch === "{") {
+      const braceMatch = pattern.slice(i).match(/^\{(\d+)(?:,(\d*))?\}/);
+      if (braceMatch) {
+        const min = Number(braceMatch[1]);
+        const hasComma = braceMatch[0].includes(",");
+        const max = !hasComma
+          ? min
+          : braceMatch[2]
+            ? Number(braceMatch[2])
+            : Number.POSITIVE_INFINITY;
+        if (!Number.isFinite(min) || (Number.isFinite(max) && max < min)) return false;
+        quant = { min, max, isUnbounded: !Number.isFinite(max) };
+        i += braceMatch[0].length - 1;
+      }
+    }
+
+    if (quant) {
+      if (lastToken === "none" || lastToken === "quantifier") return false;
+      if (quant.min > MAX_REGEX_BRACE_BOUND || (Number.isFinite(quant.max) && quant.max > MAX_REGEX_BRACE_BOUND)) {
+        return false;
+      }
+      if (quant.isUnbounded) {
+        unboundedCount += 1;
+        if (unboundedCount > MAX_REGEX_UNBOUNDED_QUANTIFIERS) return false;
+      }
+      const repeatsMultiple = quant.isUnbounded || quant.max > 1;
+      if (lastToken === "group" && lastClosedGroup && repeatsMultiple) {
+        const highRepeat = quant.isUnbounded || quant.max > 5;
+        if (lastClosedGroup.hasQuantifier && highRepeat) return false;
+        if (lastClosedGroup.hasAlternation && highRepeat) return false;
+      }
+      if (repeatsMultiple && stack.length > 0) {
+        stack.at(-1)!.hasQuantifier = true;
+      }
+      if (lastToken === "atom" && lastAtomWasDot && quant.isUnbounded) {
+        if (prevWasWildcardRepeat) return false;
+        prevWasWildcardRepeat = true;
+      } else {
+        prevWasWildcardRepeat = false;
+      }
+      lastToken = "quantifier";
+      lastAtomWasDot = false;
+      continue;
+    }
+
+    lastToken = "atom";
+    lastAtomWasDot = ch === ".";
+    if (ch !== ".") prevWasWildcardRepeat = false;
+  }
+
+  return stack.length === 0;
 }
 
 function deepEqual(left: unknown, right: unknown): boolean {

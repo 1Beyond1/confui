@@ -41,7 +41,9 @@ import {
   initialFieldEditorValue,
   initializeEditorValues,
   isEditableKeyboardTarget,
+  isEditorDirty,
   needsJsonEditor,
+  reconcileSavedState,
   validationErrors,
 } from "./editor-state.ts";
 import { useEditorHistory } from "./hooks/useEditorHistory.ts";
@@ -111,7 +113,6 @@ export function App() {
   const [settingsPageRevision, setSettingsPageRevision] = useState(0);
   const [pendingSettingsAction, setPendingSettingsAction] = useState<PendingAction>();
   const [afterSaveAction, setAfterSaveAction] = useState<PendingAction>();
-  const [fieldEditorRevision, setFieldEditorRevision] = useState(0);
   const [appVersion, setAppVersion] = useState("");
   const toastTimer = useRef<number>();
   const openSequence = useRef(0);
@@ -137,7 +138,10 @@ export function App() {
     () => schema ? validationErrors(allFields, values, schema.format, locale) : new Map<string, string>(),
     [schema, allFields, values, locale],
   );
-  const dirty = changes.length > 0 || customFields.length > 0;
+  const dirty = useMemo(
+    () => (schema ? isEditorDirty(allFields, values) : false),
+    [schema, allFields, values],
+  );
 
   const filteredFiles = useMemo(() => {
     const query = fileQuery.trim().toLowerCase();
@@ -495,8 +499,12 @@ export function App() {
     if (errors.size) {
       notify(t("toast.fixFieldErrors", { count: errors.size }), "error");
       setEditorTab("form");
-      setFieldEditorRevision((current) => current + 1);
-      window.setTimeout(() => document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus(), 0);
+      const firstInvalid = allFields.find((field) => errors.has(fieldKey(field)));
+      if (firstInvalid) {
+        setFocusFieldRequest({ file: schema.file, path: firstInvalid.path, token: Date.now() });
+      } else {
+        window.setTimeout(() => document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus(), 0);
+      }
       return;
     }
     setBusy("preview");
@@ -528,41 +536,29 @@ export function App() {
       const result = await window.confui.saveConfig(project.root, savePreview);
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       const isActiveTarget = Boolean(schema && savePreview.file === schema.file);
-      const savedValues = new Map(
-        savePreview.operations.map((operation) => [JSON.stringify(operation.segments), operation.value]),
-      );
       const hasUnlistedKeys = isActiveTarget && savePreview.operations.some(
         (operation) => !allFields.some((field) => fieldKey(field) === JSON.stringify(operation.segments)),
       );
       setSavePreview(undefined);
       const backupName = result.data.backupPath.split(/[\\/]/).at(-1) ?? ".bak";
       if (isActiveTarget && schema && !hasUnlistedKeys) {
-        const nextFields: FieldSpec[] = [
-          ...schema.fields.map((field) => ({
-            ...field,
-            value: savedValues.has(fieldKey(field))
-              ? savedValues.get(fieldKey(field))
-              : effectiveValue(values[fieldKey(field)]),
-          })),
-          ...customFields
-            .filter((field) => savedValues.get(fieldKey(field)) !== undefined)
-            .map((field) => ({ ...field, value: savedValues.get(fieldKey(field)) })),
-        ];
-        const nextSchema = {
-          ...schema,
-          fields: nextFields,
-          rawText: savePreview.output,
-          version: result.data.version,
-        };
-        setSchema(nextSchema);
-        history.reset({ values: initializeEditorValues(nextFields), customFields: [] });
+        const reconciled = reconcileSavedState(schema, values, customFields, savePreview, result.data.version);
+        setSchema(reconciled.schema);
+        history.reset({ values: reconciled.values, customFields: reconciled.customFields });
         setExternalChange(false);
         void refreshBackupStatus(project.root, schema.file);
         notify(t("toast.savedWithBackup", { backup: backupName }), "success");
-      } else if (isActiveTarget && activeFile) {
+      } else if (isActiveTarget && schema && activeFile && !dirty) {
         setBusy(null);
         notify(t("toast.savedWithBackup", { backup: backupName }), "success");
         await loadFile(activeFile, project.root, githubInput);
+      } else if (isActiveTarget && schema) {
+        const reconciled = reconcileSavedState(schema, values, customFields, savePreview, result.data.version);
+        setSchema(reconciled.schema);
+        history.reset({ values: reconciled.values, customFields: reconciled.customFields });
+        setExternalChange(true);
+        void refreshBackupStatus(project.root, schema.file);
+        notify(t("toast.savedWithBackup", { backup: backupName }), "success");
       } else {
         notify(t("toast.savedWithBackup", { backup: backupName }), "success");
       }
@@ -1105,7 +1101,6 @@ export function App() {
                 />
                 {allFields.length ? (
                   <FieldEditor
-                    key={fieldEditorRevision}
                     fileKey={`${project?.root ?? ""}:${schema.file}`}
                     fields={allFields}
                     customKeys={customKeys}
@@ -1228,8 +1223,13 @@ export function App() {
             openableFiles={openableFiles}
             envGroups={project.envGroups ?? []}
             activeFilePath={activeFile?.path}
+            activeFileDirty={dirty}
             onClose={() => setCompareOpen(false)}
             onPreviewReady={(preview) => {
+              if (dirty && schema && preview.file === schema.file) {
+                notify(t("compare.targetDirtyBlocked", { file: preview.file }), "error");
+                return;
+              }
               setCompareOpen(false);
               setSavePreview(preview);
             }}

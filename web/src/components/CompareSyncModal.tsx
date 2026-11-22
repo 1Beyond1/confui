@@ -21,6 +21,7 @@ export function CompareSyncModal({
   openableFiles,
   envGroups,
   activeFilePath,
+  activeFileDirty = false,
   onClose,
   onPreviewReady,
 }: {
@@ -28,6 +29,7 @@ export function CompareSyncModal({
   openableFiles: readonly ConfigFile[];
   envGroups: readonly ConfigEnvGroup[];
   activeFilePath?: string;
+  activeFileDirty?: boolean;
   onClose: () => void;
   onPreviewReady: (preview: SavePreview) => void;
 }) {
@@ -120,8 +122,13 @@ export function CompareSyncModal({
     setTargetFile(sourceFile);
   }
 
+  const isTargetActiveDirty = Boolean(activeFileDirty && activeFilePath && targetFile === activeFilePath);
+  const isSourceActiveDirty = Boolean(
+    activeFileDirty && activeFilePath && sourceFile === activeFilePath && !isTargetActiveDirty,
+  );
+
   async function handlePreviewSync(): Promise<void> {
-    if (!result || selected.size === 0 || syncing) return;
+    if (!result || selected.size === 0 || syncing || isTargetActiveDirty) return;
     const segmentsList = syncableEntries
       .filter((entry) => selected.has(JSON.stringify(entry.segments)))
       .map((entry) => entry.segments);
@@ -167,7 +174,7 @@ export function CompareSyncModal({
             variant="primary"
             icon="compare"
             busy={syncing}
-            disabled={syncing || loading || !result || selected.size === 0}
+            disabled={syncing || loading || !result || selected.size === 0 || isTargetActiveDirty}
             onClick={() => void handlePreviewSync()}
           >
             {t("compare.applySelected", { count: selected.size })}
@@ -252,6 +259,20 @@ export function CompareSyncModal({
         <div class="modal-warning">
           <Icon name="info"/>
           <span>{t("compare.sameFileHint")}</span>
+        </div>
+      )}
+
+      {isTargetActiveDirty && (
+        <div class="modal-warning compare-error" role="alert">
+          <Icon name="warning"/>
+          <span>{t("compare.targetDirtyBlocked", { file: targetFile })}</span>
+        </div>
+      )}
+
+      {isSourceActiveDirty && (
+        <div class="modal-warning" role="status">
+          <Icon name="info"/>
+          <span>{t("compare.sourceDirtyHint", { file: sourceFile })}</span>
         </div>
       )}
 

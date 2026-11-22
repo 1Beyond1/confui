@@ -253,6 +253,8 @@ export const enUS: TranslationDict = {
   "compare.targetLabel": "Target Config (sync into)",
   "compare.swap": "Swap source and target",
   "compare.sameFileHint": "Select two different configuration files to compare.",
+  "compare.targetDirtyBlocked": "\"{file}\" has unsaved edits. Save or discard your current changes before syncing into it, or select another unmodified target file.",
+  "compare.sourceDirtyHint": "Note: \"{file}\" has unsaved edits; comparison reads the saved file on disk rather than in-memory drafts.",
   "compare.loading": "Parsing and comparing configuration files...",
   "compare.filterActionable": "Actionable ({count})",
   "compare.filterMissing": "Missing ({count})",
