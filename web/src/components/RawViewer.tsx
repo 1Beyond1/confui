@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { ConfigFormSchema } from "../../../shared/schema.ts";
+import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { SourceBadge } from "../ui.tsx";
 import { FORMAT_LABELS } from "../utils/format.ts";
@@ -10,6 +11,7 @@ interface TextSegment {
 }
 
 export function RawViewer({ schema }: { schema: ConfigFormSchema }) {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [activeMatch, setActiveMatch] = useState(0);
   const codeContainerRef = useRef<HTMLDivElement>(null);
@@ -70,22 +72,22 @@ export function RawViewer({ schema }: { schema: ConfigFormSchema }) {
     <div id="editor-panel-raw" class="raw-page page-wide" role="tabpanel" aria-labelledby="editor-tab-raw">
       <div class="raw-notice">
         <Icon name="info"/>
-        <span>原始内容用于核对格式和注释；请回到表单进行安全修改。</span>
+        <span>{t("raw.notice")}</span>
         <SourceBadge source="heuristic"/>
       </div>
       <section class="raw-card">
         <header>
           <div class="raw-card__title">
             <span>{schema.file}</span>
-            <small>{FORMAT_LABELS[schema.format]} · {lines.length} 行 · 只读</small>
+            <small>{t("raw.meta", { format: FORMAT_LABELS[schema.format], lines: lines.length })}</small>
           </div>
           <div class="raw-search">
             <label class="raw-search__input">
               <Icon name="search" size={14}/>
               <input
                 value={query}
-                placeholder="页内搜索关键词"
-                aria-label="页内搜索关键词"
+                placeholder={t("raw.searchPlaceholder")}
+                aria-label={t("raw.searchPlaceholder")}
                 onInput={(event) => setQuery(event.currentTarget.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
@@ -95,14 +97,14 @@ export function RawViewer({ schema }: { schema: ConfigFormSchema }) {
                 }}
               />
               {query && (
-                <button type="button" class="icon-button" onClick={() => setQuery("")} aria-label="清空搜索">
+                <button type="button" class="icon-button" onClick={() => setQuery("")} aria-label={t("raw.clearSearch")}>
                   <Icon name="x" size={13}/>
                 </button>
               )}
             </label>
             {query.trim() && (
               <span class="raw-search__count" role="status">
-                {totalMatches > 0 ? `${activeMatch + 1} / ${totalMatches}` : "0 匹配"}
+                {totalMatches > 0 ? `${activeMatch + 1} / ${totalMatches}` : t("raw.noMatches")}
               </span>
             )}
             <div class="raw-search__nav">
@@ -111,8 +113,8 @@ export function RawViewer({ schema }: { schema: ConfigFormSchema }) {
                 class="icon-button"
                 disabled={totalMatches === 0}
                 onClick={() => stepMatch(-1)}
-                aria-label="上一处匹配"
-                title="上一处匹配 (Shift+Enter)"
+                aria-label={t("raw.prevMatch")}
+                title={t("raw.prevMatchTitle")}
               >
                 <Icon name="chevron-down" size={14} class="icon-rotate-180"/>
               </button>
@@ -121,8 +123,8 @@ export function RawViewer({ schema }: { schema: ConfigFormSchema }) {
                 class="icon-button"
                 disabled={totalMatches === 0}
                 onClick={() => stepMatch(1)}
-                aria-label="下一处匹配"
-                title="下一处匹配 (Enter)"
+                aria-label={t("raw.nextMatch")}
+                title={t("raw.nextMatchTitle")}
               >
                 <Icon name="chevron-down" size={14}/>
               </button>

@@ -5,20 +5,9 @@ import {
   defaultValueForType,
   validateNewKeyPath,
 } from "../editor-state.ts";
+import { fieldTypeLabel, useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button, Modal } from "../ui.tsx";
-
-const TYPE_LABELS: Record<FieldType, string> = {
-  string: "字符串 (string)",
-  integer: "整数 (integer)",
-  number: "数字 (number)",
-  boolean: "布尔开关 (boolean)",
-  secret: "敏感值 (secret)",
-  array: "列表 / 数组 (array)",
-  json: "键值对象 (object)",
-  enum: "枚举 (enum)",
-  color: "颜色 (color)",
-};
 
 export function AddKeyModal({
   format,
@@ -31,13 +20,14 @@ export function AddKeyModal({
   onClose: () => void;
   onAdd: (segments: PathSegment[], type: FieldType, initialValue: unknown) => void;
 }) {
+  const { locale, t } = useI18n();
   const allowedTypes = allowedCustomFieldTypes(format);
   const [rawPath, setRawPath] = useState("");
   const [type, setType] = useState<FieldType>(allowedTypes[0] ?? "string");
   const [initialText, setInitialText] = useState("");
   const [submitted, setSubmitted] = useState(false);
 
-  const pathCheck = validateNewKeyPath(rawPath, format, existingFields);
+  const pathCheck = validateNewKeyPath(rawPath, format, existingFields, locale);
 
   let valueError: string | undefined;
   let parsedInitial: unknown = defaultValueForType(type);
@@ -52,7 +42,7 @@ export function AddKeyModal({
     } else {
       const num = Number(trimmed);
       if (!Number.isFinite(num) || (type === "integer" && !Number.isSafeInteger(num))) {
-        valueError = type === "integer" ? "请输入有效整数" : "请输入有效数字";
+        valueError = type === "integer" ? t("addKeyModal.invalidInt") : t("addKeyModal.invalidNum");
       } else {
         parsedInitial = num;
       }
@@ -71,36 +61,36 @@ export function AddKeyModal({
   }
 
   const placeholder = format === "env"
-    ? "例如 APP_DEBUG"
+    ? t("addKeyModal.placeholderEnv")
     : format === "properties"
-      ? "例如 app.retry.count"
+      ? t("addKeyModal.placeholderProperties")
       : format === "ini"
-        ? "例如 server.timeout"
-        : "例如 server.timeout（支持点号嵌套）";
+        ? t("addKeyModal.placeholderIni")
+        : t("addKeyModal.placeholderNested");
 
   return (
     <Modal
-      title="新增配置项"
-      description="按当前文件格式校验键名，确认后会添加到表单并纳入差异预览。"
+      title={t("addKeyModal.title")}
+      description={t("addKeyModal.desc")}
       width="500px"
       onClose={onClose}
       footer={(
         <>
-          <Button onClick={onClose}>取消</Button>
+          <Button onClick={onClose}>{t("common.cancel")}</Button>
           <Button
             variant="primary"
             icon="plus"
             disabled={Boolean((submitted || rawPath.trim()) && (pathCheck.error || valueError))}
             onClick={handleSubmit}
           >
-            添加到表单
+            {t("addKeyModal.submit")}
           </Button>
         </>
       )}
     >
       <div class="add-key-form">
         <div class="setting-field">
-          <label for="add-key-path">配置项路径</label>
+          <label for="add-key-path">{t("addKeyModal.pathLabel")}</label>
           <input
             id="add-key-path"
             class={`control ${(submitted || rawPath.trim()) && pathCheck.error ? "control--error" : ""}`}
@@ -115,7 +105,7 @@ export function AddKeyModal({
         </div>
 
         <div class="setting-field">
-          <label for="add-key-type">数据类型</label>
+          <label for="add-key-type">{t("addKeyModal.typeLabel")}</label>
           <div class="select-wrap">
             <select
               id="add-key-type"
@@ -128,7 +118,7 @@ export function AddKeyModal({
               }}
             >
               {allowedTypes.map((item) => (
-                <option key={item} value={item}>{TYPE_LABELS[item]}</option>
+                <option key={item} value={item}>{fieldTypeLabel(locale, item)}</option>
               ))}
             </select>
             <Icon name="chevron-down" size={16}/>
@@ -137,13 +127,13 @@ export function AddKeyModal({
 
         {(type === "string" || type === "secret" || type === "integer" || type === "number") && (
           <div class="setting-field">
-            <label for="add-key-value">初始值</label>
+            <label for="add-key-value">{t("addKeyModal.initialValueLabel")}</label>
             <input
               id="add-key-value"
               class={`control ${valueError ? "control--error" : ""}`}
               type={type === "secret" ? "password" : "text"}
               value={initialText}
-              placeholder={type === "integer" || type === "number" ? "0" : "留空则写入空字符串"}
+              placeholder={type === "integer" || type === "number" ? "0" : t("addKeyModal.valuePlaceholderEmpty")}
               onInput={(event) => setInitialText(event.currentTarget.value)}
               onKeyDown={(event) => { if (event.key === "Enter") handleSubmit(); }}
             />
@@ -153,7 +143,7 @@ export function AddKeyModal({
 
         {type === "boolean" && (
           <div class="setting-field">
-            <label for="add-key-bool">初始状态</label>
+            <label for="add-key-bool">{t("addKeyModal.initialBoolLabel")}</label>
             <div class="select-wrap">
               <select
                 id="add-key-bool"
@@ -161,8 +151,8 @@ export function AddKeyModal({
                 value={initialText || "false"}
                 onChange={(event) => setInitialText(event.currentTarget.value)}
               >
-                <option value="false">false（关闭）</option>
-                <option value="true">true（启用）</option>
+                <option value="false">{t("addKeyModal.boolFalse")}</option>
+                <option value="true">{t("addKeyModal.boolTrue")}</option>
               </select>
               <Icon name="chevron-down" size={16}/>
             </div>

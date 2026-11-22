@@ -9,6 +9,7 @@ import type {
   FieldAssistResult,
   FieldSpec,
   FieldType,
+  Locale,
   PathSegment,
   ProjectScanResult,
   RecentProject,
@@ -37,6 +38,7 @@ import {
   validationErrors,
 } from "./editor-state.ts";
 import { useEditorHistory } from "./hooks/useEditorHistory.ts";
+import { I18nProvider, translate } from "./i18n/index.tsx";
 import { Icon } from "./icons.tsx";
 import { SettingsPage } from "./SettingsPage.tsx";
 import { Button, EmptyIllustration, Logo } from "./ui.tsx";
@@ -73,6 +75,7 @@ interface LoadErrorState {
 
 export function App() {
   const [settings, setSettings] = useState<AppSettings>();
+  const [previewLocale, setPreviewLocale] = useState<Locale>();
   const [view, setView] = useState<View>("home");
   const [project, setProject] = useState<ProjectScanResult>();
   const [rootInput, setRootInput] = useState("");
@@ -101,6 +104,10 @@ export function App() {
   const openSequence = useRef(0);
   const mainContentRef = useRef<HTMLDivElement>(null);
 
+  const locale: Locale = previewLocale ?? settings?.locale ?? "zh-CN";
+  const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) =>
+    translate(locale, key, params);
+
   const history = useEditorHistory();
   const { values, customFields, canUndo, canRedo } = history;
 
@@ -114,8 +121,8 @@ export function App() {
   );
   const changes = useMemo(() => schema ? collectChanges(allFields, values) : [], [schema, allFields, values]);
   const errors = useMemo(
-    () => schema ? validationErrors(allFields, values, schema.format) : new Map<string, string>(),
-    [schema, allFields, values],
+    () => schema ? validationErrors(allFields, values, schema.format, locale) : new Map<string, string>(),
+    [schema, allFields, values, locale],
   );
   const dirty = changes.length > 0 || customFields.length > 0;
 
@@ -126,6 +133,11 @@ export function App() {
       && (!query || file.path.toLowerCase().includes(query)),
     );
   }, [project, fileQuery, formatFilter]);
+
+  useEffect(() => {
+    document.documentElement.lang = locale;
+    document.title = locale === "en-US" ? "Confui · Config Editor" : "Confui · 配置编辑器";
+  }, [locale]);
 
   useEffect(() => {
     void (async () => {
@@ -240,12 +252,12 @@ export function App() {
 
   async function openProject(root = rootInput, githubUrl = githubInput): Promise<void> {
     if (!root.trim()) {
-      notify("请先选择本地项目文件夹", "error");
+      notify(t("toast.selectFolderFirst"), "error");
       return;
     }
     const trimmedGithub = githubUrl.trim();
     if (trimmedGithub && !normalizeGithubUrl(trimmedGithub)) {
-      notify("请输入有效的 GitHub 仓库链接，例如 https://github.com/owner/repository", "error");
+      notify(t("toast.invalidGithubUrl"), "error");
       return;
     }
     const sequence = ++openSequence.current;
@@ -271,9 +283,9 @@ export function App() {
       if (refreshedSettings.ok) setSettings(refreshedSettings.data);
       const first = scanned.files.find((file) => file.status === "ready" || file.status === "large");
       if (first) await loadFile(first, scanned.root, resolvedGithub);
-      else if (!scanned.files.length) notify("项目中没有发现支持的配置文件", "info");
+      else if (!scanned.files.length) notify(t("toast.noSupportedFiles"), "info");
     } catch (error) {
-      if (sequence === openSequence.current) notify(errorMessage(error), "error");
+      if (sequence === openSequence.current) notify(errorMessage(error, t("common.actionFailed")), "error");
     } finally {
       if (sequence === openSequence.current) setBusy(null);
     }
@@ -298,10 +310,11 @@ export function App() {
     file: ConfigFile,
     root = project?.root,
     githubUrl = githubInput,
+    targetLocale = locale,
   ): Promise<void> {
     if (!root) return;
     if (file.status === "too-large" || file.status === "unsupported" || file.status === "unreadable") {
-      notify(file.warning || "这个文件无法安全打开", "error");
+      notify(file.warning || t("toast.fileUnopenable"), "error");
       return;
     }
     const sequence = ++openSequence.current;
@@ -315,7 +328,10 @@ export function App() {
     setView("editor");
     setEditorTab("form");
     try {
-      const result = await window.confui.inferSchema(root, file.path, { githubUrl: githubUrl || undefined });
+      const result = await window.confui.inferSchema(root, file.path, {
+        githubUrl: githubUrl || undefined,
+        locale: targetLocale,
+      });
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       if (sequence !== openSequence.current) return;
       setActiveFile(file);
@@ -325,7 +341,7 @@ export function App() {
       void refreshBackupStatus(root, file.path, sequence);
     } catch (error) {
       if (sequence === openSequence.current) {
-        const message = errorMessage(error);
+        const message = errorMessage(error, t("common.actionFailed"));
         setLoadError({ file: file.path, message });
         notify(message, "error");
       }
@@ -350,7 +366,10 @@ export function App() {
   }
 
   async function performAction(action: PendingAction): Promise<void> {
-    if (view === "settings" && action.kind !== "settings" && settings) applyTheme(settings.theme);
+    if (view === "settings" && action.kind !== "settings" && settings) {
+      applyTheme(settings.theme);
+      setPreviewLocale(undefined);
+    }
     switch (action.kind) {
       case "file":
         await loadFile(action.file);
@@ -377,7 +396,7 @@ export function App() {
   async function beginSave(continuation?: PendingAction): Promise<void> {
     if (!schema || !project || !changes.length) return;
     if (errors.size) {
-      notify(`有 ${errors.size} 个字段需要修正`, "error");
+      notify(t("toast.fixFieldErrors", { count: errors.size }), "error");
       setEditorTab("form");
       setFieldEditorRevision((current) => current + 1);
       window.setTimeout(() => document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus(), 0);
@@ -399,7 +418,7 @@ export function App() {
       setSavePreview(result.data);
     } catch (error) {
       setAfterSaveAction(undefined);
-      notify(errorMessage(error), "error");
+      notify(errorMessage(error, t("common.actionFailed")), "error");
     } finally {
       setBusy(null);
     }
@@ -436,12 +455,12 @@ export function App() {
       setSavePreview(undefined);
       setExternalChange(false);
       void refreshBackupStatus(project.root, schema.file);
-      notify(`已保存，并创建 ${result.data.backupPath.split(/[\\/]/).at(-1)}`, "success");
+      notify(t("toast.savedWithBackup", { backup: result.data.backupPath.split(/[\\/]/).at(-1) ?? ".bak" }), "success");
       const action = afterSaveAction;
       setAfterSaveAction(undefined);
       if (action) await performAction(action);
     } catch (error) {
-      notify(errorMessage(error), "error");
+      notify(errorMessage(error, t("common.actionFailed")), "error");
     } finally {
       setBusy(null);
     }
@@ -455,7 +474,7 @@ export function App() {
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       setRestorePreview(result.data);
     } catch (error) {
-      notify(errorMessage(error), "error");
+      notify(errorMessage(error, t("common.actionFailed")), "error");
     } finally {
       setBusy(null);
     }
@@ -467,12 +486,13 @@ export function App() {
     try {
       const result = await window.confui.restoreBackup(project.root, restorePreview);
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
+      const restoredFile = restorePreview.file;
       setRestorePreview(undefined);
       setBusy(null);
-      notify(`已从 ${restorePreview.file}.bak 恢复`, "success");
+      notify(t("toast.restoredFromBackup", { file: restoredFile }), "success");
       await loadFile(activeFile, project.root, githubInput);
     } catch (error) {
-      notify(errorMessage(error), "error");
+      notify(errorMessage(error, t("common.actionFailed")), "error");
       setBusy(null);
     }
   }
@@ -502,14 +522,29 @@ export function App() {
     setSettingsDirty(false);
     setSettingsPageRevision((current) => current + 1);
     applyTheme(settings?.theme ?? "system");
+    setPreviewLocale(undefined);
     if (action) window.setTimeout(() => void performAction(action), 0);
   }
 
   async function saveSettings(next: AppSettings): Promise<void> {
+    const previousLocale = settings?.locale;
     const result = await window.confui.setSettings(next);
     if (!result.ok) throw new Error(result.error.detail || result.error.message);
     setSettings(result.data);
+    setPreviewLocale(undefined);
     applyTheme(result.data.theme);
+    // Refresh built-in template descriptions if locale changed while a file is loaded cleanly.
+    if (previousLocale !== result.data.locale && activeFile && project && !dirty) {
+      void window.confui.inferSchema(project.root, activeFile.path, {
+        githubUrl: githubInput || undefined,
+        locale: result.data.locale,
+      }).then((refreshed) => {
+        if (refreshed.ok) {
+          setSchema(refreshed.data);
+          history.reset({ values: initializeEditorValues(refreshed.data.fields), customFields: [] });
+        }
+      });
+    }
   }
 
   function updateField(field: FieldSpec, value: unknown, options?: { coalesce?: boolean }): void {
@@ -554,7 +589,7 @@ export function App() {
   }
 
   function addCustomField(segments: PathSegment[], type: FieldType, initialValue: unknown): void {
-    const spec = createCustomFieldSpec(segments, type);
+    const spec = createCustomFieldSpec(segments, type, t("common.customGroup"));
     const key = fieldKey(spec);
     const editorVal = needsJsonEditor(spec) ? createJsonDraft(initialValue) : initialValue;
     history.commit((current) => ({
@@ -564,7 +599,7 @@ export function App() {
   }
 
   async function askAiAboutField(field: FieldSpec): Promise<FieldAssistResult> {
-    if (!project || !schema) throw new Error("当前没有打开的配置文件");
+    if (!project || !schema) throw new Error(t("toast.noOpenConfig"));
     const request: FieldAssistField = {
       segments: [...field.segments],
       label: field.label,
@@ -611,294 +646,296 @@ export function App() {
 
   if (!settings) {
     return (
-      <div class="app-loading">
-        <Logo/>
-        <span><Icon name="loader" class="spin"/>正在准备 Confui</span>
-      </div>
+      <I18nProvider locale={locale}>
+        <div class="app-loading">
+          <Logo/>
+          <span><Icon name="loader" class="spin"/>{t("common.loadingApp")}</span>
+        </div>
+      </I18nProvider>
     );
   }
 
   return (
-    <div class="app-shell">
-      <Sidebar
-        view={view}
-        project={project}
-        filteredFiles={filteredFiles}
-        activeFile={activeFile}
-        fileQuery={fileQuery}
-        formatFilter={formatFilter}
-        dirty={dirty}
-        busy={busy !== null}
-        appVersion={appVersion}
-        onFileQuery={setFileQuery}
-        onFormatFilter={setFormatFilter}
-        onHome={() => requestAction({ kind: "home" })}
-        onSettings={() => requestAction({ kind: "settings" })}
-        onRescan={() => requestAction({ kind: "rescan" })}
-        onSelectFile={(file) => requestAction({ kind: "file", file })}
-      />
+    <I18nProvider locale={locale}>
+      <div class="app-shell">
+        <Sidebar
+          view={view}
+          project={project}
+          filteredFiles={filteredFiles}
+          activeFile={activeFile}
+          fileQuery={fileQuery}
+          formatFilter={formatFilter}
+          dirty={dirty}
+          busy={busy !== null}
+          appVersion={appVersion}
+          onFileQuery={setFileQuery}
+          onFormatFilter={setFormatFilter}
+          onHome={() => requestAction({ kind: "home" })}
+          onSettings={() => requestAction({ kind: "settings" })}
+          onRescan={() => requestAction({ kind: "rescan" })}
+          onSelectFile={(file) => requestAction({ kind: "file", file })}
+        />
 
-      <main class="main-shell" onWheel={forwardMainWheel}>
-        <header class="topbar">
-          <div class="topbar__title">
-            {view === "home"
-              ? <><span>开始</span><small>选择项目并识别配置</small></>
-              : view === "settings"
-                ? <><span>设置</span><small>供应商、安全与外观</small></>
-                : schema
-                  ? <><span>{schema.kind}{dirty && <i class="title-dirty"/>}</span><small title={schema.file}>{schema.file}</small></>
-                  : <><span>{project?.name ?? "配置编辑器"}</span><small>选择一个配置文件</small></>}
+        <main class="main-shell" onWheel={forwardMainWheel}>
+          <header class="topbar">
+            <div class="topbar__title">
+              {view === "home"
+                ? <><span>{t("topbar.homeTitle")}</span><small>{t("topbar.homeSubtitle")}</small></>
+                : view === "settings"
+                  ? <><span>{t("topbar.settingsTitle")}</span><small>{t("topbar.settingsSubtitle")}</small></>
+                  : schema
+                    ? <><span>{schema.kind}{dirty && <i class="title-dirty"/>}</span><small title={schema.file}>{schema.file}</small></>
+                    : <><span>{project?.name ?? t("topbar.editorFallbackTitle")}</span><small>{t("topbar.editorFallbackSubtitle")}</small></>}
+            </div>
+            <div class="topbar__actions">
+              {view === "editor" && schema && (
+                <>
+                  <div class="view-tabs" role="tablist" aria-orientation="horizontal">
+                    <button
+                      id="editor-tab-form"
+                      role="tab"
+                      tabIndex={editorTab === "form" ? 0 : -1}
+                      aria-selected={editorTab === "form"}
+                      aria-controls="editor-panel-form"
+                      class={editorTab === "form" ? "active" : ""}
+                      onKeyDown={handleEditorTabKey}
+                      onClick={() => selectEditorTab("form")}
+                    >
+                      <Icon name="layers" size={15}/>{t("topbar.tabForm")}
+                    </button>
+                    <button
+                      id="editor-tab-raw"
+                      role="tab"
+                      tabIndex={editorTab === "raw" ? 0 : -1}
+                      aria-selected={editorTab === "raw"}
+                      aria-controls="editor-panel-raw"
+                      class={editorTab === "raw" ? "active" : ""}
+                      onKeyDown={handleEditorTabKey}
+                      onClick={() => selectEditorTab("raw")}
+                    >
+                      <Icon name="code" size={15}/>{t("topbar.tabRaw")}
+                    </button>
+                  </div>
+                  <Button
+                    variant="primary"
+                    icon="save"
+                    disabled={!changes.length || errors.size > 0 || busy !== null}
+                    busy={busy === "preview" || busy === "save"}
+                    onClick={() => void beginSave()}
+                  >
+                    {changes.length ? t("topbar.saveCount", { count: changes.length }) : t("topbar.saved")}
+                  </Button>
+                </>
+              )}
+              {view === "home" && (
+                <Button icon="folder-open" disabled={busy !== null} onClick={() => void browseForProject()}>
+                  {t("topbar.chooseFolder")}
+                </Button>
+              )}
+            </div>
+          </header>
+
+          {externalChange && view === "editor" && (
+            <div class="external-banner" role="status">
+              <Icon name="warning"/>
+              <div>
+                <strong>{t("external.title")}</strong>
+                <span>{dirty ? t("external.dirtyHint") : t("external.cleanHint")}</span>
+              </div>
+              <Button onClick={() => requestAction({ kind: "reload" })}>{t("external.reload")}</Button>
+              <button class="icon-button" onClick={() => setExternalChange(false)} aria-label={t("external.dismiss")}>
+                <Icon name="x"/>
+              </button>
+            </div>
+          )}
+
+          <div ref={mainContentRef} class="main-content" role="region" aria-label={t("topbar.pageContent")} tabIndex={0}>
+            {view === "home" && (
+              <HomePage
+                root={rootInput}
+                github={githubInput}
+                recent={settings.recentProjects}
+                busy={busy === "scan"}
+                onRoot={setRootInput}
+                onGithub={setGithubInput}
+                onBrowse={() => void browseForProject()}
+                onOpen={() => void openProject()}
+                onRecent={(item) => void openRecent(item)}
+                onRemoveRecent={(path) => void removeRecent(path)}
+              />
+            )}
+
+            {view === "settings" && (
+              <SettingsPage
+                key={settingsPageRevision}
+                settings={settings}
+                onSave={saveSettings}
+                onThemePreview={applyTheme}
+                onLocalePreview={setPreviewLocale}
+                onToast={notify}
+                onDirtyChange={setSettingsDirty}
+              />
+            )}
+
+            {view === "editor" && busy === "infer" && !schema && <EditorSkeleton/>}
+
+            {view === "editor" && !schema && busy !== "infer" && loadError?.file === activeFile?.path ? (
+              <div class="editor-load-error" role="alert">
+                <span class="editor-load-error__icon"><Icon name="warning"/></span>
+                <h1>{t("editor.loadErrorTitle")}</h1>
+                <p>{loadError?.message}</p>
+                <Button variant="primary" icon="refresh" onClick={() => activeFile && void loadFile(activeFile)}>{t("common.retry")}</Button>
+              </div>
+            ) : view === "editor" && !schema && busy !== "infer" && (
+              <div class="editor-empty">
+                <EmptyIllustration/>
+                <h1>{project?.files.length ? t("editor.emptySelectTitle") : t("editor.emptyNoneTitle")}</h1>
+                <p>{project?.files.length ? t("editor.emptySelectDesc") : t("editor.emptyNoneDesc")}</p>
+                {!project && (
+                  <Button variant="primary" icon="folder-open" onClick={() => void browseForProject()}>
+                    {t("editor.openLocalProject")}
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {view === "editor" && schema && editorTab === "form" && (
+              <div id="editor-panel-form" class="editor-page page-wide" role="tabpanel" aria-labelledby="editor-tab-form">
+                <EditorSummary
+                  schema={schema}
+                  fieldCount={allFields.length}
+                  backupStatus={backupStatus}
+                  busy={busy !== null}
+                  onRestoreBackup={() => void beginRestoreBackup()}
+                />
+                {allFields.length ? (
+                  <FieldEditor
+                    key={fieldEditorRevision}
+                    fileKey={`${project?.root ?? ""}:${schema.file}`}
+                    fields={allFields}
+                    customKeys={customKeys}
+                    values={values}
+                    errors={errors}
+                    disabled={busy !== null}
+                    canUndo={canUndo}
+                    canRedo={canRedo}
+                    onUndo={history.undo}
+                    onRedo={history.redo}
+                    onOpenAddKey={() => setAddKeyOpen(true)}
+                    onResetField={resetField}
+                    onDeleteField={deleteField}
+                    aiAvailable={settings.ai.enabled && Boolean(settings.ai.baseUrl.trim() && settings.ai.model.trim())}
+                    onExplain={askAiAboutField}
+                    onChange={updateField}
+                  />
+                ) : (
+                  <div class="empty-card">
+                    <Icon name="info"/>
+                    <div>
+                      <h2>{t("editor.noFormTitle")}</h2>
+                      <p>{t("editor.noFormDesc")}</p>
+                      <Button variant="primary" icon="plus" onClick={() => setAddKeyOpen(true)} class="empty-card__action">
+                        {t("field.addKey")}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                <div class="editor-bottom-space"/>
+              </div>
+            )}
+
+            {view === "editor" && schema && editorTab === "raw" && <RawViewer schema={schema}/>}
           </div>
-          <div class="topbar__actions">
-            {view === "editor" && schema && (
-              <>
-                <div class="view-tabs" role="tablist" aria-orientation="horizontal">
-                  <button
-                    id="editor-tab-form"
-                    role="tab"
-                    tabIndex={editorTab === "form" ? 0 : -1}
-                    aria-selected={editorTab === "form"}
-                    aria-controls="editor-panel-form"
-                    class={editorTab === "form" ? "active" : ""}
-                    onKeyDown={handleEditorTabKey}
-                    onClick={() => selectEditorTab("form")}
-                  >
-                    <Icon name="layers" size={15}/>表单
-                  </button>
-                  <button
-                    id="editor-tab-raw"
-                    role="tab"
-                    tabIndex={editorTab === "raw" ? 0 : -1}
-                    aria-selected={editorTab === "raw"}
-                    aria-controls="editor-panel-raw"
-                    class={editorTab === "raw" ? "active" : ""}
-                    onKeyDown={handleEditorTabKey}
-                    onClick={() => selectEditorTab("raw")}
-                  >
-                    <Icon name="code" size={15}/>原始内容
-                  </button>
-                </div>
+
+          {view === "editor" && schema && changes.length > 0 && (
+            <div class="editor-savebar">
+              <div>
+                <i/>
+                <strong>{t("savebar.unsavedCount", { count: changes.length })}</strong>
+                {errors.size > 0 && <span>{t("savebar.errorCount", { count: errors.size })}</span>}
+              </div>
+              <div>
+                <Button
+                  variant="ghost"
+                  disabled={busy !== null}
+                  onClick={() => history.commit(() => ({ values: initializeEditorValues(schema.fields), customFields: [] }))}
+                >
+                  {t("savebar.revertAll")}
+                </Button>
                 <Button
                   variant="primary"
                   icon="save"
-                  disabled={!changes.length || errors.size > 0 || busy !== null}
-                  busy={busy === "preview" || busy === "save"}
+                  disabled={errors.size > 0 || busy !== null}
+                  busy={busy === "preview"}
                   onClick={() => void beginSave()}
                 >
-                  {changes.length ? `保存 ${changes.length} 项` : "已保存"}
+                  {t("savebar.reviewAndSave")}
                 </Button>
-              </>
-            )}
-            {view === "home" && (
-              <Button icon="folder-open" disabled={busy !== null} onClick={() => void browseForProject()}>
-                选择文件夹
-              </Button>
-            )}
-          </div>
-        </header>
-
-        {externalChange && view === "editor" && (
-          <div class="external-banner" role="status">
-            <Icon name="warning"/>
-            <div>
-              <strong>文件在 Confui 外部发生了变化</strong>
-              <span>{dirty ? "当前还有未保存内容，重新加载前请先确认。" : "建议重新加载，以免基于旧内容继续编辑。"}</span>
+              </div>
             </div>
-            <Button onClick={() => requestAction({ kind: "reload" })}>重新加载</Button>
-            <button class="icon-button" onClick={() => setExternalChange(false)} aria-label="暂时忽略">
-              <Icon name="x"/>
+          )}
+        </main>
+
+        {toast && (
+          <div
+            key={toast.id}
+            class={`toast toast--${toast.type} ${(dirty || settingsDirty) ? "toast--above-savebar" : ""}`}
+            role={toast.type === "error" ? "alert" : "status"}
+          >
+            <span><Icon name={toast.type === "success" ? "check" : toast.type === "error" ? "warning" : "info"}/></span>
+            <p>{toast.message}</p>
+            <button class="icon-button" onClick={() => setToast(undefined)} aria-label={t("common.closeToast")}>
+              <Icon name="x" size={15}/>
             </button>
           </div>
         )}
 
-        <div ref={mainContentRef} class="main-content" role="region" aria-label="页面内容" tabIndex={0}>
-          {view === "home" && (
-            <HomePage
-              root={rootInput}
-              github={githubInput}
-              recent={settings.recentProjects}
-              busy={busy === "scan"}
-              onRoot={setRootInput}
-              onGithub={setGithubInput}
-              onBrowse={() => void browseForProject()}
-              onOpen={() => void openProject()}
-              onRecent={(item) => void openRecent(item)}
-              onRemoveRecent={(path) => void removeRecent(path)}
-            />
-          )}
-
-          {view === "settings" && (
-            <SettingsPage
-              key={settingsPageRevision}
-              settings={settings}
-              onSave={saveSettings}
-              onThemePreview={applyTheme}
-              onToast={notify}
-              onDirtyChange={setSettingsDirty}
-            />
-          )}
-
-          {view === "editor" && busy === "infer" && !schema && <EditorSkeleton/>}
-
-          {view === "editor" && !schema && busy !== "infer" && loadError?.file === activeFile?.path ? (
-            <div class="editor-load-error" role="alert">
-              <span class="editor-load-error__icon"><Icon name="warning"/></span>
-              <h1>这个配置文件暂时打不开</h1>
-              <p>{loadError?.message}</p>
-              <Button variant="primary" icon="refresh" onClick={() => activeFile && void loadFile(activeFile)}>重试</Button>
-            </div>
-          ) : view === "editor" && !schema && busy !== "infer" && (
-            <div class="editor-empty">
-              <EmptyIllustration/>
-              <h1>{project?.files.length ? "选择一个配置文件" : "没有发现配置文件"}</h1>
-              <p>{project?.files.length
-                ? "Confui 会组合 Schema、示例、README 与结构推断，生成可编辑表单。"
-                : "可以确认项目路径，或检查配置文件是否属于当前支持的格式。"}
-              </p>
-              {!project && (
-                <Button variant="primary" icon="folder-open" onClick={() => void browseForProject()}>
-                  打开本地项目
-                </Button>
-              )}
-            </div>
-          )}
-
-          {view === "editor" && schema && editorTab === "form" && (
-            <div id="editor-panel-form" class="editor-page page-wide" role="tabpanel" aria-labelledby="editor-tab-form">
-              <EditorSummary
-                schema={schema}
-                fieldCount={allFields.length}
-                backupStatus={backupStatus}
-                busy={busy !== null}
-                onRestoreBackup={() => void beginRestoreBackup()}
-              />
-              {allFields.length ? (
-                <FieldEditor
-                  key={fieldEditorRevision}
-                  fileKey={`${project?.root ?? ""}:${schema.file}`}
-                  fields={allFields}
-                  customKeys={customKeys}
-                  values={values}
-                  errors={errors}
-                  disabled={busy !== null}
-                  canUndo={canUndo}
-                  canRedo={canRedo}
-                  onUndo={history.undo}
-                  onRedo={history.redo}
-                  onOpenAddKey={() => setAddKeyOpen(true)}
-                  onResetField={resetField}
-                  onDeleteField={deleteField}
-                  aiAvailable={settings.ai.enabled && Boolean(settings.ai.baseUrl.trim() && settings.ai.model.trim())}
-                  onExplain={askAiAboutField}
-                  onChange={updateField}
-                />
-              ) : (
-                <div class="empty-card">
-                  <Icon name="info"/>
-                  <div>
-                    <h2>暂时无法生成表单</h2>
-                    <p>这个文件没有可识别的键值字段。你可以点击下方新增配置项，或在“原始内容”中查看它。</p>
-                    <Button variant="primary" icon="plus" onClick={() => setAddKeyOpen(true)} class="empty-card__action">
-                      新增配置项
-                    </Button>
-                  </div>
-                </div>
-              )}
-              <div class="editor-bottom-space"/>
-            </div>
-          )}
-
-          {view === "editor" && schema && editorTab === "raw" && <RawViewer schema={schema}/>}
-        </div>
-
-        {view === "editor" && schema && changes.length > 0 && (
-          <div class="editor-savebar">
-            <div>
-              <i/>
-              <strong>{changes.length} 项更改尚未保存</strong>
-              {errors.size > 0 && <span>{errors.size} 个字段需要修正</span>}
-            </div>
-            <div>
-              <Button
-                variant="ghost"
-                disabled={busy !== null}
-                onClick={() => history.commit(() => ({ values: initializeEditorValues(schema.fields), customFields: [] }))}
-              >
-                全部撤销
-              </Button>
-              <Button
-                variant="primary"
-                icon="save"
-                disabled={errors.size > 0 || busy !== null}
-                busy={busy === "preview"}
-                onClick={() => void beginSave()}
-              >
-                查看并保存
-              </Button>
-            </div>
-          </div>
+        {savePreview && (
+          <SaveConfirmModal
+            savePreview={savePreview}
+            schema={schema}
+            allFields={allFields}
+            saving={busy === "save"}
+            onClose={closeSavePreview}
+            onConfirm={() => void confirmSave()}
+          />
         )}
-      </main>
 
-      {toast && (
-        <div
-          key={toast.id}
-          class={`toast toast--${toast.type} ${(dirty || settingsDirty) ? "toast--above-savebar" : ""}`}
-          role={toast.type === "error" ? "alert" : "status"}
-        >
-          <span><Icon name={toast.type === "success" ? "check" : toast.type === "error" ? "warning" : "info"}/></span>
-          <p>{toast.message}</p>
-          <button class="icon-button" onClick={() => setToast(undefined)} aria-label="关闭提示">
-            <Icon name="x" size={15}/>
-          </button>
-        </div>
-      )}
+        {restorePreview && (
+          <RestoreBackupModal
+            preview={restorePreview}
+            restoring={busy === "restore"}
+            onClose={() => { if (busy !== "restore") setRestorePreview(undefined); }}
+            onConfirm={() => void confirmRestoreBackup()}
+          />
+        )}
 
-      {savePreview && (
-        <SaveConfirmModal
-          savePreview={savePreview}
-          schema={schema}
-          allFields={allFields}
-          saving={busy === "save"}
-          onClose={closeSavePreview}
-          onConfirm={() => void confirmSave()}
-        />
-      )}
+        {addKeyOpen && schema && (
+          <AddKeyModal
+            format={schema.format}
+            existingFields={allFields}
+            onClose={() => setAddKeyOpen(false)}
+            onAdd={addCustomField}
+          />
+        )}
 
-      {restorePreview && (
-        <RestoreBackupModal
-          preview={restorePreview}
-          restoring={busy === "restore"}
-          onClose={() => { if (busy !== "restore") setRestorePreview(undefined); }}
-          onConfirm={() => void confirmRestoreBackup()}
-        />
-      )}
+        {pendingAction && (
+          <UnsavedConfigModal
+            kind={schema?.kind}
+            changeCount={changes.length}
+            onCancel={() => setPendingAction(undefined)}
+            onDiscard={discardAndContinue}
+            onSaveAndContinue={saveAndContinue}
+          />
+        )}
 
-      {addKeyOpen && schema && (
-        <AddKeyModal
-          format={schema.format}
-          existingFields={allFields}
-          onClose={() => setAddKeyOpen(false)}
-          onAdd={addCustomField}
-        />
-      )}
-
-      {pendingAction && (
-        <UnsavedConfigModal
-          kind={schema?.kind}
-          changeCount={changes.length}
-          onCancel={() => setPendingAction(undefined)}
-          onDiscard={discardAndContinue}
-          onSaveAndContinue={saveAndContinue}
-        />
-      )}
-
-      {pendingSettingsAction && (
-        <UnsavedSettingsModal
-          onCancel={() => setPendingSettingsAction(undefined)}
-          onDiscard={discardSettingsAndContinue}
-        />
-      )}
-    </div>
+        {pendingSettingsAction && (
+          <UnsavedSettingsModal
+            onCancel={() => setPendingSettingsAction(undefined)}
+            onDiscard={discardSettingsAndContinue}
+          />
+        )}
+      </div>
+    </I18nProvider>
   );
 }

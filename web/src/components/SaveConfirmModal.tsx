@@ -1,5 +1,6 @@
 import { useState } from "preact/hooks";
 import type { ConfigFormSchema, FieldSpec, SavePreview } from "../../../shared/schema.ts";
+import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button, Modal } from "../ui.tsx";
 import { formatDisplayValue } from "../value-display.ts";
@@ -22,20 +23,21 @@ export function SaveConfirmModal({
   onClose: () => void;
   onConfirm: () => void;
 }) {
+  const { locale, t } = useI18n();
   const [tab, setTab] = useState<DiffTab>("fields");
   const fields = allFields ?? schema?.fields ?? [];
 
   return (
     <Modal
-      title="确认保存更改"
-      description={`将更新 ${savePreview.file}，保存前会自动创建 .bak 备份。`}
+      title={t("saveModal.title")}
+      description={t("saveModal.desc", { file: savePreview.file })}
       width="760px"
       onClose={onClose}
       footer={(
         <>
-          <Button onClick={onClose} disabled={saving}>返回编辑</Button>
+          <Button onClick={onClose} disabled={saving}>{t("saveModal.back")}</Button>
           <Button variant="primary" icon="save" busy={saving} disabled={saving} onClick={onConfirm}>
-            确认保存 {savePreview.changes.length} 项
+            {t("saveModal.confirm", { count: savePreview.changes.length })}
           </Button>
         </>
       )}
@@ -56,7 +58,7 @@ export function SaveConfirmModal({
           onClick={() => setTab("fields")}
         >
           <Icon name="layers" size={14}/>
-          <span>逐字段差异 ({savePreview.changes.length})</span>
+          <span>{t("saveModal.tabFields", { count: savePreview.changes.length })}</span>
         </button>
         <button
           type="button"
@@ -66,7 +68,7 @@ export function SaveConfirmModal({
           onClick={() => setTab("unified")}
         >
           <Icon name="code" size={14}/>
-          <span>Unified Diff 源码</span>
+          <span>{t("saveModal.tabUnified")}</span>
         </button>
       </div>
 
@@ -80,7 +82,11 @@ export function SaveConfirmModal({
               : change.after === undefined
                 ? "removed"
                 : "modified";
-            const kindLabel = kind === "added" ? "新增" : kind === "removed" ? "删除" : "修改";
+            const kindLabel = kind === "added"
+              ? t("saveModal.badgeAdded")
+              : kind === "removed"
+                ? t("saveModal.badgeRemoved")
+                : t("saveModal.badgeModified");
             return (
               <div class="diff-item" key={change.path}>
                 <div>
@@ -91,9 +97,9 @@ export function SaveConfirmModal({
                   <code>{change.path}</code>
                 </div>
                 <div class="diff-values">
-                  <span>{secret && change.before !== undefined ? "••••••••" : formatDisplayValue(change.before)}</span>
+                  <span>{secret && change.before !== undefined ? "••••••••" : formatDisplayValue(change.before, locale)}</span>
                   <Icon name="arrow-left" class="diff-arrow"/>
-                  <strong>{secret && change.after !== undefined ? "••••••••" : formatDisplayValue(change.after)}</strong>
+                  <strong>{secret && change.after !== undefined ? "••••••••" : formatDisplayValue(change.after, locale)}</strong>
                 </div>
               </div>
             );

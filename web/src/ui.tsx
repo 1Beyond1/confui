@@ -1,6 +1,7 @@
 import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useId, useRef } from "preact/hooks";
 import type { FieldSource } from "../../shared/schema.ts";
+import { sourceLabel, useI18n } from "./i18n/index.tsx";
 import { Icon, type IconName } from "./icons.tsx";
 
 export const SOURCE_LABELS: Record<FieldSource, string> = {
@@ -13,10 +14,11 @@ export const SOURCE_LABELS: Record<FieldSource, string> = {
 };
 
 export function Logo({ compact = false }: { compact?: boolean }) {
+  const { t } = useI18n();
   return (
     <div class={`brand ${compact ? "brand--compact" : ""}`}>
       <img class="brand__mark" src="./confui-icon.png" alt="" aria-hidden="true"/>
-      {!compact && <span class="brand__copy"><strong>Con<em>fui</em></strong><small>配置，终于看得懂</small></span>}
+      {!compact && <span class="brand__copy"><strong>Con<em>fui</em></strong><small>{t("brand.tagline")}</small></span>}
     </div>
   );
 }
@@ -44,9 +46,10 @@ export function Button({
 }
 
 export function SourceBadge({ source, confidence }: { source: FieldSource; confidence?: number }) {
+  const { locale } = useI18n();
   return (
     <span class={`source-badge source-badge--${source} ${confidence !== undefined && confidence < 0.7 ? "source-badge--suggested" : ""}`}>
-      {SOURCE_LABELS[source]}
+      {sourceLabel(locale, source)}
     </span>
   );
 }
@@ -66,6 +69,7 @@ export function Modal({
   onClose: () => void;
   width?: string;
 }) {
+  const { t } = useI18n();
   const dialogRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -121,7 +125,7 @@ export function Modal({
             <h2 id={titleId}>{title}</h2>
             {description && <p id={descriptionId}>{description}</p>}
           </div>
-          <button class="icon-button" onClick={onClose} aria-label="关闭"><Icon name="x"/></button>
+          <button class="icon-button" onClick={onClose} aria-label={t("common.close")}><Icon name="x"/></button>
         </header>
         {children && <div class="modal__body">{children}</div>}
         <footer class="modal__footer">{footer}</footer>

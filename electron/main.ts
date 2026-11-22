@@ -43,6 +43,7 @@ import type {
   FieldAssistField,
   FieldType,
   InferOptions,
+  Locale,
   Result,
   RestoreBackupPreview,
   SavePreview,
@@ -65,6 +66,7 @@ let watchedFile: { watcher: FSWatcher; projectRoot: string; absolutePath: string
 let suppressChange: { absolutePath: string; until: number; hash?: string } | undefined;
 let watcherTimer: NodeJS.Timeout | undefined;
 let hasUnsavedChanges = false;
+let currentLocale: Locale = "zh-CN";
 let lastVerifiedReleasePage = "https://github.com/1Beyond1/confui/releases/latest";
 let fieldAssistInFlight = 0;
 
@@ -85,7 +87,9 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     settingsStore = new SettingsStore(join(app.getPath("userData"), "settings.json"), createSecretCodec());
-    const initialTheme = await settingsStore.load().then((settings) => settings.theme).catch(() => "system" as const);
+    const initialSettings = await settingsStore.load().catch(() => undefined);
+    const initialTheme = initialSettings?.theme ?? "system";
+    currentLocale = initialSettings?.locale ?? "zh-CN";
     applyNativeTheme(initialTheme);
     registerIpcHandlers();
     createWindow(initialTheme);
@@ -147,12 +151,15 @@ function createWindow(initialTheme: ThemePreference = "system"): void {
   window.on("close", (event) => {
     if (allowClose || !hasUnsavedChanges) return;
     event.preventDefault();
+    const isEn = currentLocale === "en-US";
     const choice = dialog.showMessageBoxSync(window, {
       type: "warning",
       title: "Confui",
-      message: "还有未保存的更改",
-      detail: "关闭 Confui 会放弃当前配置或设置中的更改。",
-      buttons: ["继续编辑", "放弃更改并退出"],
+      message: isEn ? "You have unsaved changes" : "还有未保存的更改",
+      detail: isEn
+        ? "Closing Confui will discard unsaved configuration or settings changes."
+        : "关闭 Confui 会放弃当前配置或设置中的更改。",
+      buttons: isEn ? ["Keep Editing", "Discard & Quit"] : ["继续编辑", "放弃更改并退出"],
       defaultId: 0,
       cancelId: 0,
       noLink: true,
@@ -219,10 +226,11 @@ function registerIpcHandlers(): void {
   });
 
   handle("confui:selectFolder", async () => {
+    const isEn = currentLocale === "en-US";
     const options: OpenDialogOptions = {
-      title: "选择项目文件夹",
+      title: isEn ? "Select Project Folder" : "选择项目文件夹",
       properties: ["openDirectory"],
-      buttonLabel: "打开项目",
+      buttonLabel: isEn ? "Open Project" : "打开项目",
     };
     const result = mainWindow
       ? await dialog.showOpenDialog(mainWindow, options)
@@ -259,6 +267,7 @@ function registerIpcHandlers(): void {
       : undefined;
     const schema = await inferConfig(root, file, {
       githubUrl: typeof options?.githubUrl === "string" ? options.githubUrl : undefined,
+      locale: options?.locale === "en-US" || options?.locale === "zh-CN" ? options.locale : settings.locale,
       githubToken: settings.github.token,
       ai,
     });
@@ -378,6 +387,7 @@ function registerIpcHandlers(): void {
   handle("confui:setSettings", async (_event, settings: unknown) => {
     if (!isAppSettings(settings)) throw new ConfuiError("INVALID_INPUT", "设置内容无效");
     const saved = await settingsStore.saveFromRenderer(settings);
+    currentLocale = saved.locale;
     applyNativeTheme(saved.theme);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.setBackgroundColor(resolveWindowBackground(saved.theme));

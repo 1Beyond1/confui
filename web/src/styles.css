@@ -636,6 +636,12 @@ code, pre { font-family: var(--font-mono); }
 .update-status__copy strong { display: block; font-size: 11px; }
 .update-status__copy p { margin: 4px 0 0; overflow: hidden; color: var(--text-muted); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
 .update-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+.locale-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.locale-picker > button { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-subtle); transition: border-color .15s, box-shadow .15s; }
+.locale-picker > button:hover { border-color: var(--line-strong); }
+.locale-picker > button.active { border-color: var(--primary-line); background: var(--primary-soft); box-shadow: 0 0 0 2px var(--focus); }
+.locale-picker strong { font-size: 11px; }
+.locale-picker small { color: var(--text-muted); font-family: var(--font-mono); font-size: 9px; }
 .theme-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .theme-picker > button { padding: 9px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-subtle); text-align: left; transition: border-color .15s, box-shadow .15s; }
 .theme-picker > button:hover { border-color: var(--line-strong); }

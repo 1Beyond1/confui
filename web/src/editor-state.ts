@@ -1,5 +1,6 @@
-import type { ConfigChange, ConfigFormat, FieldSpec, FieldType, PathSegment } from "../../shared/schema.ts";
+import type { ConfigChange, ConfigFormat, FieldSpec, FieldType, Locale, PathSegment } from "../../shared/schema.ts";
 import { isForbiddenKey, isHexColor } from "../../shared/validation.ts";
+import { translate } from "./i18n/index.tsx";
 
 export interface JsonDraft {
   __confuiJsonDraft: true;
@@ -71,52 +72,57 @@ export function isInactiveExamplePlaceholder(field: FieldSpec, value: unknown): 
   return requiredSource === "example";
 }
 
-export function validateField(field: FieldSpec, editorValue: unknown, format?: ConfigFormat): string | undefined {
-  if (isJsonDraft(editorValue) && editorValue.error) return "JSON 格式有误，请修正后再保存";
+export function validateField(
+  field: FieldSpec,
+  editorValue: unknown,
+  format?: ConfigFormat,
+  locale: Locale = "zh-CN",
+): string | undefined {
+  if (isJsonDraft(editorValue) && editorValue.error) return translate(locale, "validation.jsonSyntax");
   const value = effectiveValue(editorValue);
   if (
     field.required
     && (value === undefined || value === null || value === "")
     && !isInactiveExamplePlaceholder(field, value)
   ) {
-    return "这是必填项";
+    return translate(locale, "validation.required");
   }
   const explicitJson = isJsonDraft(editorValue) && editorValue.text.trim() !== "";
   if (field.type === "array" && (explicitJson || value !== undefined && value !== null)) {
-    if (!Array.isArray(value)) return "请输入 JSON 数组";
+    if (!Array.isArray(value)) return translate(locale, "validation.arrayExpected");
     if (format === "ini") {
-      if (value.length === 0) return "INI 不支持空数组；如需移除该配置项请清空输入框";
-      if (!value.every(isIniScalarValue)) return "INI 数组只支持字符串、数字、布尔值或 null";
+      if (value.length === 0) return translate(locale, "validation.iniEmptyArray");
+      if (!value.every(isIniScalarValue)) return translate(locale, "validation.iniScalarArray");
     }
   }
   if (field.type === "json" && (explicitJson || value !== undefined && value !== null) && (value === null || Array.isArray(value) || typeof value !== "object")) {
-    return "请输入 JSON 对象";
+    return translate(locale, "validation.objectExpected");
   }
   if (value === undefined || value === null || value === "") return undefined;
   if (field.type === "number" || field.type === "integer") {
-    if (typeof value !== "number") return "请输入有效数字";
-    if (!Number.isFinite(value)) return "请输入有效数字";
+    if (typeof value !== "number") return translate(locale, "validation.numberExpected");
+    if (!Number.isFinite(value)) return translate(locale, "validation.numberExpected");
     if (field.type === "integer") {
-      if (!Number.isInteger(value)) return "请输入整数";
-      if (!Number.isSafeInteger(value)) return "请输入安全范围内的整数";
+      if (!Number.isInteger(value)) return translate(locale, "validation.integerExpected");
+      if (!Number.isSafeInteger(value)) return translate(locale, "validation.safeIntegerExpected");
     }
     if (field.type === "number" && Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      return "整数超过 JavaScript 安全范围，无法安全保存";
+      return translate(locale, "validation.numberSafeRange");
     }
-    if (field.minimum !== undefined && value < field.minimum) return `不能小于 ${field.minimum}`;
-    if (field.maximum !== undefined && value > field.maximum) return `不能大于 ${field.maximum}`;
+    if (field.minimum !== undefined && value < field.minimum) return translate(locale, "validation.minimum", { min: field.minimum });
+    if (field.maximum !== undefined && value > field.maximum) return translate(locale, "validation.maximum", { max: field.maximum });
   }
-  if (field.type === "boolean" && typeof value !== "boolean") return "请使用开关选择布尔值";
+  if (field.type === "boolean" && typeof value !== "boolean") return translate(locale, "validation.booleanExpected");
   if (field.type === "enum" && field.enum?.length && !field.enum.some((option) => enumValueEqual(option, value))) {
-    return "请选择列表中的有效选项";
+    return translate(locale, "validation.enumExpected");
   }
   if (typeof value === "string") {
-    if (field.type === "color" && !isHexColor(value)) return "请输入有效的十六进制颜色";
-    if (field.minLength !== undefined && value.length < field.minLength) return `至少需要 ${field.minLength} 个字符`;
-    if (field.maxLength !== undefined && value.length > field.maxLength) return `最多允许 ${field.maxLength} 个字符`;
+    if (field.type === "color" && !isHexColor(value)) return translate(locale, "validation.colorExpected");
+    if (field.minLength !== undefined && value.length < field.minLength) return translate(locale, "validation.minLength", { min: field.minLength });
+    if (field.maxLength !== undefined && value.length > field.maxLength) return translate(locale, "validation.maxLength", { max: field.maxLength });
     if (field.pattern) {
       try {
-        if (!new RegExp(field.pattern).test(value)) return "内容不符合此字段要求的格式";
+        if (!new RegExp(field.pattern).test(value)) return translate(locale, "validation.pattern");
       } catch {
         // Invalid third-party schema patterns should not block editing.
       }
@@ -129,10 +135,11 @@ export function validationErrors(
   fields: readonly FieldSpec[],
   values: EditorValues,
   format?: ConfigFormat,
+  locale: Locale = "zh-CN",
 ): Map<string, string> {
   const errors = new Map<string, string>();
   for (const field of fields) {
-    const error = validateField(field, values[fieldKey(field)], format);
+    const error = validateField(field, values[fieldKey(field)], format, locale);
     if (error) errors.set(fieldKey(field), error);
   }
   return errors;
@@ -245,17 +252,18 @@ export function validateNewKeyPath(
   rawPath: string,
   format: ConfigFormat,
   existingFields: readonly FieldSpec[],
+  locale: Locale = "zh-CN",
 ): { segments: PathSegment[]; error?: string } {
   const trimmed = rawPath.trim();
-  if (!trimmed) return { segments: [], error: "请输入配置项键名" };
+  if (!trimmed) return { segments: [], error: translate(locale, "validation.keyRequired") };
   if (trimmed.includes("\0") || trimmed.length > 512) {
-    return { segments: [], error: "键名包含无效字符或长度超限" };
+    return { segments: [], error: translate(locale, "validation.keyInvalid") };
   }
 
   let segments: string[];
   if (format === "env") {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
-      return { segments: [], error: "ENV 键名只允许字母、数字和下划线，且不能以数字开头" };
+      return { segments: [], error: translate(locale, "validation.keyEnvInvalid") };
     }
     segments = [trimmed];
   } else if (format === "properties") {
@@ -263,24 +271,24 @@ export function validateNewKeyPath(
   } else {
     segments = trimmed.split(".").map((part) => part.trim());
     if (segments.some((part) => !part)) {
-      return { segments: [], error: "路径中不能包含空白段，例如连续的点号" };
+      return { segments: [], error: translate(locale, "validation.keyEmptySegment") };
     }
   }
 
   if (segments.length > 32) {
-    return { segments: [], error: "嵌套层级过多" };
+    return { segments: [], error: translate(locale, "validation.keyTooDeep") };
   }
   if (segments.some(isForbiddenKey)) {
-    return { segments: [], error: "键名不能使用 __proto__、prototype 或 constructor" };
+    return { segments: [], error: translate(locale, "validation.keyForbidden") };
   }
 
   const candidateKey = JSON.stringify(segments);
   for (const existing of existingFields) {
     if (fieldKey(existing) === candidateKey) {
-      return { segments: [], error: "该配置项已存在" };
+      return { segments: [], error: translate(locale, "validation.keyExists") };
     }
     if (isStrictSegmentPrefix(existing.segments, segments) || isStrictSegmentPrefix(segments, existing.segments)) {
-      return { segments: [], error: `与已有路径 ${existing.path} 存在父子冲突` };
+      return { segments: [], error: translate(locale, "validation.keyParentConflict", { path: existing.path }) };
     }
   }
   return { segments };

@@ -31,6 +31,7 @@ export function applyTheme(preference: ThemePreference): void {
 export function defaultClientSettings(): AppSettings {
   return {
     theme: "system",
+    locale: "zh-CN",
     ai: { enabled: false, provider: "custom", model: "", baseUrl: "", apiKey: "", timeoutMs: 45_000 },
     github: { token: "" },
     recentProjects: [],

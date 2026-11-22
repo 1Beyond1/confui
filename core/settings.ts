@@ -254,6 +254,9 @@ export function normalizeSettings(input: unknown): AppSettings {
   const theme = source.theme === "light" || source.theme === "dark" || source.theme === "system"
     ? source.theme
     : DEFAULT_SETTINGS.theme;
+  const locale = source.locale === "en-US" || source.locale === "zh-CN"
+    ? source.locale
+    : DEFAULT_SETTINGS.locale;
   const ai = isRecord(source.ai) ? source.ai : {};
   const github = isRecord(source.github) ? source.github : {};
   const recentProjects = Array.isArray(source.recentProjects)
@@ -273,6 +276,7 @@ export function normalizeSettings(input: unknown): AppSettings {
     : [];
   return {
     theme,
+    locale,
     ai: {
       enabled: ai.enabled === true,
       provider: typeof ai.provider === "string" ? ai.provider.slice(0, 80) : "custom",

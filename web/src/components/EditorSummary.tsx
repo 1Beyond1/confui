@@ -1,4 +1,5 @@
 import type { BackupStatus, ConfigFormSchema } from "../../../shared/schema.ts";
+import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button, SourceBadge } from "../ui.tsx";
 import { FORMAT_LABELS, FORMAT_SHORT_LABELS, formatBytes } from "../utils/format.ts";
@@ -16,6 +17,7 @@ export function EditorSummary({
   busy?: boolean;
   onRestoreBackup?: () => void;
 }) {
+  const { locale, t } = useI18n();
   const totalFields = fieldCount ?? schema.fields.length;
   return (
     <section class="editor-summary">
@@ -24,7 +26,7 @@ export function EditorSummary({
           <span class={`format-icon format-icon--${schema.format}`}>{FORMAT_SHORT_LABELS[schema.format]}</span>
           <div>
             <h1>{schema.kind}</h1>
-            <p>{totalFields} 个字段 · {FORMAT_LABELS[schema.format]} · {formatBytes(schema.version.size)}</p>
+            <p>{t("editor.summaryMeta", { count: totalFields, format: FORMAT_LABELS[schema.format], size: formatBytes(schema.version.size) })}</p>
           </div>
         </div>
         {backupStatus?.exists && onRestoreBackup && (
@@ -33,15 +35,17 @@ export function EditorSummary({
             icon="history"
             disabled={busy}
             onClick={onRestoreBackup}
-            title={backupStatus.modifiedAt ? `上次备份时间：${new Date(backupStatus.modifiedAt).toLocaleString()}` : undefined}
+            title={backupStatus.modifiedAt
+              ? t("editor.backupTimeTooltip", { time: new Date(backupStatus.modifiedAt).toLocaleString(locale) })
+              : undefined}
           >
-            从 .bak 恢复
+            {t("editor.restoreBackup")}
           </Button>
         )}
       </div>
       <div class="source-pipeline">
         {schema.sources.map((source) => (
-          <span key={source.source} title={`${source.fieldCount} 个字段使用了此来源`}>
+          <span key={source.source} title={t("editor.summarySourceTitle", { count: source.fieldCount })}>
             <SourceBadge source={source.source}/>
             <small>{source.fieldCount}</small>
           </span>
@@ -50,10 +54,10 @@ export function EditorSummary({
       {(schema.warnings.length > 0 || schema.exampleFiles.length > 0 || schema.readmeSource) && (
         <div class="editor-summary__details">
           {schema.exampleFiles.length > 0 && (
-            <span><Icon name="archive" size={14}/>{schema.exampleFiles.length} 个示例文件</span>
+            <span><Icon name="archive" size={14}/>{t("editor.summaryExamples", { count: schema.exampleFiles.length })}</span>
           )}
           {schema.readmeSource && (
-            <span><Icon name="file" size={14}/>{schema.readmeSource === "local" ? "本地 README" : "GitHub README"}</span>
+            <span><Icon name="file" size={14}/>{schema.readmeSource === "local" ? t("editor.summaryLocalReadme") : t("editor.summaryGithubReadme")}</span>
           )}
           {schema.warnings.map((warning) => (
             <span class="summary-warning" key={warning} title={warning}>

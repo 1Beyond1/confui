@@ -146,8 +146,11 @@ export interface ProjectScanResult {
   warnings: string[];
 }
 
+export type Locale = "zh-CN" | "en-US";
+
 export interface InferOptions {
   githubUrl?: string;
+  locale?: Locale;
 }
 
 export interface ConfigChange {
@@ -244,6 +247,7 @@ export type TestAIRequest = AppSettings["ai"] & {
 
 export interface AppSettings {
   theme: ThemePreference;
+  locale: Locale;
   ai: {
     enabled: boolean;
     provider: string;
@@ -275,6 +279,7 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: "system",
+  locale: "zh-CN",
   ai: {
     enabled: false,
     provider: "custom",

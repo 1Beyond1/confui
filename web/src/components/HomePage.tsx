@@ -1,5 +1,6 @@
 import type { RecentProject } from "../../../shared/schema.ts";
 import { normalizeGithubUrl } from "../../../shared/validation.ts";
+import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button } from "../ui.tsx";
 
@@ -28,9 +29,10 @@ export function HomePage({
   onRecent,
   onRemoveRecent,
 }: HomePageProps) {
+  const { t } = useI18n();
   const trimmedGithub = github.trim();
   const githubError = trimmedGithub && !normalizeGithubUrl(trimmedGithub)
-    ? "请输入有效的 GitHub 仓库链接，例如 https://github.com/owner/repository（不允许携带账号密码）"
+    ? t("home.githubInvalid")
     : undefined;
 
   return (
@@ -38,36 +40,36 @@ export function HomePage({
       <div class="home-heading">
         <span class="home-heading__icon"><Icon name="layers" size={24}/></span>
         <div>
-          <p class="eyebrow">本地配置工作台</p>
-          <h1>打开项目，直接开始配置</h1>
-          <p>Confui 会识别常见配置格式，把字段说明和正确控件放到同一个桌面界面里。</p>
+          <p class="eyebrow">{t("home.eyebrow")}</p>
+          <h1>{t("home.title")}</h1>
+          <p>{t("home.subtitle")}</p>
         </div>
       </div>
       <section class="open-project-card">
         <div class="open-project-card__head">
           <div>
-            <h2>选择本地项目</h2>
-            <p>配置文件只在你的电脑上读取和保存。</p>
+            <h2>{t("home.cardTitle")}</h2>
+            <p>{t("home.cardSubtitle")}</p>
           </div>
-          <span class="local-pill"><Icon name="shield" size={14}/>本地处理</span>
+          <span class="local-pill"><Icon name="shield" size={14}/>{t("home.localBadge")}</span>
         </div>
         <div class="project-input-block">
-          <label for="project-root">项目文件夹 <em>必选</em></label>
+          <label for="project-root">{t("home.projectFolder")} <em>{t("home.required")}</em></label>
           <div class="path-control">
             <Icon name="folder"/>
             <input
               id="project-root"
               value={root}
               disabled={busy}
-              placeholder="选择或粘贴项目文件夹路径"
+              placeholder={t("home.projectPlaceholder")}
               onInput={(event) => onRoot(event.currentTarget.value)}
               onKeyDown={(event) => { if (event.key === "Enter" && !githubError) onOpen(); }}
             />
-            <Button disabled={busy} onClick={onBrowse}>浏览</Button>
+            <Button disabled={busy} onClick={onBrowse}>{t("home.browse")}</Button>
           </div>
         </div>
         <div class="project-input-block">
-          <label for="github-url">GitHub 仓库 <span>可选，用于本地无 README 时补充说明</span></label>
+          <label for="github-url">{t("home.githubLabel")} <span>{t("home.githubHint")}</span></label>
           <div class="path-control">
             <Icon name="github"/>
             <input
@@ -89,7 +91,7 @@ export function HomePage({
           )}
         </div>
         <div class="open-project-card__footer">
-          <p><Icon name="info" size={15}/>优先读取本地 Schema、示例文件和 README；AI 只是最后一层补充。</p>
+          <p><Icon name="info" size={15}/>{t("home.footerHint")}</p>
           <Button
             variant="primary"
             icon="folder-open"
@@ -97,7 +99,7 @@ export function HomePage({
             disabled={busy || !root.trim() || Boolean(githubError)}
             onClick={onOpen}
           >
-            识别并打开
+            {t("home.openButton")}
           </Button>
         </div>
       </section>
@@ -106,8 +108,8 @@ export function HomePage({
         <section class="recent-section">
           <div class="section-heading">
             <div>
-              <h2>最近打开</h2>
-              <p>继续处理之前的本地项目（最多保留 10 条）</p>
+              <h2>{t("home.recentTitle")}</h2>
+              <p>{t("home.recentSubtitle")}</p>
             </div>
           </div>
           <div class="recent-grid">
@@ -130,8 +132,8 @@ export function HomePage({
                   type="button"
                   class="icon-button recent-card__remove"
                   disabled={busy}
-                  aria-label={`从最近打开中移除 ${item.name}`}
-                  title="移除记录"
+                  aria-label={t("home.removeRecentAria", { name: item.name })}
+                  title={t("home.removeRecentTitle")}
                   onClick={() => onRemoveRecent(item.path)}
                 >
                   <Icon name="x" size={14}/>

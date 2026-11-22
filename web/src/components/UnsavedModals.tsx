@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button, Modal } from "../ui.tsx";
 
@@ -14,16 +15,17 @@ export function UnsavedConfigModal({
   onDiscard: () => void;
   onSaveAndContinue: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <Modal
-      title="还有未保存的更改"
-      description="离开当前文件前，选择如何处理这些更改。"
+      title={t("unsaved.configTitle")}
+      description={t("unsaved.configDesc")}
       onClose={onCancel}
       footer={(
         <>
-          <Button onClick={onCancel}>继续编辑</Button>
-          <Button variant="danger" onClick={onDiscard}>放弃更改</Button>
-          <Button variant="primary" icon="save" onClick={onSaveAndContinue}>保存后继续</Button>
+          <Button onClick={onCancel}>{t("unsaved.keepEditing")}</Button>
+          <Button variant="danger" onClick={onDiscard}>{t("unsaved.discard")}</Button>
+          <Button variant="primary" icon="save" onClick={onSaveAndContinue}>{t("unsaved.saveAndContinue")}</Button>
         </>
       )}
     >
@@ -31,7 +33,7 @@ export function UnsavedConfigModal({
         <span><Icon name="file"/></span>
         <div>
           <strong>{kind}</strong>
-          <p>{changeCount} 项更改尚未写入文件</p>
+          <p>{t("unsaved.configSummary", { count: changeCount })}</p>
         </div>
       </div>
     </Modal>
@@ -45,23 +47,24 @@ export function UnsavedSettingsModal({
   onCancel: () => void;
   onDiscard: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <Modal
-      title="设置尚未保存"
-      description="离开设置页会丢弃刚才的修改。"
+      title={t("unsaved.settingsTitle")}
+      description={t("unsaved.settingsDesc")}
       onClose={onCancel}
       footer={(
         <>
-          <Button onClick={onCancel}>返回设置</Button>
-          <Button variant="danger" onClick={onDiscard}>放弃并继续</Button>
+          <Button onClick={onCancel}>{t("unsaved.backToSettings")}</Button>
+          <Button variant="danger" onClick={onDiscard}>{t("unsaved.discardAndContinue")}</Button>
         </>
       )}
     >
       <div class="unsaved-summary">
         <span><Icon name="settings"/></span>
         <div>
-          <strong>Confui 设置</strong>
-          <p>供应商、安全或外观选项已发生变化</p>
+          <strong>{t("unsaved.settingsName")}</strong>
+          <p>{t("unsaved.settingsSummary")}</p>
         </div>
       </div>
     </Modal>

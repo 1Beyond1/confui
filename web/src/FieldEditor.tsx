@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { FieldAssistResult, FieldSpec } from "../../shared/schema.ts";
 import { isHexColor6 } from "../../shared/validation.ts";
+import { StructuredArrayControl, StructuredObjectControl } from "./components/StructuredControls.tsx";
 import {
   effectiveValue,
   enumValueEqual,
@@ -9,7 +10,7 @@ import {
   isInactiveExamplePlaceholder,
   type EditorValues,
 } from "./editor-state.ts";
-import { StructuredArrayControl, StructuredObjectControl } from "./components/StructuredControls.tsx";
+import { useI18n } from "./i18n/index.tsx";
 import { Icon } from "./icons.tsx";
 import { SourceBadge } from "./ui.tsx";
 
@@ -48,6 +49,7 @@ export function FieldEditor({
   onExplain?: (field: FieldSpec) => Promise<FieldAssistResult>;
   disabled?: boolean;
 }) {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
   useEffect(() => {
     setQuery("");
@@ -60,7 +62,7 @@ export function FieldEditor({
       .toLocaleLowerCase()
       .includes(normalizedQuery))
     : fields;
-  const groups = groupFields(visibleFields);
+  const groups = groupFields(visibleFields, t("common.generalGroup"));
   const controlIds = new Map(fields.map((field, index) => [fieldKey(field), `field-${index}`]));
   return (
     <div class="field-editor" aria-busy={disabled}>
@@ -70,15 +72,21 @@ export function FieldEditor({
           <input
             value={query}
             disabled={disabled}
-            placeholder="搜索字段名称、路径或说明"
-            aria-label="搜索字段名称、路径或说明"
+            placeholder={t("field.searchPlaceholder")}
+            aria-label={t("field.searchPlaceholder")}
             onInput={(event) => setQuery(event.currentTarget.value)}
           />
-          {query && <button type="button" class="icon-button" disabled={disabled} onClick={() => setQuery("")} aria-label="清空字段筛选"><Icon name="x" size={14}/></button>}
+          {query && (
+            <button type="button" class="icon-button" disabled={disabled} onClick={() => setQuery("")} aria-label={t("field.clearSearch")}>
+              <Icon name="x" size={14}/>
+            </button>
+          )}
         </label>
         <div class="field-toolbar__actions">
           <span class="field-toolbar__count">
-            {visibleFields.length === fields.length ? `${fields.length} 个配置项` : `${visibleFields.length} / ${fields.length} 个配置项`}
+            {visibleFields.length === fields.length
+              ? t("field.countAll", { count: fields.length })
+              : t("field.countFiltered", { visible: visibleFields.length, total: fields.length })}
           </span>
           {onUndo && onRedo && (
             <div class="toolbar-history">
@@ -87,8 +95,8 @@ export function FieldEditor({
                 class="icon-button"
                 disabled={disabled || !canUndo}
                 onClick={onUndo}
-                aria-label="撤销"
-                title="撤销 (Ctrl+Z)"
+                aria-label={t("common.undo")}
+                title={t("field.undoTooltip")}
               >
                 <Icon name="undo" size={15}/>
               </button>
@@ -97,8 +105,8 @@ export function FieldEditor({
                 class="icon-button"
                 disabled={disabled || !canRedo}
                 onClick={onRedo}
-                aria-label="重做"
-                title="重做 (Ctrl+Y)"
+                aria-label={t("common.redo")}
+                title={t("field.redoTooltip")}
               >
                 <Icon name="redo" size={15}/>
               </button>
@@ -112,49 +120,51 @@ export function FieldEditor({
               onClick={onOpenAddKey}
             >
               <Icon name="plus" size={14}/>
-              <span>新增配置项</span>
+              <span>{t("field.addKey")}</span>
             </button>
           )}
         </div>
       </div>
 
-      {groups.length ? <div class="field-groups">
-        {groups.map(([name, groupedFields]) => (
-          <section class="form-card" key={name}>
-            <header class="form-card__header">
-              <div>
-                <h2>{name}</h2>
-                <p>{groupedFields.length} 个配置项</p>
+      {groups.length ? (
+        <div class="field-groups">
+          {groups.map(([name, groupedFields]) => (
+            <section class="form-card" key={name}>
+              <header class="form-card__header">
+                <div>
+                  <h2>{name}</h2>
+                  <p>{t("field.groupCount", { count: groupedFields.length })}</p>
+                </div>
+              </header>
+              <div class="form-card__body">
+                {groupedFields.map((field) => {
+                  const key = fieldKey(field);
+                  return (
+                    <FieldRow
+                      key={key}
+                      field={field}
+                      isCustom={Boolean(customKeys?.has(key))}
+                      value={values[key]}
+                      error={errors.get(key)}
+                      controlId={controlIds.get(key) ?? `field-${key}`.replace(/[^\w-]/g, "-")}
+                      disabled={disabled}
+                      aiAvailable={aiAvailable}
+                      onExplain={onExplain ? () => onExplain(field) : undefined}
+                      onChange={(value, coalesce) => onChange(field, value, { coalesce })}
+                      onReset={onResetField ? () => onResetField(field) : undefined}
+                      onDelete={onDeleteField ? () => onDeleteField(field) : undefined}
+                    />
+                  );
+                })}
               </div>
-            </header>
-            <div class="form-card__body">
-              {groupedFields.map((field) => {
-                const key = fieldKey(field);
-                return (
-                  <FieldRow
-                    key={key}
-                    field={field}
-                    isCustom={Boolean(customKeys?.has(key))}
-                    value={values[key]}
-                    error={errors.get(key)}
-                    controlId={controlIds.get(key) ?? `field-${key}`.replace(/[^\w-]/g, "-")}
-                    disabled={disabled}
-                    aiAvailable={aiAvailable}
-                    onExplain={onExplain ? () => onExplain(field) : undefined}
-                    onChange={(value, coalesce) => onChange(field, value, { coalesce })}
-                    onReset={onResetField ? () => onResetField(field) : undefined}
-                    onDelete={onDeleteField ? () => onDeleteField(field) : undefined}
-                  />
-                );
-              })}
-            </div>
-          </section>
-        ))}
-      </div> : (
+            </section>
+          ))}
+        </div>
+      ) : (
         <div class="field-filter-empty">
           <Icon name="search"/>
-          <span>没有匹配的字段</span>
-          <button type="button" disabled={disabled} onClick={() => setQuery("")}>清空筛选</button>
+          <span>{t("field.noMatch")}</span>
+          <button type="button" disabled={disabled} onClick={() => setQuery("")}>{t("sidebar.clearFilter")}</button>
         </div>
       )}
     </div>
@@ -186,6 +196,7 @@ function FieldRow({
   onReset?: () => void;
   onDelete?: () => void;
 }) {
+  const { t } = useI18n();
   const [assist, setAssist] = useState<
     | { status: "idle" }
     | { status: "loading" }
@@ -200,8 +211,8 @@ function FieldRow({
     setAssist({ status: "loading" });
     try {
       setAssist({ status: "success", result: await onExplain() });
-    } catch (error) {
-      setAssist({ status: "error", message: error instanceof Error ? error.message : "AI 字段解释失败" });
+    } catch (err) {
+      setAssist({ status: "error", message: err instanceof Error ? err.message : t("field.aiExplainFailed") });
     }
   }
 
@@ -222,14 +233,14 @@ function FieldRow({
       <div class="field-row__meta">
         <div class="field-row__title">
           <label for={controlId}>{field.label}</label>
-          {isCustom && <span class="field-badge field-badge--added">新增</span>}
-          {markedDeleted && <span class="field-badge field-badge--deleted">待删除</span>}
+          {isCustom && <span class="field-badge field-badge--added">{t("field.badgeAdded")}</span>}
+          {markedDeleted && <span class="field-badge field-badge--deleted">{t("field.badgeDeleted")}</span>}
           {field.required && !markedDeleted && (
             <span
               class="required-mark"
-              title={inactiveExampleRequired ? "来自示例文件的建议必填项，未在当前配置中启用" : "必填"}
+              title={inactiveExampleRequired ? t("field.recommendedTitle") : t("field.required")}
             >
-              {inactiveExampleRequired ? "建议填写" : "必填"}
+              {inactiveExampleRequired ? t("field.recommended") : t("field.required")}
             </span>
           )}
         </div>
@@ -252,10 +263,10 @@ function FieldRow({
                 class="field-action-btn"
                 disabled={disabled}
                 onClick={onReset}
-                title={markedDeleted ? "取消删除并恢复原值" : "恢复此字段原始值"}
+                title={markedDeleted ? t("field.cancelDeleteTitle") : t("field.restoreValueTitle")}
               >
                 <Icon name="undo" size={12}/>
-                <span>{markedDeleted ? "取消删除" : "恢复原值"}</span>
+                <span>{markedDeleted ? t("field.cancelDelete") : t("field.restoreValue")}</span>
               </button>
             )}
             {canDelete && !markedDeleted && onDelete && (
@@ -264,10 +275,10 @@ function FieldRow({
                 class="field-action-btn field-action-btn--danger"
                 disabled={disabled}
                 onClick={onDelete}
-                title={isCustom ? "移除此新增配置项" : "标记删除此配置项"}
+                title={isCustom ? t("field.removeCustomTitle") : t("field.markDeleteTitle")}
               >
                 <Icon name="trash" size={12}/>
-                <span>删除</span>
+                <span>{t("common.delete")}</span>
               </button>
             )}
             {aiAvailable && onExplain && !isCustom && (
@@ -276,10 +287,10 @@ function FieldRow({
                 class="field-ai-button"
                 disabled={disabled || assist.status === "loading"}
                 onClick={() => void requestAssist()}
-                title="让已配置的 AI 解释这个字段并给出填写建议"
+                title={t("field.aiExplainTitle")}
               >
                 <Icon name={assist.status === "loading" ? "loader" : "sparkles"} class={assist.status === "loading" ? "spin" : undefined} size={13}/>
-                <span>{assist.status === "loading" ? "分析中" : assist.status === "success" ? "再次询问" : "AI 解读"}</span>
+                <span>{assist.status === "loading" ? t("field.aiLoading") : assist.status === "success" ? t("field.aiAskAgain") : t("field.aiExplain")}</span>
               </button>
             )}
           </div>
@@ -296,24 +307,24 @@ function FieldRow({
         {error && <p class="field-error" id={`${controlId}-error`}><Icon name="warning" size={14}/>{error}</p>}
         {!error && field.default !== undefined && (
           <div class="field-hint">
-            <span>默认值：<code>{field.secret || field.type === "secret" ? "••••••••" : formatCompact(field.default)}</code></span>
-            {effectiveValue(value) === undefined && !field.secret && field.type !== "secret" && (
-              <button type="button" class="field-default-button" disabled={disabled} onClick={() => handleChange(cloneDefault(field.default))}>使用默认值</button>
+            <span>{t("field.defaultLabel")}<code>{field.secret || field.type === "secret" ? "••••••••" : formatCompact(field.default)}</code></span>
+            {currentEffective === undefined && !field.secret && field.type !== "secret" && (
+              <button type="button" class="field-default-button" disabled={disabled} onClick={() => handleChange(cloneDefault(field.default))}>{t("field.useDefault")}</button>
             )}
           </div>
         )}
         {assist.status === "success" && (
           <div class="field-ai-result" role="status" aria-live="polite">
-            <div class="field-ai-result__heading"><Icon name="sparkles" size={14}/><strong>AI 字段解读</strong></div>
+            <div class="field-ai-result__heading"><Icon name="sparkles" size={14}/><strong>{t("field.aiResultTitle")}</strong></div>
             <p>{assist.result.explanation}</p>
-            {assist.result.recommendation && <p><b>填写建议：</b>{assist.result.recommendation}</p>}
-            {assist.result.caution && <p class="field-ai-result__caution"><b>注意：</b>{assist.result.caution}</p>}
+            {assist.result.recommendation && <p><b>{t("field.aiRecommendation")}</b>{assist.result.recommendation}</p>}
+            {assist.result.caution && <p class="field-ai-result__caution"><b>{t("field.aiCaution")}</b>{assist.result.caution}</p>}
           </div>
         )}
         {assist.status === "error" && (
           <div class="field-ai-result field-ai-result--error" role="alert">
             <span>{assist.message}</span>
-            {onExplain && <button type="button" onClick={() => void requestAssist()} disabled={disabled}>重试</button>}
+            {onExplain && <button type="button" onClick={() => void requestAssist()} disabled={disabled}>{t("common.retry")}</button>}
           </div>
         )}
       </div>
@@ -338,6 +349,7 @@ function FieldControl({
   disabled: boolean;
   onChange: (value: unknown, coalesce?: boolean) => void;
 }) {
+  const { t } = useI18n();
   const [revealed, setRevealed] = useState(false);
   const [numberText, setNumberText] = useState(() => formatNumberInput(value));
   const lastNumberValue = useRef<unknown>(value);
@@ -350,7 +362,11 @@ function FieldControl({
 
   if (field.type === "boolean") {
     const checked = value === true;
-    const state = value === undefined ? "未设置" : checked ? "已启用" : "已关闭";
+    const state = value === undefined
+      ? t("common.unset")
+      : checked
+        ? t("field.boolEnabled")
+        : t("field.boolDisabled");
     return (
       <div class="boolean-control">
         <button
@@ -360,7 +376,7 @@ function FieldControl({
           aria-checked={checked}
           aria-describedby={describedBy}
           aria-invalid={Boolean(error)}
-          aria-label={`${field.label}：${state}`}
+          aria-label={`${field.label}: ${state}`}
           class={`switch-control ${checked ? "switch-control--on" : ""} ${value === undefined ? "switch-control--unset" : ""}`}
           disabled={disabled}
           onClick={() => onChange(value === undefined ? true : !checked)}
@@ -373,8 +389,10 @@ function FieldControl({
           class="boolean-control__reset"
           disabled={disabled || value === undefined}
           onClick={() => onChange(undefined)}
-          aria-label={`${field.label}设为未设置`}
-        >重置</button>
+          aria-label={t("field.setUnsetAria", { label: field.label })}
+        >
+          {t("common.reset")}
+        </button>
       </div>
     );
   }
@@ -411,15 +429,15 @@ function FieldControl({
             onChange(Number.isSafeInteger(index) && index >= 0 ? options[index] : undefined);
           }}
         >
-          <option value="">请选择</option>
+          <option value="">{t("field.selectPlaceholder")}</option>
           {hasNonPresetValue && (
             <option value="__non_preset__">
-              {`${value === "" ? "（空字符串）" : formatCompact(value)} — 当前值（非预设）`}
+              {`${value === "" ? t("common.emptyStringOption") : formatCompact(value)}${t("field.nonPresetSuffix")}`}
             </option>
           )}
           {options.map((option, index) => (
             <option value={String(index)} key={`${typeof option}:${String(option)}:${index}`}>
-              {option === "" ? "（空字符串）" : String(option)}
+              {option === "" ? t("common.emptyStringOption") : String(option)}
             </option>
           ))}
         </select>
@@ -457,15 +475,31 @@ function FieldControl({
   }
 
   if (field.type === "color") {
-    // The native picker only understands six-digit opaque colors. Keep it
-    // disabled for shorthand/alpha values so opening the picker cannot
-    // silently replace a value that the text input can preserve.
     const pickerEnabled = value === undefined || value === "" || isHexColor6(value);
     const color = pickerEnabled && isHexColor6(value) ? value : "#2563eb";
     return (
       <div class="color-control">
-        <input id={`${id}-picker`} type="color" value={color} title={pickerEnabled ? "选择颜色" : "当前颜色包含简写或透明度，请使用文本输入"} aria-label={`${field.label}颜色选择器`} aria-describedby={describedBy} disabled={disabled || !pickerEnabled} onInput={(event) => onChange(event.currentTarget.value)}/>
-        <input id={id} class={`control ${error ? "control--error" : ""}`} value={String(value ?? "")} aria-describedby={describedBy} aria-invalid={Boolean(error)} aria-required={field.required} disabled={disabled} onInput={(event) => onChange(event.currentTarget.value)} placeholder="#2563eb"/>
+        <input
+          id={`${id}-picker`}
+          type="color"
+          value={color}
+          title={pickerEnabled ? t("field.colorPickerTitle") : t("field.colorPickerDisabledTitle")}
+          aria-label={t("field.colorPickerAria", { label: field.label })}
+          aria-describedby={describedBy}
+          disabled={disabled || !pickerEnabled}
+          onInput={(event) => onChange(event.currentTarget.value)}
+        />
+        <input
+          id={id}
+          class={`control ${error ? "control--error" : ""}`}
+          value={String(value ?? "")}
+          aria-describedby={describedBy}
+          aria-invalid={Boolean(error)}
+          aria-required={field.required}
+          disabled={disabled}
+          onInput={(event) => onChange(event.currentTarget.value, true)}
+          placeholder="#2563eb"
+        />
       </div>
     );
   }
@@ -478,7 +512,7 @@ function FieldControl({
           class={`control ${error ? "control--error" : ""}`}
           type={revealed ? "text" : "password"}
           value={String(value ?? "")}
-          placeholder={field.placeholder || "输入敏感值"}
+          placeholder={field.placeholder || t("field.secretPlaceholder")}
           autocomplete="off"
           aria-describedby={describedBy}
           aria-invalid={Boolean(error)}
@@ -486,7 +520,13 @@ function FieldControl({
           disabled={disabled}
           onInput={(event) => onChange(event.currentTarget.value, true)}
         />
-        <button type="button" class="icon-button" disabled={disabled} onClick={() => setRevealed(!revealed)} aria-label={revealed ? "隐藏内容" : "显示内容"}>
+        <button
+          type="button"
+          class="icon-button"
+          disabled={disabled}
+          onClick={() => setRevealed(!revealed)}
+          aria-label={revealed ? t("field.hideSecret") : t("field.showSecret")}
+        >
           <Icon name={revealed ? "eye-off" : "eye"}/>
         </button>
       </div>
@@ -495,7 +535,6 @@ function FieldControl({
 
   if (field.type === "number" || field.type === "integer") {
     const current = typeof value === "number" && Number.isFinite(value) ? value : undefined;
-    // 上下界都已知且跨度不大的整数用滑块；端口号那种上万的跨度滑块反而更难对准，仍走数字输入框。
     const { minimum, maximum } = field;
     const slidable = field.type === "integer"
       && typeof minimum === "number" && Number.isSafeInteger(minimum)
@@ -514,7 +553,7 @@ function FieldControl({
             aria-describedby={describedBy}
             aria-invalid={Boolean(error)}
             aria-required={field.required}
-            aria-valuetext={current === undefined ? "未设置" : String(current)}
+            aria-valuetext={current === undefined ? t("common.unset") : String(current)}
             disabled={disabled}
             onInput={(event) => onChange(event.currentTarget.valueAsNumber)}
             onClick={(event) => {
@@ -533,8 +572,10 @@ function FieldControl({
             class="boolean-control__reset range-control__reset"
             disabled={disabled || current === undefined}
             onClick={() => onChange(undefined)}
-            aria-label={`${field.label}设为未设置`}
-          >重置</button>
+            aria-label={t("field.setUnsetAria", { label: field.label })}
+          >
+            {t("common.reset")}
+          </button>
         </div>
       );
     }
@@ -595,10 +636,11 @@ function FieldControl({
   );
 }
 
-function groupFields(fields: FieldSpec[]): Array<[string, FieldSpec[]]> {
+function groupFields(fields: FieldSpec[], defaultGroup: string): Array<[string, FieldSpec[]]> {
   const groups = new Map<string, FieldSpec[]>();
   for (const field of fields) {
-    const name = field.group || "常规";
+    const rawGroup = field.group || defaultGroup;
+    const name = rawGroup === "常规" ? defaultGroup : rawGroup;
     const current = groups.get(name) ?? [];
     current.push(field);
     groups.set(name, current);

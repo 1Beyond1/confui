@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import type { ConfigFormSchema, FieldSpec, InferOptions } from "../../shared/schema.ts";
+import type { ConfigFormSchema, FieldSpec, InferOptions, Locale } from "../../shared/schema.ts";
 import type { AIProvider } from "../ai/provider.ts";
 import { AI_FILE_LIMIT, readTextSnapshot } from "../files.ts";
 import { assertEditableSyntax, detectFormat, parseConfig } from "../formats.ts";
@@ -35,7 +35,8 @@ export async function inferConfig(
   const warnings: string[] = [];
   const candidates: FieldCandidate[] = [];
 
-  const known = inferKnownFields(basename(relativeFile), parsed);
+  const locale: Locale = options.locale === "en-US" ? "en-US" : "zh-CN";
+  const known = inferKnownFields(basename(relativeFile), parsed, format, locale);
   const collapsedPrefixes = known
     .filter((candidate) => candidate.type === "json" && candidate.value !== undefined)
     .map((candidate) => candidate.segments);

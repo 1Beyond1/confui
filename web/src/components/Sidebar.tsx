@@ -1,5 +1,6 @@
 import { useRef } from "preact/hooks";
 import type { ConfigFile, ConfigFormat, ProjectScanResult } from "../../../shared/schema.ts";
+import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Logo } from "../ui.tsx";
 import { FORMAT_LABELS, FORMAT_SHORT_LABELS, formatBytes, parentPath } from "../utils/format.ts";
@@ -39,6 +40,7 @@ export function Sidebar({
   onRescan,
   onSelectFile,
 }: SidebarProps) {
+  const { t } = useI18n();
   const listRef = useRef<HTMLDivElement>(null);
 
   const activeIndex = filteredFiles.findIndex((file) => activeFile?.path === file.path && view === "editor");
@@ -66,10 +68,10 @@ export function Sidebar({
   return (
     <aside class="sidebar">
       <div class="sidebar__brand"><Logo/></div>
-      <nav class="primary-nav" aria-label="主导航">
+      <nav class="primary-nav" aria-label={t("nav.primary")}>
         <button class={view === "home" ? "active" : ""} disabled={busy} onClick={onHome}>
           <Icon name="home"/>
-          <span>开始</span>
+          <span>{t("nav.home")}</span>
         </button>
       </nav>
 
@@ -79,12 +81,12 @@ export function Sidebar({
             <div class="project-card__icon"><Icon name="folder-open"/></div>
             <div>
               <strong title={project.root}>{project.name}</strong>
-              <span>{project.files.length} 个配置文件</span>
+              <span>{t("sidebar.fileCount", { count: project.files.length })}</span>
             </div>
             <button
               class="icon-button"
-              aria-label="重新扫描项目"
-              title="重新扫描项目"
+              aria-label={t("sidebar.rescan")}
+              title={t("sidebar.rescan")}
               disabled={busy}
               onClick={onRescan}
             >
@@ -97,11 +99,11 @@ export function Sidebar({
               <input
                 value={fileQuery}
                 onInput={(event) => onFileQuery(event.currentTarget.value)}
-                placeholder="筛选配置文件"
-                aria-label="筛选配置文件"
+                placeholder={t("sidebar.filterFiles")}
+                aria-label={t("sidebar.filterFiles")}
               />
               {fileQuery && (
-                <button onClick={() => onFileQuery("")} aria-label="清空筛选">
+                <button onClick={() => onFileQuery("")} aria-label={t("sidebar.clearFilter")}>
                   <Icon name="x" size={14}/>
                 </button>
               )}
@@ -110,9 +112,9 @@ export function Sidebar({
               <select
                 value={formatFilter}
                 onChange={(event) => onFormatFilter(event.currentTarget.value as ConfigFormat | "all")}
-                aria-label="按格式筛选"
+                aria-label={t("sidebar.filterByFormat")}
               >
-                <option value="all">全部格式</option>
+                <option value="all">{t("sidebar.allFormats")}</option>
                 {Object.entries(FORMAT_LABELS).map(([format, label]) => (
                   <option key={format} value={format}>{label}</option>
                 ))}
@@ -124,7 +126,7 @@ export function Sidebar({
             ref={listRef}
             class="file-list"
             role="listbox"
-            aria-label="配置文件"
+            aria-label={t("sidebar.fileListLabel")}
             onKeyDown={handleListKeyDown}
           >
             {filteredFiles.map((file, index) => {
@@ -144,29 +146,29 @@ export function Sidebar({
                   <span class={`format-icon format-icon--${file.format}`}>{FORMAT_SHORT_LABELS[file.format]}</span>
                   <span class="file-item__copy">
                     <strong>{file.path.split("/").at(-1)}</strong>
-                    <small>{parentPath(file.path)} · {formatBytes(file.size)}</small>
+                    <small>{parentPath(file.path, t("common.rootDir"))} · {formatBytes(file.size)}</small>
                   </span>
-                  {activeFile?.path === file.path && dirty && <i class="dirty-dot" title="有未保存的更改"/>}
+                  {activeFile?.path === file.path && dirty && <i class="dirty-dot" title={t("sidebar.unsavedTooltip")}/>}
                   {file.status !== "ready" && <Icon name="warning" size={14} class="file-warning"/>}
                 </button>
               );
             })}
             {!filteredFiles.length && (
-              <div class="file-list__empty"><Icon name="search"/><span>没有匹配的文件</span></div>
+              <div class="file-list__empty"><Icon name="search"/><span>{t("sidebar.noMatchingFiles")}</span></div>
             )}
           </div>
         </div>
       ) : (
         <div class="sidebar-empty">
           <Icon name="folder"/>
-          <p>打开项目后，配置文件会出现在这里。</p>
+          <p>{t("sidebar.emptyHint")}</p>
         </div>
       )}
 
-      <nav class="sidebar-footer" aria-label="设置">
+      <nav class="sidebar-footer" aria-label={t("nav.settings")}>
         <button class={view === "settings" ? "active" : ""} disabled={busy} onClick={onSettings}>
           <Icon name="settings"/>
-          <span>设置</span>
+          <span>{t("nav.settings")}</span>
         </button>
         <small>{appVersion ? `Confui ${appVersion}` : "Confui"}</small>
       </nav>

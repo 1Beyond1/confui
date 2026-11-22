@@ -1,21 +1,23 @@
 import { useMemo } from "preact/hooks";
 import { computeUnifiedDiff } from "../../../shared/diff.ts";
+import { useI18n } from "../i18n/index.tsx";
 
 export function UnifiedDiffView({
   oldText,
   newText,
   fileName,
-  emptyLabel = "文本内容无变化",
+  emptyLabel,
 }: {
   oldText: string;
   newText: string;
   fileName: string;
   emptyLabel?: string;
 }) {
+  const { t } = useI18n();
   const diff = useMemo(() => computeUnifiedDiff(oldText, newText, 3), [oldText, newText]);
 
   if (!diff.hunks.length) {
-    return <div class="udiff-empty">{emptyLabel}</div>;
+    return <div class="udiff-empty">{emptyLabel ?? t("diff.empty")}</div>;
   }
 
   return (

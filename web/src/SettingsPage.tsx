@@ -1,29 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { AppInfo, AppSettings, ThemePreference, UpdateCheckResult } from "../../shared/schema.ts";
+import type { AppInfo, AppSettings, Locale, ThemePreference, UpdateCheckResult } from "../../shared/schema.ts";
+import { translate, useI18n } from "./i18n/index.tsx";
 import { Icon } from "./icons.tsx";
 import { Button } from "./ui.tsx";
 
-const PROVIDERS = [
-  { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
-  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
-  { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", model: "" },
-  { id: "ollama", label: "Ollama（本地）", baseUrl: "http://127.0.0.1:11434/v1", model: "" },
-  { id: "custom", label: "自定义供应商", baseUrl: "", model: "" },
+const PROVIDER_DEFS = [
+  { id: "openai", staticLabel: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
+  { id: "deepseek", staticLabel: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  { id: "openrouter", staticLabel: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", model: "" },
+  { id: "ollama", labelKey: "settings.providerOllama" as const, baseUrl: "http://127.0.0.1:11434/v1", model: "" },
+  { id: "custom", labelKey: "settings.providerCustom" as const, baseUrl: "", model: "" },
 ] as const;
 
 export function SettingsPage({
   settings,
   onSave,
   onThemePreview,
+  onLocalePreview,
   onToast,
   onDirtyChange,
 }: {
   settings: AppSettings;
   onSave: (settings: AppSettings) => Promise<void>;
   onThemePreview: (theme: ThemePreference) => void;
+  onLocalePreview: (locale: Locale) => void;
   onToast: (message: string, type?: "success" | "error" | "info") => void;
   onDirtyChange: (dirty: boolean) => void;
 }) {
+  const { locale, t } = useI18n();
   const [draft, setDraft] = useState<AppSettings>(() => structuredClone(settings));
   const [clearApiKey, setClearApiKey] = useState(false);
   const [clearGithubToken, setClearGithubToken] = useState(false);
@@ -55,9 +59,7 @@ export function SettingsPage({
     () => JSON.stringify(draft) !== JSON.stringify(settings) || clearApiKey || clearGithubToken,
     [draft, settings, clearApiKey, clearGithubToken],
   );
-  const aiErrors = useMemo(() => validateAiDraft(draft.ai), [draft.ai]);
-  // A locked credential is shown as an empty field, so say why: otherwise the
-  // user reads it as "never saved" and cannot tell that a value is still stored.
+  const aiErrors = useMemo(() => validateAiDraft(draft.ai, locale), [draft.ai, locale]);
   const locked = settings.lockedSecrets;
   const hasStoredApiKey = Boolean(
     settings.secrets?.hasApiKey
@@ -72,8 +74,6 @@ export function SettingsPage({
   }, [dirty, onDirtyChange]);
 
   const setAi = (patch: Partial<AppSettings["ai"]>) => {
-    // A connection test may still be in flight when an input changes. Mark
-    // that result stale so it cannot report success for a different draft.
     testRun.current += 1;
     if (patch.apiKey) setClearApiKey(false);
     setDraft((current) => ({
@@ -85,7 +85,7 @@ export function SettingsPage({
   async function save(): Promise<void> {
     if (saving || testing) return;
     if (Object.keys(aiErrors).length) {
-      onToast("请先修正 AI 设置中的错误", "error");
+      onToast(t("settings.fixAiErrors"), "error");
       focusFirstAiError(aiErrors);
       return;
     }
@@ -101,16 +101,14 @@ export function SettingsPage({
           : undefined,
       };
       await onSave(payload);
-      onToast("设置已安全保存", "success");
+      onToast(translate(draft.locale, "settings.toastSaved"), "success");
     } catch (error) {
-      onToast(error instanceof Error ? error.message : "设置保存失败", "error");
+      onToast(error instanceof Error ? error.message : t("settings.toastSaveFailed"), "error");
     } finally {
       setSaving(false);
     }
   }
 
-  // Keep the latest state & save handler in a ref so Ctrl+S never captures a
-  // stale draft snapshot when the user keeps typing after the first character.
   const shortcutRef = useRef({ dirty, saving, testing, save });
   shortcutRef.current = { dirty, saving, testing, save };
   useEffect(() => {
@@ -127,7 +125,7 @@ export function SettingsPage({
   async function testConnection(): Promise<void> {
     if (testing || saving) return;
     if (Object.keys(aiErrors).length) {
-      onToast("请先修正 AI 设置中的错误", "error");
+      onToast(t("settings.fixAiErrors"), "error");
       focusFirstAiError(aiErrors);
       return;
     }
@@ -141,23 +139,21 @@ export function SettingsPage({
       const result = await window.confui.testAI(testedAi);
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       if (run !== testRun.current) return;
-      onToast(`连接成功 · ${result.data.latencyMs} ms`, "success");
+      onToast(t("settings.testSuccess", { ms: result.data.latencyMs }), "success");
     } catch (error) {
       if (run !== testRun.current) return;
-      onToast(error instanceof Error ? error.message : "连接测试失败", "error");
+      onToast(error instanceof Error ? error.message : t("settings.testFailed"), "error");
     } finally {
       setTesting(false);
     }
   }
 
   function chooseProvider(id: string): void {
-    const provider = PROVIDERS.find((item) => item.id === id) ?? PROVIDERS.at(-1)!;
+    const provider = PROVIDER_DEFS.find((item) => item.id === id) ?? PROVIDER_DEFS.at(-1)!;
     setApiKeysByProvider((current) => ({ ...current, [draft.ai.provider]: draft.ai.apiKey }));
     setClearApiKey(false);
     setAi({
       provider: provider.id,
-      // API keys belong to a provider. Never carry a key entered for one
-      // vendor into a request sent to another vendor.
       apiKey: apiKeysByProvider[provider.id] ?? "",
       ...(provider.id !== "custom" ? { baseUrl: provider.baseUrl, model: provider.model } : {}),
     });
@@ -172,12 +168,12 @@ export function SettingsPage({
       const currentRelease = result.data.currentVersion === result.data.latestVersion;
       onToast(
         result.data.updateAvailable
-          ? `发现新版本 v${result.data.latestVersion}`
-          : currentRelease ? "当前已是最新版本" : "当前版本已领先于公开版本",
+          ? t("settings.toastNewVersion", { version: result.data.latestVersion })
+          : currentRelease ? t("settings.toastLatest") : t("settings.toastAhead"),
         result.data.updateAvailable ? "info" : "success",
       );
     } catch (error) {
-      onToast(error instanceof Error ? error.message : "检查更新失败", "error");
+      onToast(error instanceof Error ? error.message : t("settings.toastUpdateFailed"), "error");
     } finally {
       setCheckingUpdate(false);
     }
@@ -192,21 +188,21 @@ export function SettingsPage({
     <div class="settings-page page-narrow">
       <div class="page-heading">
         <div>
-          <p class="eyebrow">偏好设置</p>
-          <h1>设置</h1>
-          <p>连接你自己的 AI 服务，并控制 Confui 在这台电脑上的显示方式。</p>
+          <p class="eyebrow">{t("settings.eyebrow")}</p>
+          <h1>{t("settings.title")}</h1>
+          <p>{t("settings.subtitle")}</p>
         </div>
       </div>
 
       <section class="settings-card">
         <header class="settings-card__header">
           <span class="settings-card__icon settings-card__icon--violet"><Icon name="sparkles"/></span>
-          <div><h2>AI 字段分析</h2><p>只在 Schema、模板、示例和 README 仍无法说明字段时补充分析。</p></div>
+          <div><h2>{t("settings.aiTitle")}</h2><p>{t("settings.aiDesc")}</p></div>
           <button
             type="button"
             class={`toggle ${draft.ai.enabled ? "toggle--on" : ""}`}
             role="switch"
-            aria-label="启用 AI 字段分析"
+            aria-label={t("settings.aiEnableAria")}
             aria-checked={draft.ai.enabled}
             disabled={saving || testing}
             onClick={() => setAi({ enabled: !draft.ai.enabled })}
@@ -215,27 +211,31 @@ export function SettingsPage({
         <div class={`settings-card__body ${!draft.ai.enabled ? "settings-card__body--disabled" : ""}`}>
           <div class="settings-grid">
             <label class="setting-field">
-              <span>供应商</span>
+              <span>{t("settings.provider")}</span>
               <div class="select-wrap">
                 <select class="control" value={draft.ai.provider} disabled={!draft.ai.enabled || saving || testing} onChange={(event) => chooseProvider(event.currentTarget.value)}>
-                  {PROVIDERS.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
+                  {PROVIDER_DEFS.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {"labelKey" in provider ? t(provider.labelKey) : provider.staticLabel}
+                    </option>
+                  ))}
                 </select>
                 <Icon name="chevron-down" size={16}/>
               </div>
             </label>
             <label class="setting-field">
-              <span>模型名称</span>
-              <input id="settings-ai-model" class="control" value={draft.ai.model} disabled={!draft.ai.enabled || saving || testing} aria-invalid={Boolean(aiErrors.model)} aria-describedby={aiErrors.model ? "settings-ai-model-error" : undefined} placeholder="例如 gpt-4.1-mini" onInput={(event) => setAi({ model: event.currentTarget.value })}/>
+              <span>{t("settings.model")}</span>
+              <input id="settings-ai-model" class="control" value={draft.ai.model} disabled={!draft.ai.enabled || saving || testing} aria-invalid={Boolean(aiErrors.model)} aria-describedby={aiErrors.model ? "settings-ai-model-error" : undefined} placeholder={t("settings.modelPlaceholder")} onInput={(event) => setAi({ model: event.currentTarget.value })}/>
               {aiErrors.model && <small id="settings-ai-model-error" class="field-error"><Icon name="warning" size={14}/>{aiErrors.model}</small>}
             </label>
             <label class="setting-field setting-field--wide">
-              <span>Base URL</span>
+              <span>{t("settings.baseUrl")}</span>
               <input id="settings-ai-base-url" class="control" value={draft.ai.baseUrl} disabled={!draft.ai.enabled || saving || testing} aria-invalid={Boolean(aiErrors.baseUrl)} aria-describedby={aiErrors.baseUrl ? "settings-ai-base-url-error" : undefined} placeholder="https://api.example.com/v1" onInput={(event) => setAi({ baseUrl: event.currentTarget.value })}/>
               {aiErrors.baseUrl && <small id="settings-ai-base-url-error" class="field-error"><Icon name="warning" size={14}/>{aiErrors.baseUrl}</small>}
-              <small>兼容 OpenAI 的 /chat/completions 接口；也可以填写本地 Ollama。</small>
+              <small>{t("settings.baseUrlHint")}</small>
             </label>
             <div class="setting-field setting-field--wide">
-              <label for="settings-ai-api-key">API Key</label>
+              <label for="settings-ai-api-key">{t("settings.apiKey")}</label>
               <div class="input-with-action">
                 <input
                   id="settings-ai-api-key"
@@ -246,13 +246,13 @@ export function SettingsPage({
                   disabled={!draft.ai.enabled || saving || testing}
                   autocomplete="off"
                   placeholder={clearApiKey
-                    ? "保存后将清除已保存的 API Key"
+                    ? t("settings.apiKeyClearPlaceholder")
                     : hasStoredApiKey
-                      ? `已保存 (${settings.secrets?.apiKeyHint ?? "••••"})，留空保持不变`
-                      : "本地模型可留空"}
+                      ? t("settings.apiKeyStoredPlaceholder", { hint: settings.secrets?.apiKeyHint ?? "••••" })
+                      : t("settings.apiKeyLocalPlaceholder")}
                   onInput={(event) => setAi({ apiKey: event.currentTarget.value })}
                 />
-                <button class="icon-button" type="button" disabled={!draft.ai.enabled || saving || testing} onClick={() => setShowApiKey(!showApiKey)} aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}><Icon name={showApiKey ? "eye-off" : "eye"}/></button>
+                <button class="icon-button" type="button" disabled={!draft.ai.enabled || saving || testing} onClick={() => setShowApiKey(!showApiKey)} aria-label={showApiKey ? t("settings.hideApiKey") : t("settings.showApiKey")}><Icon name={showApiKey ? "eye-off" : "eye"}/></button>
                 {settings.secrets?.hasApiKey && draft.ai.provider === settings.ai.provider && !draft.ai.apiKey && (
                   <button
                     class="icon-button"
@@ -262,24 +262,24 @@ export function SettingsPage({
                       testRun.current += 1;
                       setClearApiKey(!clearApiKey);
                     }}
-                    title={clearApiKey ? "撤销清除 API Key" : "清除已保存的 API Key"}
-                    aria-label={clearApiKey ? "撤销清除 API Key" : "清除已保存的 API Key"}
+                    title={clearApiKey ? t("settings.undoClearApiKey") : t("settings.clearApiKey")}
+                    aria-label={clearApiKey ? t("settings.undoClearApiKey") : t("settings.clearApiKey")}
                   >
                     <Icon name={clearApiKey ? "refresh" : "x"} size={15}/>
                   </button>
                 )}
               </div>
               {locked?.apiKey
-                ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>已保存的 API Key 无法解密（Windows 安全存储不可用），密文已保留。留空保存不会清除它；填入新值会覆盖。</small>
+                ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>{t("settings.apiKeyLocked")}</small>
                 : clearApiKey
-                  ? <small class="secure-note"><Icon name="shield" size={14}/>保存设置后将清除已保存的 API Key；你也可以输入新值覆盖或点右侧按钮撤销。</small>
+                  ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyClearing")}</small>
                   : hasStoredApiKey
-                    ? <small class="secure-note"><Icon name="shield" size={14}/>已在主进程安全存储（{settings.secrets?.apiKeyHint ?? "••••"}），不会以明文暴露到界面。留空保存保持不变，输入新值可覆盖。</small>
-                    : <small class="secure-note"><Icon name="shield" size={14}/>使用 Windows 安全存储加密，不会写入项目文件；切换供应商时不会复用其他供应商的 Key。</small>}
+                    ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyStored", { hint: settings.secrets?.apiKeyHint ?? "••••" })}</small>
+                    : <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyDefaultNote")}</small>}
             </div>
           </div>
           <div class="settings-inline-action">
-            <Button icon="refresh" onClick={() => void testConnection()} busy={testing} disabled={!draft.ai.enabled || testing || saving}>测试连接</Button>
+            <Button icon="refresh" onClick={() => void testConnection()} busy={testing} disabled={!draft.ai.enabled || testing || saving}>{t("settings.testConnection")}</Button>
           </div>
         </div>
       </section>
@@ -287,11 +287,11 @@ export function SettingsPage({
       <section class="settings-card">
         <header class="settings-card__header">
           <span class="settings-card__icon settings-card__icon--neutral"><Icon name="github"/></span>
-          <div><h2>GitHub 文档</h2><p>本地没有 README 时，使用仓库链接补充读取；私有仓库需要 Token。</p></div>
+          <div><h2>{t("settings.githubTitle")}</h2><p>{t("settings.githubDesc")}</p></div>
         </header>
         <div class="settings-card__body">
           <div class="setting-field setting-field--wide">
-            <label for="settings-github-token">Personal Access Token <em>可选</em></label>
+            <label for="settings-github-token">{t("settings.githubTokenLabel")} <em>{t("settings.optional")}</em></label>
             <div class="input-with-action">
               <input
                 id="settings-github-token"
@@ -302,9 +302,9 @@ export function SettingsPage({
                 disabled={saving}
                 autocomplete="off"
                 placeholder={clearGithubToken
-                  ? "保存后将清除已保存的 Token"
+                  ? t("settings.githubClearPlaceholder")
                   : hasStoredGithubToken
-                    ? `已保存 (${settings.secrets?.githubTokenHint ?? "••••"})，留空保持不变`
+                    ? t("settings.githubStoredPlaceholder", { hint: settings.secrets?.githubTokenHint ?? "••••" })
                     : "github_pat_..."}
                 onInput={(event) => {
                   const nextToken = event.currentTarget.value;
@@ -312,27 +312,54 @@ export function SettingsPage({
                   setDraft((current) => ({ ...current, github: { token: nextToken } }));
                 }}
               />
-              <button class="icon-button" type="button" disabled={saving} onClick={() => setShowGithubToken(!showGithubToken)} aria-label={showGithubToken ? "隐藏 GitHub Token" : "显示 GitHub Token"}><Icon name={showGithubToken ? "eye-off" : "eye"}/></button>
+              <button class="icon-button" type="button" disabled={saving} onClick={() => setShowGithubToken(!showGithubToken)} aria-label={showGithubToken ? t("settings.hideGithubToken") : t("settings.showGithubToken")}><Icon name={showGithubToken ? "eye-off" : "eye"}/></button>
               {settings.secrets?.hasGithubToken && !draft.github.token && (
                 <button
                   class="icon-button"
                   type="button"
                   disabled={saving}
                   onClick={() => setClearGithubToken(!clearGithubToken)}
-                  title={clearGithubToken ? "撤销清除 GitHub Token" : "清除已保存的 GitHub Token"}
-                  aria-label={clearGithubToken ? "撤销清除 GitHub Token" : "清除已保存的 GitHub Token"}
+                  title={clearGithubToken ? t("settings.undoClearGithubToken") : t("settings.clearGithubToken")}
+                  aria-label={clearGithubToken ? t("settings.undoClearGithubToken") : t("settings.clearGithubToken")}
                 >
                   <Icon name={clearGithubToken ? "refresh" : "x"} size={15}/>
                 </button>
               )}
             </div>
             {locked?.githubToken
-              ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>已保存的 Token 无法解密（Windows 安全存储不可用），密文已保留。留空保存不会清除它；填入新值会覆盖。</small>
+              ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>{t("settings.githubLocked")}</small>
               : clearGithubToken
-                ? <small class="secure-note"><Icon name="shield" size={14}/>保存设置后将清除已保存的 GitHub Token；你也可以输入新值覆盖或点右侧按钮撤销。</small>
+                ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.githubClearing")}</small>
                 : hasStoredGithubToken
-                  ? <small class="secure-note"><Icon name="shield" size={14}/>已在主进程安全存储（{settings.secrets?.githubTokenHint ?? "••••"}），留空保存保持不变，输入新值可覆盖。</small>
-                  : <small>公开仓库通常无需填写。Token 同样会加密保存。</small>}
+                  ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.githubStored", { hint: settings.secrets?.githubTokenHint ?? "••••" })}</small>
+                  : <small>{t("settings.githubDefaultNote")}</small>}
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-card">
+        <header class="settings-card__header">
+          <span class="settings-card__icon settings-card__icon--blue"><Icon name="code"/></span>
+          <div><h2>{t("settings.languageTitle")}</h2><p>{t("settings.languageDesc")}</p></div>
+        </header>
+        <div class="settings-card__body">
+          <div class="locale-picker">
+            {(["zh-CN", "en-US"] as Locale[]).map((item) => (
+              <button
+                key={item}
+                type="button"
+                class={draft.locale === item ? "active" : ""}
+                aria-pressed={draft.locale === item}
+                disabled={saving}
+                onClick={() => {
+                  setDraft((current) => ({ ...current, locale: item }));
+                  onLocalePreview(item);
+                }}
+              >
+                <strong>{item === "zh-CN" ? t("settings.langZh") : t("settings.langEn")}</strong>
+                <small>{item}</small>
+              </button>
+            ))}
           </div>
         </div>
       </section>
@@ -340,7 +367,7 @@ export function SettingsPage({
       <section class="settings-card">
         <header class="settings-card__header">
           <span class="settings-card__icon settings-card__icon--blue"><Icon name="layers"/></span>
-          <div><h2>外观</h2><p>可以跟随 Windows，也可以固定为浅色或深色。</p></div>
+          <div><h2>{t("settings.appearanceTitle")}</h2><p>{t("settings.appearanceDesc")}</p></div>
         </header>
         <div class="settings-card__body">
           <div class="theme-picker">
@@ -357,7 +384,7 @@ export function SettingsPage({
                 }}
               >
                 <span class={`theme-preview theme-preview--${theme}`}><i/><i/></span>
-                <strong>{theme === "system" ? "跟随系统" : theme === "light" ? "浅色" : "深色"}</strong>
+                <strong>{theme === "system" ? t("settings.themeSystem") : theme === "light" ? t("settings.themeLight") : t("settings.themeDark")}</strong>
               </button>
             ))}
           </div>
@@ -367,33 +394,33 @@ export function SettingsPage({
       <section class="settings-card">
         <header class="settings-card__header">
           <span class="settings-card__icon settings-card__icon--blue"><Icon name="refresh"/></span>
-          <div><h2>软件更新</h2><p>从 GitHub Release 检查 Confui 是否有新版本。</p></div>
+          <div><h2>{t("settings.updateTitle")}</h2><p>{t("settings.updateDesc")}</p></div>
         </header>
         <div class="settings-card__body">
           <div class={`update-panel ${updateResult?.updateAvailable ? "update-panel--available" : ""}`}>
             <div class="update-status">
               <span class="update-status__icon"><Icon name={updateResult?.updateAvailable ? "sparkles" : "check"}/></span>
               <div class="update-status__copy">
-                <strong>{appInfo ? `当前版本 v${appInfo.version}` : "正在读取当前版本"}</strong>
+                <strong>{appInfo ? t("settings.currentVersion", { version: appInfo.version }) : t("settings.readingVersion")}</strong>
                 <p>{updateResult
                   ? updateResult.updateAvailable
-                    ? `发现 v${updateResult.latestVersion} · ${updateResult.releaseName}`
+                    ? t("settings.updateFound", { version: updateResult.latestVersion, name: updateResult.releaseName })
                     : updateResult.currentVersion === updateResult.latestVersion
-                      ? `已是最新版本 v${updateResult.latestVersion}`
-                      : `当前版本已领先于公开版本 v${updateResult.latestVersion}`
-                  : "点击按钮检查 GitHub 上的最新 Release"}</p>
+                      ? t("settings.updateLatest", { version: updateResult.latestVersion })
+                      : t("settings.updateAhead", { version: updateResult.latestVersion })
+                  : t("settings.updateClickHint")}</p>
               </div>
             </div>
             <div class="update-actions">
-              <Button icon="refresh" busy={checkingUpdate} disabled={checkingUpdate} onClick={() => void checkUpdates()}>检查更新</Button>
-              {updateResult?.updateAvailable && <Button variant="primary" icon="external-link" onClick={() => void openReleasePage()}>打开下载页</Button>}
+              <Button icon="refresh" busy={checkingUpdate} disabled={checkingUpdate} onClick={() => void checkUpdates()}>{t("settings.checkUpdates")}</Button>
+              {updateResult?.updateAvailable && <Button variant="primary" icon="external-link" onClick={() => void openReleasePage()}>{t("settings.openDownload")}</Button>}
             </div>
           </div>
         </div>
       </section>
 
       <div class={`settings-savebar ${dirty ? "settings-savebar--visible" : ""}`}>
-        <span>{dirty ? "设置有未保存的更改" : "设置已保存"}</span>
+        <span>{dirty ? t("settings.savebarUnsaved") : t("settings.savebarSaved")}</span>
         <div>
           {dirty && (
             <Button
@@ -404,10 +431,11 @@ export function SettingsPage({
                 setClearApiKey(false);
                 setClearGithubToken(false);
                 onThemePreview(settings.theme);
+                onLocalePreview(settings.locale);
               }}
-            >撤销</Button>
+            >{t("common.undo")}</Button>
           )}
-          <Button variant="primary" icon="save" disabled={!dirty || saving || testing} busy={saving} onClick={() => void save()}>保存设置</Button>
+          <Button variant="primary" icon="save" disabled={!dirty || saving || testing} busy={saving} onClick={() => void save()}>{t("settings.saveButton")}</Button>
         </div>
       </div>
     </div>
@@ -419,25 +447,25 @@ interface AiDraftErrors {
   baseUrl?: string;
 }
 
-function validateAiDraft(ai: AppSettings["ai"]): AiDraftErrors {
+function validateAiDraft(ai: AppSettings["ai"], locale: Locale): AiDraftErrors {
   if (!ai.enabled) return {};
   const errors: AiDraftErrors = {};
-  if (!ai.model.trim()) errors.model = "启用 AI 后需要填写模型名称";
+  if (!ai.model.trim()) errors.model = translate(locale, "settings.aiErrModel");
   const baseUrl = ai.baseUrl.trim();
   if (!baseUrl) {
-    errors.baseUrl = "启用 AI 后需要填写 Base URL";
+    errors.baseUrl = translate(locale, "settings.aiErrBaseUrlRequired");
   } else {
     try {
       const url = new URL(baseUrl);
       if (url.protocol !== "http:" && url.protocol !== "https:") {
-        errors.baseUrl = "Base URL 只支持 http 或 https";
+        errors.baseUrl = translate(locale, "settings.aiErrBaseUrlProto");
       } else if (url.username || url.password) {
-        errors.baseUrl = "请把用户名或密码移到 API Key，不要写进 URL";
+        errors.baseUrl = translate(locale, "settings.aiErrBaseUrlCreds");
       } else if (url.search || url.hash) {
-        errors.baseUrl = "Base URL 不要包含查询参数或片段，请把密钥填写到 API Key";
+        errors.baseUrl = translate(locale, "settings.aiErrBaseUrlQuery");
       }
     } catch {
-      errors.baseUrl = "请输入有效的 Base URL，例如 https://api.example.com/v1";
+      errors.baseUrl = translate(locale, "settings.aiErrBaseUrlInvalid");
     }
   }
   return errors;
