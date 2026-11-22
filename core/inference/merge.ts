@@ -7,6 +7,8 @@ import type { FieldCandidate } from "./types.ts";
 const PRIORITY: Record<FieldSource, number> = {
   "json-schema": 600,
   "known-template": 500,
+  schemastore: 480,
+  comment: 450,
   example: 400,
   readme: 300,
   ai: 200,
@@ -31,6 +33,7 @@ const PROPERTIES: FieldProperty[] = [
   "placeholder",
   "secret",
   "group",
+  "itemFields",
 ];
 
 export function mergeCandidates(candidates: readonly FieldCandidate[]): {
@@ -99,6 +102,7 @@ export function mergeCandidates(candidates: readonly FieldCandidate[]): {
       placeholder: asOptionalString(chosen.placeholder),
       secret: asOptionalBoolean(chosen.secret),
       group: String(chosen.group ?? groupForPath(segments)),
+      itemFields: Array.isArray(chosen.itemFields) ? chosen.itemFields as FieldSpec["itemFields"] : undefined,
       source,
       confidence: Math.max(...evidence.map((item) => item.confidence), 0.5),
       evidence,
@@ -110,7 +114,7 @@ export function mergeCandidates(candidates: readonly FieldCandidate[]): {
   nonOverlappingFields.sort((left, right) => left.order - right.order || left.path.localeCompare(right.path));
   const limitedOrderedFields = limitFields(nonOverlappingFields);
   const limitedFields = limitedOrderedFields.map(({ order: _order, ...field }) => field);
-  const sources = (["json-schema", "known-template", "example", "readme", "ai", "heuristic"] as FieldSource[])
+  const sources = (["json-schema", "known-template", "schemastore", "comment", "example", "readme", "ai", "heuristic"] as FieldSource[])
     .map((source) => ({
       source,
       fieldCount: limitedFields.filter((field) => field.evidence.some((item) => item.source === source)).length,

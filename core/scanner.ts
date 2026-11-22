@@ -52,6 +52,9 @@ const KNOWN_FILES = new Set([
   "appsettings.json",
   "launch.json",
   "settings.json",
+  ".editorconfig",
+  ".npmrc",
+  "vercel.json",
 ]);
 
 const IGNORE_FILES = new Set([

@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type {
   ConfigFile,
+  ConfigFormSchema,
+  FieldSpec,
   ProjectScanResult,
   ProjectSearchHit,
   SearchMatchKind,
 } from "../../../shared/schema.ts";
+import {
+  buildDeepFieldIndex,
+  type DeepFieldEntry,
+  type DeepFieldKind,
+  type EditorValues,
+} from "../editor-state.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon, type IconName } from "../icons.tsx";
 import { FORMAT_SHORT_LABELS } from "../utils/format.ts";
@@ -21,24 +29,33 @@ export interface PaletteCommand {
 }
 
 type PaletteEntry =
+  | { kind: "deep"; id: string; deep: DeepFieldEntry }
   | { kind: "hit"; id: string; hit: ProjectSearchHit }
   | { kind: "file"; id: string; file: ConfigFile }
   | { kind: "command"; id: string; command: PaletteCommand };
 
 export function CommandPalette({
   project,
+  activeSchema,
+  activeFields,
+  activeValues,
   openableFiles,
   commands,
   onClose,
   onSelectFile,
   onSelectSearchHit,
+  onSelectDeepField,
 }: {
   project?: ProjectScanResult;
+  activeSchema?: ConfigFormSchema;
+  activeFields?: readonly FieldSpec[];
+  activeValues?: EditorValues;
   openableFiles: readonly ConfigFile[];
   commands: readonly PaletteCommand[];
   onClose: () => void;
   onSelectFile: (file: ConfigFile) => void;
   onSelectSearchHit: (hit: ProjectSearchHit) => void;
+  onSelectDeepField?: (entry: DeepFieldEntry) => void;
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
@@ -102,6 +119,36 @@ export function CommandPalette({
 
   const normalized = query.trim().toLowerCase();
 
+  const deepIndex = useMemo(() => {
+    if (!activeSchema || !activeFields?.length || !activeValues) return [];
+    return buildDeepFieldIndex(activeFields, activeValues);
+  }, [activeSchema, activeFields, activeValues]);
+
+  const matchingDeepFields = useMemo(() => {
+    if (!normalized || !deepIndex.length) return [];
+    // Prioritize nested paths & array cards in the active file (plus top-level matches).
+    const scored: Array<{ entry: DeepFieldEntry; rank: number }> = [];
+    for (const entry of deepIndex) {
+      const pathLower = entry.path.toLowerCase();
+      const labelLower = entry.label.toLowerCase();
+      const descLower = (entry.description ?? "").toLowerCase();
+      const valLower = entry.searchableValue.toLowerCase(); // Always "" for secret entries!
+      if (pathLower === normalized) {
+        scored.push({ entry, rank: 0 });
+      } else if (pathLower.includes(normalized)) {
+        scored.push({ entry, rank: entry.kind === "card" || entry.kind === "nested" ? 1 : 2 });
+      } else if (labelLower.includes(normalized)) {
+        scored.push({ entry, rank: 3 });
+      } else if (valLower && valLower.includes(normalized)) {
+        scored.push({ entry, rank: 4 });
+      } else if (descLower && descLower.includes(normalized)) {
+        scored.push({ entry, rank: 5 });
+      }
+    }
+    scored.sort((a, b) => a.rank - b.rank || a.entry.path.localeCompare(b.entry.path, "en", { numeric: true }));
+    return scored.slice(0, 18).map((item) => item.entry);
+  }, [deepIndex, normalized]);
+
   const matchingFiles = useMemo(() => {
     if (!project || !normalized) return [];
     return openableFiles
@@ -123,11 +170,15 @@ export function CommandPalette({
 
   const entries = useMemo<PaletteEntry[]>(() => {
     const list: PaletteEntry[] = [];
+    for (let i = 0; i < matchingDeepFields.length; i += 1) {
+      const deep = matchingDeepFields[i]!;
+      list.push({ kind: "deep", id: `deep:${deep.path}:${i}`, deep });
+    }
     for (let i = 0; i < hits.length; i += 1) {
       const hit = hits[i]!;
       list.push({
         kind: "hit",
-        id: `hit:${hit.file}:${hit.path ?? ""}:${hit.line ?? 0}:${hit.matchKind}:${i}`,
+        id: `hit:${hit.file}:${hit.documentIndex ?? ""}:${hit.path ?? ""}:${hit.line ?? 0}:${hit.matchKind}:${i}`,
         hit,
       });
     }
@@ -138,11 +189,11 @@ export function CommandPalette({
       list.push({ kind: "command", id: `cmd:${command.id}`, command });
     }
     return list;
-  }, [hits, matchingFiles, matchingCommands]);
+  }, [matchingDeepFields, hits, matchingFiles, matchingCommands]);
 
   useEffect(() => {
     setActiveIndex(0);
-  }, [query, hits.length, matchingFiles.length, matchingCommands.length]);
+  }, [query, matchingDeepFields.length, hits.length, matchingFiles.length, matchingCommands.length]);
 
   useEffect(() => {
     const item = listRef.current?.querySelector<HTMLElement>(`[data-palette-index="${activeIndex}"]`);
@@ -151,7 +202,9 @@ export function CommandPalette({
 
   function executeEntry(entry: PaletteEntry): void {
     onClose();
-    if (entry.kind === "hit") {
+    if (entry.kind === "deep") {
+      onSelectDeepField?.(entry.deep);
+    } else if (entry.kind === "hit") {
       onSelectSearchHit(entry.hit);
     } else if (entry.kind === "file") {
       onSelectFile(entry.file);
@@ -195,9 +248,18 @@ export function CommandPalette({
     }
   }
 
-  const hitStart = 0;
-  const fileStart = hits.length;
-  const cmdStart = hits.length + matchingFiles.length;
+  function deepKindLabel(kind: DeepFieldKind): string {
+    switch (kind) {
+      case "card": return t("palette.deepKindCard");
+      case "nested": return t("palette.deepKindNested");
+      case "field": return t("palette.deepKindField");
+    }
+  }
+
+  const deepStart = 0;
+  const hitStart = matchingDeepFields.length;
+  const fileStart = hitStart + hits.length;
+  const cmdStart = fileStart + matchingFiles.length;
 
   return (
     <div
@@ -248,6 +310,52 @@ export function CommandPalette({
             </div>
           )}
 
+          {matchingDeepFields.length > 0 && activeSchema && (
+            <div class="palette__section">
+              <div class="palette__section-title">
+                <span>{t("palette.sectionDeepFields", { count: matchingDeepFields.length })}</span>
+              </div>
+              {matchingDeepFields.map((deep, idx) => {
+                const flatIndex = deepStart + idx;
+                const entry = entries[flatIndex]!;
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    role="option"
+                    aria-selected={flatIndex === activeIndex}
+                    data-palette-index={flatIndex}
+                    class={`palette__item ${flatIndex === activeIndex ? "active" : ""}`}
+                    onMouseEnter={() => setActiveIndex(flatIndex)}
+                    onClick={() => executeEntry(entry)}
+                  >
+                    <span class="palette__cmd-icon">
+                      <Icon name={deep.kind === "card" ? "layers" : "code"} size={14}/>
+                    </span>
+                    <span class="palette__item-body">
+                      <span class="palette__item-head">
+                        <strong class="palette__hit-path">{deep.path}</strong>
+                        <span class={`palette__kind palette__kind--${deep.kind === "card" ? "path" : "value"}`}>
+                          {deepKindLabel(deep.kind)}
+                        </span>
+                        {deep.secret && (
+                          <span class="palette__secret-badge" title={t("palette.secretRedactedHint")}>
+                            <Icon name="shield" size={11}/>
+                            <span>{t("diff.secretsMaskedBadge")}</span>
+                          </span>
+                        )}
+                      </span>
+                      <span class="palette__item-sub">
+                        <span class="palette__deep-label">{deep.label}</span>
+                        {deep.preview && <span class="palette__hit-preview">{deep.preview}</span>}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           {hits.length > 0 && (
             <div class="palette__section">
               <div class="palette__section-title">
@@ -277,6 +385,11 @@ export function CommandPalette({
                         <span class={`palette__kind palette__kind--${hit.matchKind}`}>
                           {matchKindLabel(hit.matchKind)}
                         </span>
+                        {hit.documentIndex !== undefined && (
+                          <span class="palette__doc-badge">
+                            {hit.documentLabel || t("editor.yamlDocFallback", { index: hit.documentIndex + 1 })}
+                          </span>
+                        )}
                         {hit.secret && (
                           <span class="palette__secret-badge" title={t("palette.secretRedactedHint")}>
                             <Icon name="shield" size={11}/>

@@ -454,5 +454,20 @@ describe("UI state, diff, validation & i18n integration", () => {
     expect(appSource).toContain("dirtyRef.current");
     expect(mainSource).toContain("inferSeq === activeInferSeq");
     expect(mainSource).toContain("activeSearchController?.abort()");
+
+    // Stage 4 Wave 2 regression source-contract guards
+    const structuredSource = await readFile(resolve(REPO_ROOT, "web/src/components/StructuredControls.tsx"), "utf8");
+    expect(structuredSource).toContain("export function StructuredObjectArrayControl");
+    expect(structuredSource).toContain("export function NestedObjectTree");
+    expect(structuredSource).toContain("MAX_NESTED_TREE_DEPTH");
+    expect(structuredSource).toContain("isNestedKeySensitive");
+    expect(structuredSource).toContain("valueContainsSecret");
+
+    const settingsPageSource = await readFile(resolve(REPO_ROOT, "web/src/SettingsPage.tsx"), "utf8");
+    expect(settingsPageSource).toContain("schemaStore");
+
+    const summarySource = await readFile(resolve(REPO_ROOT, "web/src/components/EditorSummary.tsx"), "utf8");
+    expect(summarySource).toContain("yamlDocuments");
+    expect(summarySource).toContain("onSelectYamlDocument");
   });
 });

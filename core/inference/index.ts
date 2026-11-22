@@ -1,14 +1,22 @@
 import { basename } from "node:path";
-import type { ConfigFormSchema, FieldSpec, InferOptions, Locale } from "../../shared/schema.ts";
+import type {
+  ConfigFormSchema,
+  FieldSpec,
+  InferOptions,
+  Locale,
+  YamlDocumentSummary,
+} from "../../shared/schema.ts";
+import { collectSecretStrings } from "../../shared/validation.ts";
 import type { AIProvider } from "../ai/provider.ts";
 import { AI_FILE_LIMIT, readTextSnapshot } from "../files.ts";
-import { assertEditableSyntax, detectFormat, parseConfig } from "../formats.ts";
+import { assertEditableSyntax, detectFormat, parseConfig, parseYamlDocuments } from "../formats.ts";
 import { getAtPath, resolveExistingProjectPath } from "../paths.ts";
 import { inferAIFields } from "./ai.ts";
-import { toEditorValue } from "./common.ts";
+import { inferCommentFields } from "./comments.ts";
+import { isSecretPath, toEditorValue } from "./common.ts";
 import { inferExampleFields } from "./examples.ts";
 import { inferHeuristicFields, maskDocumentSecrets, maskSecrets } from "./heuristic.ts";
-import { inferJsonSchemaFields } from "./json-schema.ts";
+import { extractSchemaDirective, inferJsonSchemaFields } from "./json-schema.ts";
 import { inferKnownFields } from "./known.ts";
 import { MAX_FORM_FIELDS, mergeCandidates } from "./merge.ts";
 import { inferReadmeFields } from "./readme.ts";
@@ -17,6 +25,12 @@ import type { FieldCandidate } from "./types.ts";
 export interface InferenceContext extends InferOptions {
   ai?: AIProvider;
   githubToken?: string;
+  /** Opt-in remote SchemaStore lookup (strictly disabled by default). */
+  enableSchemaStore?: boolean;
+  /** Local disk cache directory for 7-day SchemaStore caching. */
+  schemaStoreCacheDir?: string;
+  /** Optional custom fetch implementation (primarily for tests). */
+  schemaFetcher?: typeof fetch;
 }
 
 export async function inferConfig(
@@ -31,7 +45,42 @@ export async function inferConfig(
   if (!format) throw new Error("不支持这个配置文件格式");
   const { text, version } = await readTextSnapshot(absolutePath);
   assertEditableSyntax(relativeFile, text);
-  const parsed = parseConfig(text, format);
+
+  let parsed: unknown;
+  let yamlDocuments: YamlDocumentSummary[] | undefined;
+  let activeDocumentIndex: number | undefined;
+  let schemaDirectiveText = text;
+
+  if (format === "yaml") {
+    const docs = parseYamlDocuments(text);
+    if (docs.length > 1) {
+      const requested = options.documentIndex ?? 0;
+      const clamped = Number.isSafeInteger(requested) && requested >= 0 && requested < docs.length
+        ? requested
+        : 0;
+      activeDocumentIndex = clamped;
+      yamlDocuments = docs.map((doc) => ({
+        index: doc.index,
+        label: doc.label,
+        kind: doc.kind,
+        name: doc.name,
+        profile: doc.profile,
+        startLine: doc.startLine,
+        keyCount: doc.keyCount,
+      }));
+      const activeDoc = docs[clamped]!;
+      parsed = activeDoc.value;
+      const docSlice = text.slice(activeDoc.spanStart, activeDoc.spanEnd);
+      // Prefer a document-specific `# yaml-language-server: $schema=...` directive,
+      // falling back to a file-header directive when absent.
+      schemaDirectiveText = extractSchemaDirective(docSlice, "yaml") ? docSlice : text;
+    } else {
+      parsed = docs[0]!.value;
+    }
+  } else {
+    parsed = parseConfig(text, format);
+  }
+
   const warnings: string[] = [];
   const candidates: FieldCandidate[] = [];
 
@@ -50,9 +99,18 @@ export async function inferConfig(
   // These sources do not depend on one another. Running them together is
   // especially useful for projects whose `$schema` is remote: otherwise a
   // schema request and example-file scan add their latency one after another.
-  const schemaPromise = format === "json" || format === "jsonc"
-    ? inferJsonSchemaFields(absolutePath, projectRoot, parsed)
-    : Promise.resolve({ fields: [], warnings: [], truncated: false });
+  const normalizedRelative = relativeFile.replace(/\\/g, "/");
+  const supportsSchema = format === "json" || format === "jsonc" || format === "yaml" || format === "toml";
+  const schemaPromise = supportsSchema
+    ? inferJsonSchemaFields(absolutePath, projectRoot, parsed, options.schemaFetcher ?? fetch, {
+      format,
+      rawText: schemaDirectiveText,
+      relativeFile: normalizedRelative,
+      enableSchemaStore: options.enableSchemaStore === true,
+      schemaStoreCacheDir: options.schemaStoreCacheDir,
+      locale,
+    })
+    : Promise.resolve({ fields: [], warnings: [], truncated: false, schemaStore: undefined });
   const examplesPromise = inferExampleFields(absolutePath, projectRoot, format);
   const [schema, examples] = await Promise.all([schemaPromise, examplesPromise]);
   candidates.push(...schema.fields);
@@ -60,6 +118,23 @@ export async function inferConfig(
   if (schema.truncated) warnings.push("JSON Schema 字段过多，已停止继续展开其余字段。");
   candidates.push(...examples.fields);
   if (examples.truncated) warnings.push("示例文件字段过多，已停止继续展开其余字段。");
+
+  // Local AST/CST comment extraction across all 6 formats (strictly sanitized via maskDocumentSecrets).
+  const secretValuesSet = new Set<string>();
+  for (const candidate of candidates) {
+    if (candidate.secret === true || candidate.type === "secret" || isSecretPath(candidate.segments)) {
+      const actual = candidate.value !== undefined ? candidate.value : getAtPath(parsed, candidate.segments);
+      if (actual !== undefined) collectSecretStrings(actual, secretValuesSet);
+    }
+  }
+  const existingPaths = uniquePaths(candidates.map((candidate) => candidate.segments));
+  const commentFields = inferCommentFields(text, format, {
+    documentIndex: activeDocumentIndex ?? 0,
+    locale,
+    existingPaths,
+    secretValues: [...secretValuesSet],
+  });
+  candidates.push(...commentFields);
 
   const knownPaths = uniquePaths(candidates.map((candidate) => candidate.segments));
   const readme = await inferReadmeFields(
@@ -112,7 +187,7 @@ export async function inferConfig(
   }
   if (!fields.length) warnings.push("没有发现可转换为表单的字段，可在原始内容中检查文件");
   return {
-    file: relativeFile.replace(/\\/g, "/"),
+    file: normalizedRelative,
     kind: basename(relativeFile),
     format,
     fields,
@@ -121,6 +196,9 @@ export async function inferConfig(
     warnings: [...new Set(warnings)],
     exampleFiles: examples.files,
     readmeSource: readme.source,
+    schemaStore: schema.schemaStore,
+    yamlDocuments,
+    activeDocumentIndex,
     version,
     rawText: text,
   };

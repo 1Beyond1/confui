@@ -63,14 +63,14 @@ export function updateToml(source: string, changes: readonly ConfigChange[]): Up
   };
 }
 
-interface TomlSectionInfo {
+export interface TomlSectionInfo {
   path: string[];
   headerLine: number;
   endLine: number;
   isArray: boolean;
 }
 
-interface TomlAssignmentInfo {
+export interface TomlAssignmentInfo {
   fullPath: string[];
   startLine: number;
   endLine: number;
@@ -81,7 +81,7 @@ interface TomlAssignmentInfo {
   inArrayTable: boolean;
 }
 
-interface TomlScan {
+export interface TomlScan {
   sections: TomlSectionInfo[];
   assignments: TomlAssignmentInfo[];
 }
@@ -204,7 +204,7 @@ function tryPatchTomlSource(
   return joined.replace(new RegExp(`${escapeRegExp(eol)}+$`), "") + eol;
 }
 
-function scanTomlLines(lines: readonly string[]): TomlScan | null {
+export function scanTomlLines(lines: readonly string[]): TomlScan | null {
   const sections: TomlSectionInfo[] = [];
   const assignments: TomlAssignmentInfo[] = [];
   let currentTablePath: string[] = [];

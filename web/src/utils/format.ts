@@ -34,6 +34,7 @@ export function defaultClientSettings(): AppSettings {
     locale: "zh-CN",
     ai: { enabled: false, provider: "custom", model: "", baseUrl: "", apiKey: "", timeoutMs: 45_000 },
     github: { token: "" },
+    schemaStore: { enabled: false },
     recentProjects: [],
   };
 }

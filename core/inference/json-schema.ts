@@ -1,21 +1,56 @@
-import { dirname, extname, join, resolve } from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { FieldType, PathSegment } from "../../shared/schema.ts";
+import type {
+  ConfigFormat,
+  FieldSource,
+  FieldType,
+  ItemFieldSpec,
+  Locale,
+  PathSegment,
+  SchemaStoreOrigin,
+} from "../../shared/schema.ts";
+import { isForbiddenKey } from "../../shared/validation.ts";
+import { stripBom } from "../formats/common.ts";
 import { ensurePathInsideProject, getAtPath } from "../paths.ts";
 import { groupForPath, humanize, isSecretPath } from "./common.ts";
 import { readLimitedUtf8File, readLimitedUtf8Response } from "./limited-text.ts";
+import {
+  matchSchemaStoreEntry,
+  readCachedSchemaStore,
+  writeCachedSchemaStore,
+} from "./schemastore.ts";
 import type { FieldCandidate } from "./types.ts";
+
+export interface InferJsonSchemaOptions {
+  format?: ConfigFormat;
+  rawText?: string;
+  /** Project-relative file path used for opt-in offline SchemaStore catalog lookup. */
+  relativeFile?: string;
+  /** Strictly opt-in (default false): allows fetching matched SchemaStore URLs over HTTPS allowlist. */
+  enableSchemaStore?: boolean;
+  /** Directory for 7-day local disk caching of opt-in SchemaStore schemas. */
+  schemaStoreCacheDir?: string;
+  locale?: Locale;
+}
 
 interface SchemaResult {
   fields: FieldCandidate[];
   warnings: string[];
   truncated: boolean;
+  schemaStore?: SchemaStoreOrigin;
 }
 
 type JsonSchema = Record<string, unknown>;
 interface SchemaTraversalState {
   value: number;
   truncated: boolean;
+}
+
+interface ResolvedSchemaDocument {
+  schema: JsonSchema;
+  source: Extract<FieldSource, "json-schema" | "schemastore">;
+  detail: string;
+  schemaStore?: SchemaStoreOrigin;
 }
 
 /**
@@ -43,21 +78,81 @@ const MAX_SCHEMA_ENUM_VALUES = 100;
 const MAX_SCHEMA_TEXT_CHARS = 500;
 const MAX_SCHEMA_DEFAULT_CHARS = 4_000;
 const MAX_SCHEMA_RESOLUTION_DEPTH = 32;
+const MAX_ITEM_FIELDS = 64;
+const MAX_ITEM_FIELD_DEPTH = 2;
+const DIRECTIVE_SCAN_LINES = 40;
+
+const YAML_SCHEMA_DIRECTIVE_RE = /^\s*#\s*yaml-language-server\s*:\s*\$schema\s*=\s*([^\s#]+)/i;
+const TOML_SCHEMA_DIRECTIVE_RE = /^\s*#:\s*schema(?:\s+|=)\s*([^\s#]+)/i;
 
 const remoteSchemaCache = new Map<string, { fetchedAt: number; schema: Promise<JsonSchema> }>();
+
+/** Clears the in-memory remote schema cache (primarily useful for deterministic tests). */
+export function clearRemoteSchemaCache(): void {
+  remoteSchemaCache.clear();
+}
+
+/**
+ * Extracts a `$schema` comment directive from YAML (`# yaml-language-server: $schema=...`)
+ * or TOML (`#:schema ...`) source text.
+ */
+export function extractSchemaDirective(rawText: string, format?: ConfigFormat): string | undefined {
+  if (!rawText || (format !== "yaml" && format !== "toml")) return undefined;
+  const pattern = format === "yaml" ? YAML_SCHEMA_DIRECTIVE_RE : TOML_SCHEMA_DIRECTIVE_RE;
+  const lines = stripBom(rawText).split(/\r?\n/);
+  const limit = Math.min(lines.length, DIRECTIVE_SCAN_LINES);
+  for (let i = 0; i < limit; i += 1) {
+    const line = lines[i] ?? "";
+    const trimmed = line.trim();
+    if (!trimmed || trimmed === "---") continue;
+    if (trimmed.startsWith("#")) {
+      const match = line.match(pattern);
+      if (match?.[1]) {
+        return unquoteDirectiveTarget(match[1]);
+      }
+      continue;
+    }
+    // Stop scanning once actual config content begins.
+    break;
+  }
+  return undefined;
+}
+
+function unquoteDirectiveTarget(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  const unquoted = (trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+    ? trimmed.slice(1, -1).trim()
+    : trimmed;
+  return unquoted || undefined;
+}
 
 export async function inferJsonSchemaFields(
   filePath: string,
   projectRoot: string,
   value: unknown,
   fetcher: typeof fetch = fetch,
+  options: InferJsonSchemaOptions = {},
 ): Promise<SchemaResult> {
   const warnings: string[] = [];
-  const schema = await findSchema(filePath, projectRoot, value, warnings, fetcher);
-  if (!schema) return { fields: [], warnings, truncated: false };
+  const resolved = await findSchema(filePath, projectRoot, value, warnings, fetcher, options);
+  if (!resolved) return { fields: [], warnings, truncated: false };
   try {
     const state: SchemaTraversalState = { value: 0, truncated: false };
-    return { fields: fieldsFromSchema(schema, schema, value, [], state), warnings, truncated: state.truncated };
+    return {
+      fields: fieldsFromSchema(
+        resolved.schema,
+        resolved.schema,
+        value,
+        [],
+        state,
+        undefined,
+        resolved.source,
+        resolved.detail,
+      ),
+      warnings,
+      truncated: state.truncated,
+      schemaStore: resolved.schemaStore,
+    };
   } catch (error) {
     warnings.push(`JSON Schema 解析失败：${error instanceof Error ? error.message : String(error)}`);
     return { fields: [], warnings, truncated: false };
@@ -70,22 +165,41 @@ async function findSchema(
   value: unknown,
   warnings: string[],
   fetcher: typeof fetch,
-): Promise<JsonSchema | undefined> {
-  const schemaRef = value !== null && typeof value === "object"
+  options: InferJsonSchemaOptions,
+): Promise<ResolvedSchemaDocument | undefined> {
+  const isEn = options.locale === "en-US";
+  const inlineSchemaRef = value !== null && typeof value === "object"
     ? (value as Record<string, unknown>).$schema
     : undefined;
-  if (typeof schemaRef === "string") {
+  const directiveRef = typeof inlineSchemaRef === "string"
+    ? undefined
+    : extractSchemaDirective(options.rawText ?? "", options.format);
+  const schemaRef = typeof inlineSchemaRef === "string" ? inlineSchemaRef : directiveRef;
+
+  if (typeof schemaRef === "string" && schemaRef.trim()) {
     try {
       if (/^https?:\/\//i.test(schemaRef)) {
         const target = allowedSchemaUrl(schemaRef);
-        if (target) return await fetchSchema(target, fetcher);
+        if (target) {
+          const schema = await fetchSchema(target, fetcher);
+          return {
+            schema,
+            source: "json-schema",
+            detail: isEn ? "From project-declared JSON Schema" : "来自项目声明的 JSON Schema",
+          };
+        }
         // Fall through to the conventional local schema files below.
         warnings.push(`配置声明的 JSON Schema 来自未授信的地址，已跳过：${describeHost(schemaRef)}`);
       } else {
         const candidate = schemaRef.startsWith("file:")
           ? fileURLToPath(schemaRef)
           : resolve(dirname(filePath), schemaRef);
-        return await readSchema(candidate, projectRoot);
+        const schema = await readSchema(candidate, projectRoot);
+        return {
+          schema,
+          source: "json-schema",
+          detail: isEn ? "From project-declared JSON Schema" : "来自项目声明的 JSON Schema",
+        };
       }
     } catch (error) {
       warnings.push(`未能读取配置声明的 JSON Schema：${error instanceof Error ? error.message : String(error)}`);
@@ -96,11 +210,61 @@ async function findSchema(
   const stem = filePath.slice(0, extension ? -extension.length : undefined);
   for (const candidate of [`${stem}.schema.json`, join(dirname(filePath), "schema.json")]) {
     try {
-      return await readSchema(candidate, projectRoot);
+      const schema = await readSchema(candidate, projectRoot);
+      return {
+        schema,
+        source: "json-schema",
+        detail: isEn ? "From local project JSON Schema" : "来自项目本地 JSON Schema",
+      };
     } catch {
       // Missing conventional schema files are expected.
     }
   }
+
+  // Strictly opt-in SchemaStore lookup (default OFF for offline & privacy safety).
+  if (options.enableSchemaStore === true) {
+    const relPath = options.relativeFile ?? relative(projectRoot, filePath).replace(/\\/g, "/");
+    const match = matchSchemaStoreEntry(relPath);
+    if (match) {
+      const target = allowedSchemaUrl(match.url);
+      if (target) {
+        try {
+          if (options.schemaStoreCacheDir) {
+            const cached = await readCachedSchemaStore(options.schemaStoreCacheDir, target);
+            if (cached) {
+              return {
+                schema: cached,
+                source: "schemastore",
+                detail: isEn
+                  ? `From SchemaStore (${match.name}, cached)`
+                  : `来自 SchemaStore 映射（${match.name} · 本地缓存）`,
+                schemaStore: { name: match.name, url: target, fromCache: true },
+              };
+            }
+          }
+          const schema = await fetchSchema(target, fetcher);
+          if (options.schemaStoreCacheDir) {
+            await writeCachedSchemaStore(options.schemaStoreCacheDir, target, schema);
+          }
+          return {
+            schema,
+            source: "schemastore",
+            detail: isEn
+              ? `From SchemaStore (${match.name})`
+              : `来自 SchemaStore 远程映射（${match.name}）`,
+            schemaStore: { name: match.name, url: target, fromCache: false },
+          };
+        } catch (error) {
+          warnings.push(
+            isEn
+              ? `SchemaStore lookup failed (${match.name}): ${error instanceof Error ? error.message : String(error)}`
+              : `未能拉取 SchemaStore（${match.name}）：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+  }
+
   return undefined;
 }
 
@@ -217,6 +381,8 @@ function fieldsFromSchema(
   prefix: PathSegment[] = [],
   order: SchemaTraversalState = { value: 0, truncated: false },
   groupHint?: string,
+  source: Extract<FieldSource, "json-schema" | "schemastore"> = "json-schema",
+  detail = "来自项目声明的 JSON Schema",
 ): FieldCandidate[] {
   if (order.truncated) return [];
   const schema = resolveSchema(schemaInput, rootSchema);
@@ -247,6 +413,8 @@ function fieldsFromSchema(
         segments,
         order,
         typeof child.title === "string" ? child.title : humanize(key),
+        source,
+        detail,
       ));
       continue;
     }
@@ -258,6 +426,9 @@ function fieldsFromSchema(
         : undefined;
     const secret = isSecretPath(segments) || child.writeOnly === true || child.format === "password";
     const defaultValue = child.default !== undefined ? child.default : child.const;
+    const itemFields = type === "array"
+      ? extractItemFieldsFromArraySchema(child, rootSchema, 0)
+      : undefined;
     fields.push({
       segments,
       label: boundedText(child.title, MAX_SCHEMA_TEXT_CHARS) ?? humanize(key),
@@ -276,13 +447,114 @@ function fieldsFromSchema(
         : undefined,
       secret,
       group: groupHint ?? groupForPath(segments),
-      source: "json-schema",
-      confidence: 0.995,
-      detail: "来自项目声明的 JSON Schema",
+      itemFields: itemFields?.length ? itemFields : undefined,
+      source,
+      confidence: source === "schemastore" ? 0.96 : 0.995,
+      detail,
       order: order.value++,
     });
   }
   return fields;
+}
+
+/**
+ * Extracts `ItemFieldSpec[]` from an array schema's `items` definition (including
+ * `$ref`, `allOf`, and object-shaped `oneOf` / `anyOf` unions such as `launch.json`
+ * `configurations[]` or GitHub Actions `steps[]`).
+ */
+function extractItemFieldsFromArraySchema(
+  arraySchema: JsonSchema,
+  rootSchema: JsonSchema,
+  depth: number,
+): ItemFieldSpec[] | undefined {
+  if (depth >= MAX_ITEM_FIELD_DEPTH) return undefined;
+  const rawItems = arraySchema.items;
+  if (!isRecord(rawItems)) return undefined;
+  const resolvedItems = resolveSchema(rawItems, rootSchema);
+  const objectSchema = extractObjectItemSchema(resolvedItems, rootSchema);
+  if (!objectSchema || !isRecord(objectSchema.properties)) return undefined;
+
+  const requiredSet = new Set(
+    Array.isArray(objectSchema.required)
+      ? objectSchema.required.filter((item): item is string => typeof item === "string")
+      : [],
+  );
+  const specs: ItemFieldSpec[] = [];
+  for (const [propKey, rawProp] of Object.entries(objectSchema.properties)) {
+    if (specs.length >= MAX_ITEM_FIELDS) break;
+    if (!propKey || isForbiddenKey(propKey) || !isRecord(rawProp)) continue;
+    const prop = resolveSchema(rawProp, rootSchema);
+    const propType = schemaType(prop, propKey, undefined);
+    const enumValues = Array.isArray(prop.enum)
+      ? prop.enum.filter((item): item is string | number => typeof item === "string" || typeof item === "number")
+        .slice(0, MAX_SCHEMA_ENUM_VALUES)
+      : (typeof prop.const === "string" || typeof prop.const === "number")
+        ? [prop.const]
+        : undefined;
+    const secret = isSecretPath([propKey]) || prop.writeOnly === true || prop.format === "password";
+    const defaultValue = prop.default !== undefined ? prop.default : prop.const;
+    const nestedItemFields = propType === "array"
+      ? extractItemFieldsFromArraySchema(prop, rootSchema, depth + 1)
+      : undefined;
+    specs.push({
+      key: propKey,
+      label: boundedText(prop.title, MAX_SCHEMA_TEXT_CHARS) ?? humanize(propKey),
+      description: boundedText(prop.description, MAX_SCHEMA_TEXT_CHARS),
+      type: secret ? "secret" : enumValues?.length ? "enum" : propType,
+      required: requiredSet.has(propKey) || undefined,
+      default: safeSchemaValue(defaultValue),
+      enum: enumValues?.length ? enumValues : undefined,
+      minimum: asNumber(prop.minimum),
+      maximum: asNumber(prop.maximum),
+      minLength: asNumber(prop.minLength),
+      maxLength: asNumber(prop.maxLength),
+      pattern: boundedText(prop.pattern, MAX_SCHEMA_TEXT_CHARS),
+      placeholder: typeof prop.examples === "object" && Array.isArray(prop.examples) && prop.examples.length
+        ? String(prop.examples[0] ?? "").slice(0, MAX_SCHEMA_TEXT_CHARS)
+        : undefined,
+      secret: secret || undefined,
+      itemFields: nestedItemFields?.length ? nestedItemFields : undefined,
+    });
+  }
+  return specs.length ? specs : undefined;
+}
+
+function extractObjectItemSchema(schema: JsonSchema, rootSchema: JsonSchema): JsonSchema | undefined {
+  if (isRecord(schema.properties) && Object.keys(schema.properties).length > 0) {
+    return schema;
+  }
+  const unionBranches = Array.isArray(schema.oneOf)
+    ? schema.oneOf
+    : Array.isArray(schema.anyOf)
+      ? schema.anyOf
+      : undefined;
+  if (!unionBranches?.length) return undefined;
+
+  const objectBranches = unionBranches
+    .filter(isRecord)
+    .map((branch) => resolveSchema(branch, rootSchema))
+    .filter((branch) => isRecord(branch.properties) && Object.keys(branch.properties).length > 0);
+  if (!objectBranches.length) return undefined;
+
+  const mergedProperties: Record<string, unknown> = {};
+  const requiredSets = objectBranches.map((branch) =>
+    new Set(Array.isArray(branch.required) ? branch.required.filter((r): r is string => typeof r === "string") : []),
+  );
+  const commonRequired = [...(requiredSets[0] ?? [])].filter((key) =>
+    requiredSets.every((set) => set.has(key)),
+  );
+  for (const branch of objectBranches) {
+    for (const [k, v] of Object.entries(branch.properties as Record<string, unknown>)) {
+      if (!isForbiddenKey(k) && !(k in mergedProperties)) {
+        mergedProperties[k] = v;
+      }
+    }
+  }
+  return {
+    type: "object",
+    properties: mergedProperties,
+    required: commonRequired,
+  };
 }
 
 function resolveSchema(

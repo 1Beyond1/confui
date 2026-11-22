@@ -21,6 +21,8 @@ export type FieldType =
 export type FieldSource =
   | "json-schema"
   | "known-template"
+  | "schemastore"
+  | "comment"
   | "example"
   | "readme"
   | "ai"
@@ -40,9 +42,29 @@ export type FieldProperty =
   | "pattern"
   | "placeholder"
   | "secret"
-  | "group";
+  | "group"
+  | "itemFields";
 
 export type PathSegment = string | number;
+
+/** Metadata for one property inside an array-of-objects item (derived from Schema `items.properties` or built-in templates). */
+export interface ItemFieldSpec {
+  key: string;
+  label: string;
+  description?: string;
+  type: FieldType;
+  required?: boolean;
+  default?: unknown;
+  enum?: Array<string | number>;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  placeholder?: string;
+  secret?: boolean;
+  itemFields?: ItemFieldSpec[];
+}
 
 export interface FieldEvidence {
   property: FieldProperty;
@@ -70,6 +92,8 @@ export interface FieldSpec {
   placeholder?: string;
   secret?: boolean;
   group?: string;
+  /** Schema-derived property specs for items of an object-array field. */
+  itemFields?: ItemFieldSpec[];
   source: FieldSource;
   confidence: number;
   evidence: FieldEvidence[];
@@ -109,6 +133,25 @@ export interface SourceSummary {
   fieldCount: number;
 }
 
+export interface YamlDocumentSummary {
+  index: number;
+  /** Extracted readable label (e.g. `Deployment/web` or `profile: prod`), or undefined for fallback numbering. */
+  label?: string;
+  kind?: string;
+  name?: string;
+  profile?: string;
+  /** 1-based start line of this document in the raw YAML file. */
+  startLine: number;
+  /** Approximate top-level key count in this document. */
+  keyCount: number;
+}
+
+export interface SchemaStoreOrigin {
+  name: string;
+  url: string;
+  fromCache: boolean;
+}
+
 export interface ConfigFormSchema {
   file: string;
   kind: string;
@@ -119,6 +162,12 @@ export interface ConfigFormSchema {
   warnings: string[];
   exampleFiles: string[];
   readmeSource?: "local" | "github";
+  /** Present when an opt-in SchemaStore mapping supplied the schema for this file. */
+  schemaStore?: SchemaStoreOrigin;
+  /** Present when a YAML file contains multiple `---`-separated documents. */
+  yamlDocuments?: YamlDocumentSummary[];
+  /** Zero-based index of the active document in a multi-document YAML file. */
+  activeDocumentIndex?: number;
   version: FileVersion;
   rawText: string;
 }
@@ -228,6 +277,10 @@ export interface ProjectSearchHit {
   matchKind: SearchMatchKind;
   preview: string;
   secret: boolean;
+  /** Zero-based YAML document index when matching inside a multi-document YAML file. */
+  documentIndex?: number;
+  /** Human-readable YAML document label when matching inside a multi-document YAML file. */
+  documentLabel?: string;
 }
 
 export interface ProjectSearchResult {
@@ -243,6 +296,8 @@ export type Locale = "zh-CN" | "en-US";
 export interface InferOptions {
   githubUrl?: string;
   locale?: Locale;
+  /** Zero-based document index for multi-document YAML files. */
+  documentIndex?: number;
 }
 
 export interface ConfigChange {
@@ -266,6 +321,8 @@ export interface SavePreview {
   output: string;
   warnings: string[];
   expectedVersion: FileVersion;
+  /** Zero-based document index when saving one document of a multi-document YAML file. */
+  documentIndex?: number;
 }
 
 export interface SaveResult {
@@ -351,6 +408,10 @@ export interface AppSettings {
   github: {
     token: string;
   };
+  /** Opt-in remote SchemaStore lookup (strictly disabled by default for offline/privacy safety). */
+  schemaStore: {
+    enabled: boolean;
+  };
   recentProjects: RecentProject[];
   /**
    * Derived in the main process on every read; `normalizeSettings` never emits
@@ -381,6 +442,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     timeoutMs: 45_000,
   },
   github: { token: "" },
+  schemaStore: { enabled: false },
   recentProjects: [],
 };
 
@@ -427,8 +489,8 @@ export interface ConfuiAPI {
   selectFolder(): Promise<Result<string | null>>;
   scanProject(root: string, githubUrl?: string): Promise<Result<ProjectScanResult>>;
   inferSchema(root: string, file: string, options?: InferOptions): Promise<Result<ConfigFormSchema>>;
-  explainField(root: string, file: string, field: FieldAssistField, githubUrl?: string, locale?: Locale): Promise<Result<FieldAssistResult>>;
-  previewSave(root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion): Promise<Result<SavePreview>>;
+  explainField(root: string, file: string, field: FieldAssistField, githubUrl?: string, locale?: Locale, documentIndex?: number): Promise<Result<FieldAssistResult>>;
+  previewSave(root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion, documentIndex?: number): Promise<Result<SavePreview>>;
   saveConfig(root: string, preview: SavePreview): Promise<Result<SaveResult>>;
   getBackupStatus(root: string, file: string): Promise<Result<BackupStatus>>;
   previewRestoreBackup(root: string, file: string, expectedVersion: FileVersion): Promise<Result<RestoreBackupPreview>>;

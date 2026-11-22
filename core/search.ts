@@ -13,7 +13,7 @@ import type {
 import { isForbiddenKey } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { HARD_FILE_LIMIT, readTextSnapshot } from "./files.ts";
-import { assertEditableSyntax, parseConfig } from "./formats.ts";
+import { assertEditableSyntax, parseConfig, parseYamlDocuments } from "./formats.ts";
 import { isSecretPath, toEditorValue } from "./inference/common.ts";
 import { maskDocumentSecrets } from "./inference/heuristic.ts";
 import { formatPath, resolveExistingProjectPath, safeJoin } from "./paths.ts";
@@ -129,11 +129,45 @@ export async function searchProjectConfigs(
         if (signal?.aborted) return;
 
         assertEditableSyntax(file.path, snapshot.text);
-        const parsed = parseConfig(snapshot.text, file.format);
-        searchedFiles += 1;
-
         const needComments = pathHits.length + valueHits.length <= limit;
-        const fileHits = searchSingleFile(file, snapshot.text, parsed, needle, needComments);
+        let fileHits: ProjectSearchHit[];
+        if (file.format === "yaml") {
+          const yamlDocs = parseYamlDocuments(snapshot.text);
+          searchedFiles += 1;
+          if (yamlDocs.length > 1) {
+            fileHits = [];
+            for (const doc of yamlDocs) {
+              const docSlice = snapshot.text.slice(doc.spanStart, doc.spanEnd);
+              let spanLineOffset = 0;
+              for (let pos = 0; pos < doc.spanStart && pos < snapshot.text.length; pos += 1) {
+                if (snapshot.text.charCodeAt(pos) === 10) spanLineOffset += 1;
+              }
+              fileHits.push(
+                ...searchSingleFile(
+                  file,
+                  docSlice,
+                  doc.value,
+                  needle,
+                  false,
+                  {
+                    documentIndex: doc.index,
+                    documentLabel: doc.label,
+                    lineOffset: spanLineOffset,
+                  },
+                ),
+              );
+            }
+            if (needComments) {
+              fileHits.push(...searchFileComments(file, snapshot.text.replace(/\r\n/g, "\n"), needle));
+            }
+          } else {
+            fileHits = searchSingleFile(file, snapshot.text, yamlDocs[0]!.value, needle, needComments);
+          }
+        } else {
+          const parsed = parseConfig(snapshot.text, file.format);
+          searchedFiles += 1;
+          fileHits = searchSingleFile(file, snapshot.text, parsed, needle, needComments);
+        }
         for (const hit of fileHits) {
           if (hit.matchKind === "path") {
             const isExact = hit.path?.toLowerCase() === needle;
@@ -204,30 +238,41 @@ export async function searchProjectConfigs(
   };
 }
 
+interface SearchSingleFileOptions {
+  documentIndex?: number;
+  documentLabel?: string;
+  lineOffset?: number;
+}
+
 function searchSingleFile(
   file: ConfigFile,
   rawText: string,
   parsed: unknown,
   needle: string,
   includeComments: boolean,
+  docOptions: SearchSingleFileOptions = {},
 ): ProjectSearchHit[] {
   const hits: ProjectSearchHit[] = [];
   const normalizedText = rawText.replace(/\r\n/g, "\n");
   const rawLines = normalizedText.split("\n");
+  const lineOffset = docOptions.lineOffset ?? 0;
   let visitedLeaves = 0;
   let cachedJsonTree: JsoncNode | null | undefined;
 
   function locateLine(segments: readonly PathSegment[]): number | undefined {
+    let localLine: number | undefined;
     if (file.format === "json" || file.format === "jsonc") {
       if (cachedJsonTree === undefined) {
         cachedJsonTree = parseTree(normalizedText) ?? null;
       }
       if (cachedJsonTree) {
-        const line = findJsonLineForPath(normalizedText, cachedJsonTree, segments);
-        if (line !== undefined) return line;
+        localLine = findJsonLineForPath(normalizedText, cachedJsonTree, segments);
       }
     }
-    return findLineForPath(rawLines, segments, file.format);
+    if (localLine === undefined) {
+      localLine = findLineForPath(rawLines, segments, file.format);
+    }
+    return localLine !== undefined ? localLine + lineOffset : undefined;
   }
 
   function visit(current: unknown, segments: PathSegment[], depth: number): void {
@@ -249,6 +294,21 @@ function searchSingleFile(
       }
     }
 
+    // Descend into object arrays (e.g. launch.json configurations[], Cargo.toml [[bin]], GitHub Actions steps[])
+    // so deep array item fields are indexed for Ctrl+K jumping while preserving secret redaction.
+    if (
+      Array.isArray(current)
+      && current.length > 0
+      && depth < MAX_WALK_DEPTH
+      && current.some((item) => item !== null && typeof item === "object" && !Array.isArray(item) && !(item instanceof Date))
+    ) {
+      for (let index = 0; index < current.length; index += 1) {
+        visit(current[index], [...segments, index], depth + 1);
+        if (visitedLeaves >= MAX_LEAVES_PER_FILE) return;
+      }
+      return;
+    }
+
     if (!segments.length) return;
     visitedLeaves += 1;
 
@@ -258,6 +318,9 @@ function searchSingleFile(
     const secretByKey = isSecretPath(segments);
     const secretByContent = valStr.length > 0 && maskDocumentSecrets(valStr) !== valStr;
     const secret = secretByKey || secretByContent;
+    const docMeta = docOptions.documentIndex !== undefined
+      ? { documentIndex: docOptions.documentIndex, documentLabel: docOptions.documentLabel }
+      : {};
 
     if (path.toLowerCase().includes(needle)) {
       hits.push({
@@ -269,6 +332,7 @@ function searchSingleFile(
         matchKind: "path",
         preview: secret ? SECRET_MASK : truncateSnippet(valStr || "(empty)", 120),
         secret,
+        ...docMeta,
       });
       return;
     }
@@ -284,6 +348,7 @@ function searchSingleFile(
         matchKind: "value",
         preview: truncateSnippet(valStr, 120),
         secret: false,
+        ...docMeta,
       });
     }
   }
@@ -291,23 +356,33 @@ function searchSingleFile(
   visit(parsed, [], 0);
 
   if (includeComments) {
-    const comments = extractFileComments(normalizedText, file.format);
-    for (const comment of comments) {
-      const sanitized = maskDocumentSecrets(comment.text).trim();
-      if (!sanitized) continue;
-      if (sanitized.toLowerCase().includes(needle)) {
-        hits.push({
-          file: file.path,
-          format: file.format,
-          line: comment.line,
-          matchKind: "comment",
-          preview: truncateSnippet(sanitized, 140),
-          secret: false,
-        });
-      }
-    }
+    hits.push(...searchFileComments(file, normalizedText, needle));
   }
 
+  return hits;
+}
+
+function searchFileComments(
+  file: ConfigFile,
+  normalizedText: string,
+  needle: string,
+): ProjectSearchHit[] {
+  const hits: ProjectSearchHit[] = [];
+  const comments = extractFileComments(normalizedText, file.format);
+  for (const comment of comments) {
+    const sanitized = maskDocumentSecrets(comment.text).trim();
+    if (!sanitized) continue;
+    if (sanitized.toLowerCase().includes(needle)) {
+      hits.push({
+        file: file.path,
+        format: file.format,
+        line: comment.line,
+        matchKind: "comment",
+        preview: truncateSnippet(sanitized, 140),
+        secret: false,
+      });
+    }
+  }
   return hits;
 }
 

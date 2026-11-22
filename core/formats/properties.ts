@@ -75,7 +75,7 @@ export function patchProperties(text: string, changes: readonly ConfigChange[]):
   return nextLines.join(eol).replace(new RegExp(`${escapeRegExp(eol)}+$`), "") + eol;
 }
 
-function groupPropertyLines(lines: readonly string[]): string[][] {
+export function groupPropertyLines(lines: readonly string[]): string[][] {
   const groups: string[][] = [];
   let current: string[] = [];
   for (const line of lines) {
@@ -97,7 +97,7 @@ function isPropertyCommentLine(line: string): boolean {
   return /^\s*[#!]/.test(line);
 }
 
-function joinPropertyLines(lines: readonly string[]): string[] {
+export function joinPropertyLines(lines: readonly string[]): string[] {
   const logical: string[] = [];
   let current: string | undefined;
   for (const physical of lines) {

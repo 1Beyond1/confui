@@ -11,6 +11,7 @@ export function EditorSummary({
   busy,
   canCompare = false,
   hasEnvGroup = false,
+  onSelectYamlDocument,
   onOpenCompare,
   onOpenExportRedacted,
   onRestoreBackup,
@@ -21,12 +22,16 @@ export function EditorSummary({
   busy?: boolean;
   canCompare?: boolean;
   hasEnvGroup?: boolean;
+  onSelectYamlDocument?: (documentIndex: number) => void;
   onOpenCompare?: () => void;
   onOpenExportRedacted?: () => void;
   onRestoreBackup?: () => void;
 }) {
   const { locale, t } = useI18n();
   const totalFields = fieldCount ?? schema.fields.length;
+  const yamlDocs = schema.yamlDocuments && schema.yamlDocuments.length > 1 ? schema.yamlDocuments : undefined;
+  const activeDocIndex = schema.activeDocumentIndex ?? 0;
+
   return (
     <section class="editor-summary">
       <div class="editor-summary__top">
@@ -75,6 +80,41 @@ export function EditorSummary({
           )}
         </div>
       </div>
+
+      {yamlDocs && onSelectYamlDocument && (
+        <div class="yaml-doc-bar" role="region" aria-label={t("editor.yamlDocsLabel")}>
+          <div class="yaml-doc-bar__head">
+            <Icon name="layers" size={13}/>
+            <span>{t("editor.yamlDocsLabel")}</span>
+            <small>{t("editor.yamlDocsCount", { count: yamlDocs.length })}</small>
+          </div>
+          <div class="yaml-doc-tabs" role="tablist" aria-label={t("editor.yamlDocsLabel")}>
+            {yamlDocs.map((doc) => {
+              const active = doc.index === activeDocIndex;
+              const label = doc.label || t("editor.yamlDocFallback", { index: doc.index + 1 });
+              return (
+                <button
+                  key={doc.index}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  disabled={busy}
+                  class={`yaml-doc-tab ${active ? "active" : ""}`}
+                  title={t("editor.yamlDocLineTooltip", { line: doc.startLine })}
+                  onClick={() => {
+                    if (!active) onSelectYamlDocument(doc.index);
+                  }}
+                >
+                  <span class="yaml-doc-tab__idx">#{doc.index + 1}</span>
+                  <span class="yaml-doc-tab__label">{label}</span>
+                  <small class="yaml-doc-tab__count">{t("editor.yamlDocKeyCount", { count: doc.keyCount })}</small>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div class="source-pipeline">
         {schema.sources.map((source) => (
           <span key={source.source} title={t("editor.summarySourceTitle", { count: source.fieldCount })}>
@@ -83,8 +123,16 @@ export function EditorSummary({
           </span>
         ))}
       </div>
-      {(schema.warnings.length > 0 || schema.exampleFiles.length > 0 || schema.readmeSource) && (
+      {(schema.warnings.length > 0 || schema.exampleFiles.length > 0 || schema.readmeSource || schema.schemaStore) && (
         <div class="editor-summary__details">
+          {schema.schemaStore && (
+            <span title={schema.schemaStore.url}>
+              <Icon name="shield" size={14}/>
+              {schema.schemaStore.fromCache
+                ? t("editor.summarySchemaStoreCached", { name: schema.schemaStore.name })
+                : t("editor.summarySchemaStore", { name: schema.schemaStore.name })}
+            </span>
+          )}
           {schema.exampleFiles.length > 0 && (
             <span><Icon name="archive" size={14}/>{t("editor.summaryExamples", { count: schema.exampleFiles.length })}</span>
           )}

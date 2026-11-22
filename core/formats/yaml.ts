@@ -6,26 +6,100 @@ import {
   isPair,
   isScalar,
   isSeq,
+  parseAllDocuments,
   parseDocument,
   stringify as stringifyYamlLib,
   type Document,
 } from "yaml";
-import type { ConfigChange, PathSegment } from "../../shared/schema.ts";
-import { setSafeProperty } from "../../shared/validation.ts";
+import type { ConfigChange, PathSegment, YamlDocumentSummary } from "../../shared/schema.ts";
+import { containsSecretValuePattern, setSafeProperty } from "../../shared/validation.ts";
 import { ConfuiError } from "../errors.ts";
 import { deleteAtPath, getAtPath, setAtPath } from "../paths.ts";
-import { isRecordObject, normalizeLineEndings } from "./common.ts";
+import { isRecordObject, normalizeLineEndings, stripBom } from "./common.ts";
 import type { UpdateConfigResult } from "./types.ts";
 
 const YAML_DELETE = Symbol("yaml-delete");
 const YAML_TIMESTAMP_RE = /^\d{4}-\d{1,2}-\d{1,2}(?:[Tt ]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?(?:[ \t]*(?:Z|[+-]\d{1,2}(?::\d{2})?))?)?$/;
 const YAML_FINITE_NUMBER_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
+const MAX_DOC_LABEL_CHARS = 60;
 
-export function parseYaml(source: string): unknown {
-  const doc = parseYamlDocument(source);
-  const value = doc.toJS({ maxAliasCount: 100 }) ?? {};
-  assertNoCircularReferences(value);
-  return value;
+export interface ParsedYamlDocument {
+  index: number;
+  document: Document;
+  value: unknown;
+  spanStart: number;
+  spanEnd: number;
+  startLine: number;
+  label?: string;
+  kind?: string;
+  name?: string;
+  profile?: string;
+  keyCount: number;
+}
+
+export function parseYamlDocuments(rawSource: string): ParsedYamlDocument[] {
+  const source = stripBom(rawSource);
+  const rawDocs = parseAllDocuments(source, { merge: true, uniqueKeys: false });
+  const docs = rawDocs.length > 0
+    ? rawDocs
+    : [parseDocument(source, { merge: true, uniqueKeys: false })];
+
+  const values: unknown[] = [];
+  for (const doc of docs) {
+    if (doc.errors.length > 0) {
+      throw new ConfuiError("PARSE_ERROR", "无法解析这个配置文件", doc.errors[0]!.message);
+    }
+    const value = doc.toJS({ maxAliasCount: 100 }) ?? {};
+    assertNoCircularReferences(value);
+    values.push(value);
+  }
+
+  const hasSiblingProfiles = values.some((val) => Boolean(extractSpringProfile(val)));
+
+  return docs.map((doc, index) => {
+    const value = values[index]!;
+    const prevEnd = index === 0 ? 0 : (docs[index - 1]!.range?.[2] ?? 0);
+    const spanEnd = index === docs.length - 1 ? source.length : (doc.range?.[2] ?? source.length);
+    const spanStart = Math.min(prevEnd, spanEnd);
+    const contentOffset = doc.range?.[0] ?? spanStart;
+    const startLine = lineNumberAtOffset(source, contentOffset);
+    const meta = extractYamlDocumentMeta(value, hasSiblingProfiles);
+    const keyCount = isRecordObject(value)
+      ? Object.keys(value).length
+      : Array.isArray(value)
+        ? value.length
+        : 0;
+    return {
+      index,
+      document: doc,
+      value,
+      spanStart,
+      spanEnd,
+      startLine,
+      ...meta,
+      keyCount,
+    };
+  });
+}
+
+export function extractYamlDocumentSummaries(source: string): YamlDocumentSummary[] {
+  return parseYamlDocuments(source).map((doc) => ({
+    index: doc.index,
+    label: doc.label,
+    kind: doc.kind,
+    name: doc.name,
+    profile: doc.profile,
+    startLine: doc.startLine,
+    keyCount: doc.keyCount,
+  }));
+}
+
+export function parseYaml(source: string, documentIndex = 0): unknown {
+  const docs = parseYamlDocuments(source);
+  if (!Number.isSafeInteger(documentIndex) || documentIndex < 0 || documentIndex >= docs.length) {
+    throw new ConfuiError("INVALID_INPUT", "YAML 文档索引超出范围");
+  }
+  return docs[documentIndex]!.value;
 }
 
 export function stringifyYaml(value: unknown, originalText = ""): string {
@@ -33,14 +107,70 @@ export function stringifyYaml(value: unknown, originalText = ""): string {
   return stringifyYamlLib(value, { indent, lineWidth: 100, aliasDuplicateObjects: false });
 }
 
-export function updateYaml(source: string, changes: readonly ConfigChange[]): UpdateConfigResult {
-  const doc = parseYamlDocument(source);
-  const currentTree = doc.toJS({ maxAliasCount: 100 }) ?? {};
-  assertNoCircularReferences(currentTree);
+export function updateYaml(
+  source: string,
+  changes: readonly ConfigChange[],
+  documentIndex = 0,
+): UpdateConfigResult {
+  const docs = parseYamlDocuments(source);
+  if (!Number.isSafeInteger(documentIndex) || documentIndex < 0 || documentIndex >= docs.length) {
+    throw new ConfuiError("INVALID_INPUT", "YAML 文档索引超出范围");
+  }
+  const target = docs[documentIndex]!;
+  const isMultiDoc = docs.length > 1;
+  const targetSlice = isMultiDoc ? source.slice(target.spanStart, target.spanEnd) : source;
+  const preserveDocStart = (isMultiDoc && documentIndex > 0) || target.document.directives?.docStart === true;
 
+  const updatedSliceResult = updateSingleYamlDocument(
+    target.document,
+    target.value,
+    targetSlice,
+    changes,
+    preserveDocStart,
+    isMultiDoc && documentIndex < docs.length - 1,
+  );
+
+  if (!isMultiDoc) {
+    const normalized = normalizeLineEndings(updatedSliceResult.output, source);
+    parseYamlDocuments(normalized);
+    return { output: normalized, warnings: updatedSliceResult.warnings };
+  }
+
+  let sliceText = updatedSliceResult.output;
+  if (documentIndex > 0 && !/^(?:[ \t]*(?:#[^\r\n]*)?\r?\n)*[ \t]*---(?:\s|$)/.test(sliceText)) {
+    sliceText = `---\n${sliceText}`;
+  }
+  if (documentIndex < docs.length - 1 && !sliceText.endsWith("\n")) {
+    sliceText += "\n";
+  }
+
+  // Splice ONLY the edited document's span; all sibling documents remain 100% byte-for-byte untouched.
+  const combined = `${source.slice(0, target.spanStart)}${sliceText}${source.slice(target.spanEnd)}`;
+  const normalized = normalizeLineEndings(combined, source);
+  const verified = parseYamlDocuments(normalized);
+  if (verified.length !== docs.length) {
+    throw new ConfuiError("SAVE_ERROR", "多文档 YAML 结构校验失败，已取消保存");
+  }
+  return { output: normalized, warnings: updatedSliceResult.warnings };
+}
+
+function updateSingleYamlDocument(
+  doc: Document,
+  currentTree: unknown,
+  sliceSource: string,
+  changes: readonly ConfigChange[],
+  preserveDocStart: boolean,
+  hasFollowingDocument: boolean,
+): UpdateConfigResult {
   const crossesAlias = changes.some((change) => pathCrossesAlias(doc, change.segments));
   if (crossesAlias) {
-    return fallbackUpdateYaml(source, currentTree, changes, "本次保存涉及 YAML 锚点别名展开，已重新排版文件（键和值已保留，部分注释可能调整）。");
+    return fallbackUpdateYaml(
+      sliceSource,
+      currentTree,
+      changes,
+      "本次保存涉及 YAML 锚点别名展开，已重新排版文件（键和值已保留，部分注释可能调整）。",
+      preserveDocStart,
+    );
   }
 
   // Coerce all values upfront so validation errors throw deterministically before mutating CST.
@@ -56,7 +186,7 @@ export function updateYaml(source: string, changes: readonly ConfigChange[]): Up
   }
 
   try {
-    const indent = detectYamlIndent(source);
+    const indent = detectYamlIndent(sliceSource);
     for (const item of prepared) {
       if (item.value === YAML_DELETE) {
         doc.deleteIn(item.segments);
@@ -64,23 +194,24 @@ export function updateYaml(source: string, changes: readonly ConfigChange[]): Up
         applyCstUpdate(doc, item.segments, item.value);
       }
     }
-    const rawOutput = doc.toString({ indent, lineWidth: 100 });
-    const normalized = normalizeLineEndings(rawOutput, source);
+    if (preserveDocStart && doc.directives) {
+      doc.directives.docStart = true;
+    }
+    let rawOutput = doc.toString({ indent, lineWidth: 100 });
+    if (hasFollowingDocument && !rawOutput.endsWith("\n")) rawOutput += "\n";
     // Verify the serialized document still parses cleanly without errors or cycles.
-    parseYaml(normalized);
-    return { output: normalized, warnings: [] };
+    parseYamlDocuments(rawOutput);
+    return { output: rawOutput, warnings: [] };
   } catch (error) {
     if (error instanceof ConfuiError) throw error;
-    return fallbackUpdateYaml(source, currentTree, changes, "本次保存涉及复杂 YAML 结构，已重新排版文件（键和值已保留，原有注释可能无法完整保留）。");
+    return fallbackUpdateYaml(
+      sliceSource,
+      currentTree,
+      changes,
+      "本次保存涉及复杂 YAML 结构，已重新排版文件（键和值已保留，原有注释可能无法完整保留）。",
+      preserveDocStart,
+    );
   }
-}
-
-function parseYamlDocument(source: string): Document {
-  const doc = parseDocument(source, { merge: true, uniqueKeys: false });
-  if (doc.errors.length > 0) {
-    throw new ConfuiError("PARSE_ERROR", "无法解析这个配置文件", doc.errors[0]!.message);
-  }
-  return doc;
 }
 
 function fallbackUpdateYaml(
@@ -88,6 +219,7 @@ function fallbackUpdateYaml(
   currentTree: unknown,
   changes: readonly ConfigChange[],
   warning: string,
+  preserveDocStart = false,
 ): UpdateConfigResult {
   // Detach shared YAML alias object references before mutating so editing one
   // aliased path does not silently overwrite the anchor or sibling aliases.
@@ -96,10 +228,84 @@ function fallbackUpdateYaml(
     if (change.value === undefined) deleteAtPath(next, change.segments);
     else applyYamlChange(next, change.segments, change.value);
   }
+  const serialized = stringifyYaml(next, source);
+  const prefixed = preserveDocStart ? `---\n${serialized}` : serialized;
   return {
-    output: normalizeLineEndings(stringifyYaml(next, source), source),
+    output: normalizeLineEndings(prefixed, source),
     warnings: [warning],
   };
+}
+
+function lineNumberAtOffset(text: string, offset: number): number {
+  let line = 1;
+  const bound = Math.min(Math.max(0, offset), text.length);
+  for (let i = 0; i < bound; i += 1) {
+    if (text.charCodeAt(i) === 10) line += 1;
+  }
+  return line;
+}
+
+function extractSpringProfile(value: unknown): string | undefined {
+  const activateProfile = getAtPath(value, ["spring", "config", "activate", "on-profile"]);
+  const legacyProfile = activateProfile ?? getAtPath(value, ["spring", "profiles"]);
+  if (typeof legacyProfile === "string") {
+    return sanitizeDocLabel(legacyProfile);
+  }
+  if (Array.isArray(legacyProfile)) {
+    const joined = legacyProfile
+      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      .join(", ");
+    return sanitizeDocLabel(joined);
+  }
+  return undefined;
+}
+
+function extractYamlDocumentMeta(
+  value: unknown,
+  hasSiblingProfiles: boolean,
+): { label?: string; kind?: string; name?: string; profile?: string } {
+  if (!isRecordObject(value)) return {};
+  const kind = typeof value.kind === "string" ? sanitizeDocLabel(value.kind) : undefined;
+  const metadata = isRecordObject(value.metadata) ? value.metadata : undefined;
+  const metaName = metadata && typeof metadata.name === "string" ? sanitizeDocLabel(metadata.name) : undefined;
+
+  if (kind && metaName) {
+    return { label: `${kind}/${metaName}`.slice(0, MAX_DOC_LABEL_CHARS), kind, name: metaName };
+  }
+  if (kind) {
+    return { label: kind, kind };
+  }
+
+  const profile = extractSpringProfile(value);
+  if (profile) {
+    return { label: `profile: ${profile}`.slice(0, MAX_DOC_LABEL_CHARS), profile };
+  }
+
+  if (hasSiblingProfiles) {
+    const appName = getAtPath(value, ["spring", "application", "name"]);
+    const safeAppName = typeof appName === "string" ? sanitizeDocLabel(appName) : undefined;
+    return {
+      label: safeAppName ? `default (${safeAppName})`.slice(0, MAX_DOC_LABEL_CHARS) : "default",
+      profile: "default",
+      name: safeAppName,
+    };
+  }
+
+  if (metaName) {
+    return { label: metaName, name: metaName };
+  }
+  const topName = typeof value.name === "string" ? sanitizeDocLabel(value.name) : undefined;
+  if (topName) {
+    return { label: topName, name: topName };
+  }
+  return {};
+}
+
+function sanitizeDocLabel(raw: string): string | undefined {
+  const cleaned = raw.replace(/[\r\n\t]+/g, " ").trim();
+  if (!cleaned) return undefined;
+  if (containsSecretValuePattern(cleaned)) return undefined;
+  return cleaned.slice(0, MAX_DOC_LABEL_CHARS);
 }
 
 function cloneWithoutSharedRefs(value: unknown): unknown {
