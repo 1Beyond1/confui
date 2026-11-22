@@ -82,6 +82,7 @@ let fieldAssistInFlight = 0;
 let lastScannedProject: { root: string; files: ConfigFile[] } | undefined;
 let activeSearchController: AbortController | undefined;
 let activeSearchSeq = 0;
+let activeInferSeq = 0;
 
 app.setName("Confui");
 if (process.platform === "win32") app.setAppUserModelId("com.1beyond1.confui");
@@ -121,6 +122,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.on("window-all-closed", () => {
+  activeInferSeq += 1;
   closeWatcher();
   activeSearchController?.abort();
   activeSearchController = undefined;
@@ -238,6 +240,7 @@ function registerIpcHandlers(): void {
   ipcMain.removeAllListeners("confui:stopWatching");
   ipcMain.on("confui:stopWatching", (event) => {
     if (!isTrustedSender(event)) return;
+    activeInferSeq += 1;
     closeWatcher();
   });
 
@@ -258,6 +261,7 @@ function registerIpcHandlers(): void {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertOptionalString(githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
     // Stop watching any previously opened project file before switching.
+    activeInferSeq += 1;
     closeWatcher();
     const result = await scanProject(root);
     lastScannedProject = { root: result.root, files: result.files };
@@ -278,6 +282,7 @@ function registerIpcHandlers(): void {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
     assertOptionalString(options?.githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
+    const inferSeq = ++activeInferSeq;
     const settings = await settingsStore.load();
     const ai = settings.ai.enabled && settings.ai.baseUrl && settings.ai.model
       ? new OpenAICompatibleProvider(settings.ai)
@@ -289,7 +294,9 @@ function registerIpcHandlers(): void {
       ai,
     });
     const resolved = await resolveExistingProjectPath(root, file);
-    watchConfigFile(resolved.root, resolved.path, file);
+    if (inferSeq === activeInferSeq) {
+      watchConfigFile(resolved.root, resolved.path, file);
+    }
     return schema;
   });
 

@@ -86,6 +86,7 @@ export const zhCN = {
   "home.dropOverlayTitle": "松开以打开此项目文件夹",
   "home.dropOverlayHint": "将在本地安全扫描项目内的配置文件",
   "home.dropFolderOnly": "请拖入本地项目文件夹，而不是单个文件",
+  "home.dropMultipleFolders": "一次只能打开一个项目文件夹，请单独拖入需要打开的文件夹",
 
   // External change banner
   "external.title": "文件在 Confui 外部发生了变化",

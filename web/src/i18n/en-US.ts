@@ -88,6 +88,7 @@ export const enUS: TranslationDict = {
   "home.dropOverlayTitle": "Drop folder to open project",
   "home.dropOverlayHint": "Confui will scan configuration files strictly on your machine",
   "home.dropFolderOnly": "Please drop a local project folder rather than an individual file",
+  "home.dropMultipleFolders": "Only one project folder can be opened at a time. Please drop a single folder.",
 
   // External change banner
   "external.title": "File changed outside Confui",

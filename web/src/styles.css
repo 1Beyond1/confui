@@ -661,7 +661,7 @@ code, pre { font-family: var(--font-mono); }
 .raw-search__nav { display: flex; align-items: center; gap: 2px; }
 .raw-search__nav .icon-button { width: 24px; height: 24px; }
 .icon-rotate-180 { transform: rotate(180deg); }
-.raw-code-scroll { min-height: 450px; max-height: calc(100vh - 220px); overflow: auto; background: var(--code-bg); color: var(--code-text); font-family: var(--font-mono); font-size: 10.5px; line-height: 22px; user-select: text; scrollbar-width: thin; scrollbar-color: var(--sb) transparent; }
+.raw-code-scroll { min-height: 450px; max-height: calc(100vh - 220px); overflow: auto; overscroll-behavior: contain; background: var(--code-bg); color: var(--code-text); font-family: var(--font-mono); font-size: 10.5px; line-height: 22px; user-select: text; scrollbar-width: thin; scrollbar-color: var(--sb) transparent; }
 .raw-lines { display: block; min-width: max-content; width: 100%; padding: 12px 0; }
 .raw-spacer { width: 100%; pointer-events: none; }
 .raw-line { display: flex; align-items: center; height: 22px; line-height: 22px; }

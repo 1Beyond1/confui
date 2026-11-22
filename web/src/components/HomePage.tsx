@@ -5,6 +5,13 @@ import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button } from "../ui.tsx";
 
+export function isFileDragEvent(
+  dataTransfer: { types?: ArrayLike<string> | Iterable<string> } | null | undefined,
+): boolean {
+  if (!dataTransfer?.types) return false;
+  return Array.from(dataTransfer.types).includes("Files");
+}
+
 export interface HomePageProps {
   root: string;
   github: string;
@@ -16,6 +23,7 @@ export interface HomePageProps {
   onOpen: () => void;
   onDropFolder: (folderPath: string) => void;
   onDropInvalid: (message: string) => void;
+  onDropNotice?: (message: string) => void;
   onRecent: (item: RecentProject) => void;
   onRemoveRecent: (path: string) => void;
 }
@@ -31,6 +39,7 @@ export function HomePage({
   onOpen,
   onDropFolder,
   onDropInvalid,
+  onDropNotice,
   onRecent,
   onRemoveRecent,
 }: HomePageProps) {
@@ -43,7 +52,7 @@ export function HomePage({
     : undefined;
 
   function handleDragEnter(event: DragEvent): void {
-    if (busy) return;
+    if (busy || !isFileDragEvent(event.dataTransfer)) return;
     event.preventDefault();
     dragDepth.current += 1;
     if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
@@ -51,24 +60,39 @@ export function HomePage({
   }
 
   function handleDragOver(event: DragEvent): void {
-    if (busy) return;
+    if (busy || !isFileDragEvent(event.dataTransfer)) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
   }
 
   function handleDragLeave(event: DragEvent): void {
+    if (!isFileDragEvent(event.dataTransfer)) return;
     event.preventDefault();
     dragDepth.current = Math.max(0, dragDepth.current - 1);
     if (dragDepth.current === 0) setDragActive(false);
   }
 
   function handleDrop(event: DragEvent): void {
+    if (!isFileDragEvent(event.dataTransfer)) {
+      dragDepth.current = 0;
+      setDragActive(false);
+      return;
+    }
     event.preventDefault();
     dragDepth.current = 0;
     setDragActive(false);
     if (busy) return;
 
-    const firstItem = event.dataTransfer?.items?.[0];
+    const fileItems = event.dataTransfer?.items
+      ? Array.from(event.dataTransfer.items).filter((item) => item.kind === "file")
+      : [];
+    const droppedFiles = event.dataTransfer?.files ? Array.from(event.dataTransfer.files) : [];
+    if (Math.max(fileItems.length, droppedFiles.length) > 1) {
+      (onDropNotice ?? onDropInvalid)(t("home.dropMultipleFolders"));
+      return;
+    }
+
+    const firstItem = fileItems[0] ?? event.dataTransfer?.items?.[0];
     const webkitEntry = typeof firstItem?.webkitGetAsEntry === "function"
       ? firstItem.webkitGetAsEntry()
       : null;
@@ -77,7 +101,7 @@ export function HomePage({
       return;
     }
 
-    const droppedFile = event.dataTransfer?.files?.[0];
+    const droppedFile = droppedFiles[0];
     if (!droppedFile) {
       onDropInvalid(t("home.dropFolderOnly"));
       return;

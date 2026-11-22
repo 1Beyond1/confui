@@ -34,8 +34,15 @@ import {
   validationErrors,
   fieldKey,
 } from "../web/src/editor-state.ts";
+import { isFileDragEvent } from "../web/src/components/HomePage.tsx";
 import { DICTIONARIES, translate } from "../web/src/i18n/index.tsx";
-import { computeCenteredScrollTop, computeVirtualWindow } from "../web/src/utils/virtual-scroll.ts";
+import {
+  computeCenteredScrollTop,
+  computeMaxLineCharWidth,
+  computeVirtualWindow,
+  findLineMatchRanges,
+  segmentLineMatches,
+} from "../web/src/utils/virtual-scroll.ts";
 import { formatDisplayValue } from "../web/src/value-display.ts";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -295,6 +302,39 @@ describe("UI state, diff, validation & i18n integration", () => {
     const bottomWin = computeVirtualWindow(totalLines, bottomScroll, viewport, rowHeight, 10);
     expect(bottomWin.endIndex).toBe(totalLines);
     expect(bottomWin.bottomSpacerPx).toBe(0);
+
+    // Accounts for vertical container padding (.raw-lines 12px top/bottom)
+    const padWin = computeVirtualWindow(totalLines, 0, viewport, rowHeight, 10, 12, 12);
+    expect(padWin.totalHeightPx).toBe(totalLines * rowHeight + 24);
+    const padCenter0 = computeCenteredScrollTop(100, viewport, rowHeight, totalLines, 12, 12);
+    const unpaddedCenter0 = computeCenteredScrollTop(100, viewport, rowHeight, totalLines, 0, 0);
+    expect(padCenter0 - unpaddedCenter0).toBe(12);
+
+    // Stable horizontal width estimation across ASCII, tabs, CJK and emoji
+    expect(computeMaxLineCharWidth(["short", "\tindented", "中文宽度测试", "a".repeat(240)])).toBe(240);
+    expect(computeMaxLineCharWidth(["中文"])).toBe(4);
+    expect(computeMaxLineCharWidth(["\ta"])).toBe(5);
+
+    // Multi-code-unit Unicode case folding (`İ` U+0130 -> `i\u0307`) must NOT shift highlight slices
+    const dottedLine = "İİİ_PORT=3000 # İ_port";
+    const ranges = findLineMatchRanges(dottedLine, "port");
+    expect(ranges.map((r) => dottedLine.slice(r.start, r.end))).toEqual(["PORT", "port"]);
+    const segments = segmentLineMatches(dottedLine, "port", 0);
+    expect(segments.filter((s) => s.matchIndex !== undefined).map((s) => s.text)).toEqual(["PORT", "port"]);
+    expect(segments.map((s) => s.text).join("")).toBe(dottedLine);
+
+    const dottedSelf = "İ_İ_ok";
+    const selfSegs = segmentLineMatches(dottedSelf, "İ", 0);
+    expect(selfSegs.filter((s) => s.matchIndex !== undefined).map((s) => s.text)).toEqual(["İ", "İ"]);
+    expect(selfSegs.map((s) => s.text).join("")).toBe(dottedSelf);
+  });
+
+  it("distinguishes OS file drags from in-page text drags", () => {
+    expect(isFileDragEvent({ types: ["Files"] })).toBe(true);
+    expect(isFileDragEvent({ types: ["text/plain", "Files"] })).toBe(true);
+    expect(isFileDragEvent({ types: ["text/plain", "text/html"] })).toBe(false);
+    expect(isFileDragEvent(null)).toBe(false);
+    expect(isFileDragEvent(undefined)).toBe(false);
   });
 
   it("enforces shared validation rules for colors, prototype keys and GitHub URLs", () => {
@@ -402,5 +442,17 @@ describe("UI state, diff, validation & i18n integration", () => {
       expect(mainSource).toContain(channel);
     }
     expect(preloadSource).toContain("webUtils.getPathForFile");
+
+    // Stage 4 regression source-contract guards
+    const rawViewerSource = await readFile(resolve(REPO_ROOT, "web/src/components/RawViewer.tsx"), "utf8");
+    expect(rawViewerSource).not.toContain("scrollIntoView(");
+    expect(rawViewerSource).toContain("viewportHeightRef");
+    expect(rawViewerSource).toContain("maskDocumentLines");
+
+    const appSource = await readFile(resolve(REPO_ROOT, "web/src/App.tsx"), "utf8");
+    expect(appSource).not.toContain("fieldEditorRevision");
+    expect(appSource).toContain("dirtyRef.current");
+    expect(mainSource).toContain("inferSeq === activeInferSeq");
+    expect(mainSource).toContain("activeSearchController?.abort()");
   });
 });

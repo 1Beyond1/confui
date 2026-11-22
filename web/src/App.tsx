@@ -142,6 +142,12 @@ export function App() {
     () => (schema ? isEditorDirty(allFields, values) : false),
     [schema, allFields, values],
   );
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const projectRef = useRef(project);
+  projectRef.current = project;
+  const activeFileRef = useRef(activeFile);
+  activeFileRef.current = activeFile;
 
   const filteredFiles = useMemo(() => {
     const query = fileQuery.trim().toLowerCase();
@@ -298,7 +304,8 @@ export function App() {
     }
     if (result.data) {
       setRootInput(result.data);
-      await openProject(result.data, githubInput);
+      setGithubInput("");
+      await openProject(result.data, "");
     }
   }
 
@@ -657,14 +664,18 @@ export function App() {
     applyTheme(result.data.theme);
     // Refresh built-in template descriptions if locale changed while a file is loaded cleanly.
     if (previousLocale !== result.data.locale && activeFile && project && !dirty) {
-      void window.confui.inferSchema(project.root, activeFile.path, {
+      const seq = openSequence.current;
+      const targetRoot = project.root;
+      const targetFile = activeFile.path;
+      void window.confui.inferSchema(targetRoot, targetFile, {
         githubUrl: githubInput || undefined,
         locale: result.data.locale,
       }).then((refreshed) => {
-        if (refreshed.ok) {
-          setSchema(refreshed.data);
-          history.reset({ values: initializeEditorValues(refreshed.data.fields), customFields: [] });
-        }
+        if (!refreshed.ok) return;
+        if (seq !== openSequence.current || dirtyRef.current) return;
+        if (projectRef.current?.root !== targetRoot || activeFileRef.current?.path !== targetFile) return;
+        setSchema(refreshed.data);
+        history.reset({ values: initializeEditorValues(refreshed.data.fields), customFields: [] });
       });
     }
   }
@@ -1049,9 +1060,11 @@ export function App() {
                 onOpen={() => void openProject()}
                 onDropFolder={(folderPath) => {
                   setRootInput(folderPath);
-                  void openProject(folderPath, githubInput);
+                  setGithubInput("");
+                  void openProject(folderPath, "");
                 }}
                 onDropInvalid={(message) => notify(message, "error")}
+                onDropNotice={(message) => notify(message, "info")}
                 onRecent={(item) => void openRecent(item)}
                 onRemoveRecent={(path) => void removeRecent(path)}
               />

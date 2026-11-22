@@ -5,16 +5,19 @@ import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { SourceBadge } from "../ui.tsx";
 import { FORMAT_LABELS } from "../utils/format.ts";
-import { computeCenteredScrollTop, computeVirtualWindow } from "../utils/virtual-scroll.ts";
-
-interface TextSegment {
-  text: string;
-  matchIndex?: number;
-}
+import {
+  computeCenteredScrollTop,
+  computeMaxLineCharWidth,
+  computeVirtualWindow,
+  findLineMatchRanges,
+  segmentLineMatches,
+} from "../utils/virtual-scroll.ts";
 
 const RAW_LINE_HEIGHT = 22;
+const RAW_PADDING_Y = 12;
 const RAW_OVERSCAN_LINES = 28;
 const DEFAULT_VIEWPORT_HEIGHT = 520;
+const SEARCH_DEBOUNCE_MS = 140;
 
 export function RawViewer({
   schema,
@@ -27,11 +30,14 @@ export function RawViewer({
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [activeMatch, setActiveMatch] = useState(0);
   const [highlightedLine, setHighlightedLine] = useState<number>();
   const [revealSecrets, setRevealSecrets] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(DEFAULT_VIEWPORT_HEIGHT);
+  const viewportHeightRef = useRef(viewportHeight);
+  viewportHeightRef.current = viewportHeight;
   const codeContainerRef = useRef<HTMLDivElement>(null);
 
   const rawLines = useMemo(
@@ -51,19 +57,33 @@ export function RawViewer({
 
   const displayLines = revealSecrets ? rawLines : maskedDoc.lines;
   const hasSensitiveContent = maskedDoc.maskedLineCount > 0 || secretKeys.length > 0;
+  const maxLineChars = useMemo(() => computeMaxLineCharWidth(displayLines), [displayLines]);
 
   useEffect(() => {
     setQuery("");
+    setDebouncedQuery("");
     setActiveMatch(0);
     setHighlightedLine(undefined);
     setRevealSecrets(false);
     setScrollTop(0);
-    if (codeContainerRef.current) codeContainerRef.current.scrollTop = 0;
+    if (codeContainerRef.current) {
+      codeContainerRef.current.scrollTop = 0;
+      codeContainerRef.current.scrollLeft = 0;
+    }
   }, [schema.file]);
 
   useEffect(() => {
     if (focusLine?.token) setRevealSecrets(false);
   }, [focusLine?.token]);
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setDebouncedQuery("");
+      return;
+    }
+    const timer = window.setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [query]);
 
   useEffect(() => {
     const container = codeContainerRef.current;
@@ -78,29 +98,24 @@ export function RawViewer({
     return () => observer.disconnect();
   }, []);
 
-  const trimmedQuery = query.trim();
+  const trimmedQuery = debouncedQuery.trim();
   const { totalMatches, matchLines, lineMatchStart } = useMemo(() => {
     const starts = new Int32Array(displayLines.length);
     starts.fill(-1);
     if (!trimmedQuery) {
       return { totalMatches: 0, matchLines: [] as number[], lineMatchStart: starts };
     }
-    const lowerNeedle = trimmedQuery.toLocaleLowerCase();
     const linesOfMatches: number[] = [];
     let count = 0;
     for (let i = 0; i < displayLines.length; i += 1) {
-      const lowerLine = displayLines[i]!.toLocaleLowerCase();
-      let cursor = 0;
-      let firstOnLine = -1;
-      while (cursor < lowerLine.length) {
-        const hit = lowerLine.indexOf(lowerNeedle, cursor);
-        if (hit < 0) break;
-        if (firstOnLine < 0) firstOnLine = count;
-        linesOfMatches.push(i);
-        count += 1;
-        cursor = hit + lowerNeedle.length;
+      const ranges = findLineMatchRanges(displayLines[i]!, trimmedQuery);
+      if (ranges.length > 0) {
+        starts[i] = count;
+        for (let r = 0; r < ranges.length; r += 1) {
+          linesOfMatches.push(i);
+          count += 1;
+        }
       }
-      starts[i] = firstOnLine;
     }
     return { totalMatches: count, matchLines: linesOfMatches, lineMatchStart: starts };
   }, [displayLines, trimmedQuery]);
@@ -114,40 +129,80 @@ export function RawViewer({
     const targetLineIdx = matchLines[activeMatch];
     if (targetLineIdx === undefined) return;
     const container = codeContainerRef.current;
-    const height = container?.clientHeight || viewportHeight;
-    const nextTop = computeCenteredScrollTop(targetLineIdx, height, RAW_LINE_HEIGHT, rawLines.length);
+    const height = container?.clientHeight || viewportHeightRef.current;
+    const nextTop = computeCenteredScrollTop(
+      targetLineIdx,
+      height,
+      RAW_LINE_HEIGHT,
+      displayLines.length,
+      RAW_PADDING_Y,
+      RAW_PADDING_Y,
+    );
     if (container) container.scrollTop = nextTop;
     setScrollTop(nextTop);
     const frame = window.requestAnimationFrame(() => {
-      const mark = codeContainerRef.current?.querySelector<HTMLElement>(`[data-match-index="${activeMatch}"]`);
-      mark?.scrollIntoView({ block: "nearest", inline: "center" });
+      const scroller = codeContainerRef.current;
+      const mark = scroller?.querySelector<HTMLElement>(`[data-match-index="${activeMatch}"]`);
+      if (!scroller || !mark) return;
+      // Scroll strictly within the raw viewer's own scroll container without touching outer ancestors.
+      const scrollerRect = scroller.getBoundingClientRect();
+      const markRect = mark.getBoundingClientRect();
+      const markLeftInContent = markRect.left - scrollerRect.left + scroller.scrollLeft;
+      const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+      const targetLeft = Math.max(
+        0,
+        Math.min(maxScrollLeft, Math.round(markLeftInContent - scroller.clientWidth / 2 + markRect.width / 2)),
+      );
+      scroller.scrollLeft = targetLeft;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeMatch, totalMatches, matchLines, rawLines.length, viewportHeight]);
+  }, [activeMatch, totalMatches, matchLines, displayLines.length]);
 
   useEffect(() => {
     if (!focusLine?.line) return;
-    const targetLineIdx = Math.max(0, Math.min(rawLines.length - 1, focusLine.line - 1));
+    const targetLineIdx = Math.max(0, Math.min(displayLines.length - 1, focusLine.line - 1));
     setHighlightedLine(targetLineIdx + 1);
     const container = codeContainerRef.current;
-    const height = container?.clientHeight || viewportHeight;
-    const nextTop = computeCenteredScrollTop(targetLineIdx, height, RAW_LINE_HEIGHT, rawLines.length);
+    const height = container?.clientHeight || viewportHeightRef.current;
+    const nextTop = computeCenteredScrollTop(
+      targetLineIdx,
+      height,
+      RAW_LINE_HEIGHT,
+      displayLines.length,
+      RAW_PADDING_Y,
+      RAW_PADDING_Y,
+    );
     if (container) container.scrollTop = nextTop;
     setScrollTop(nextTop);
     const timer = window.setTimeout(() => {
       setHighlightedLine((current) => (current === targetLineIdx + 1 ? undefined : current));
     }, 2_600);
     return () => window.clearTimeout(timer);
-  }, [focusLine?.line, focusLine?.token, rawLines.length, viewportHeight]);
+  }, [focusLine?.line, focusLine?.token, displayLines.length]);
 
   const virtualWindow = useMemo(
-    () => computeVirtualWindow(rawLines.length, scrollTop, viewportHeight, RAW_LINE_HEIGHT, RAW_OVERSCAN_LINES),
-    [rawLines.length, scrollTop, viewportHeight],
+    () => computeVirtualWindow(
+      displayLines.length,
+      scrollTop,
+      viewportHeight,
+      RAW_LINE_HEIGHT,
+      RAW_OVERSCAN_LINES,
+      RAW_PADDING_Y,
+      RAW_PADDING_Y,
+    ),
+    [displayLines.length, scrollTop, viewportHeight],
   );
 
-  const gutterWidth = Math.max(48, String(rawLines.length).length * 8 + 22);
+  const gutterWidth = Math.max(48, String(displayLines.length).length * 8 + 22);
+  const stableMinWidth = maxLineChars > 0
+    ? `calc(${gutterWidth + 40}px + ${maxLineChars}ch)`
+    : undefined;
 
   function stepMatch(delta: number): void {
+    if (query.trim() && query !== debouncedQuery) {
+      setDebouncedQuery(query);
+      return;
+    }
     if (!totalMatches) return;
     setActiveMatch((current) => (current + delta + totalMatches) % totalMatches);
   }
@@ -203,7 +258,15 @@ export function RawViewer({
                 }}
               />
               {query && (
-                <button type="button" class="icon-button" onClick={() => setQuery("")} aria-label={t("raw.clearSearch")}>
+                <button
+                  type="button"
+                  class="icon-button"
+                  onClick={() => {
+                    setQuery("");
+                    setDebouncedQuery("");
+                  }}
+                  aria-label={t("raw.clearSearch")}
+                >
                   <Icon name="x" size={13}/>
                 </button>
               )}
@@ -239,10 +302,10 @@ export function RawViewer({
         </header>
         <div
           ref={codeContainerRef}
-          class="raw-code-scroll"
+          class="raw-viewer raw-code-scroll"
           onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
         >
-          <div class="raw-lines" role="code" aria-label={schema.file}>
+          <div class="raw-lines" style={stableMinWidth ? { minWidth: stableMinWidth } : undefined} role="code" aria-label={schema.file}>
             {virtualWindow.topSpacerPx > 0 && (
               <div class="raw-spacer" style={{ height: `${virtualWindow.topSpacerPx}px` }} aria-hidden="true"/>
             )}
@@ -250,7 +313,7 @@ export function RawViewer({
               const lineText = displayLines[lineIndex] ?? "";
               const startMatch = lineMatchStart[lineIndex] ?? -1;
               const segments = startMatch >= 0 && trimmedQuery
-                ? segmentLine(lineText, trimmedQuery, startMatch)
+                ? segmentLineMatches(lineText, trimmedQuery, startMatch)
                 : [{ text: lineText }];
               return (
                 <div
@@ -287,25 +350,4 @@ export function RawViewer({
       </section>
     </div>
   );
-}
-
-function segmentLine(line: string, needle: string, firstMatchIndex: number): TextSegment[] {
-  const lowerNeedle = needle.toLocaleLowerCase();
-  const lowerLine = line.toLocaleLowerCase();
-  const parts: TextSegment[] = [];
-  let cursor = 0;
-  let matchIndex = firstMatchIndex;
-  while (cursor < line.length) {
-    const hit = lowerLine.indexOf(lowerNeedle, cursor);
-    if (hit < 0) {
-      parts.push({ text: line.slice(cursor) });
-      break;
-    }
-    if (hit > cursor) parts.push({ text: line.slice(cursor, hit) });
-    parts.push({ text: line.slice(hit, hit + needle.length), matchIndex });
-    matchIndex += 1;
-    cursor = hit + needle.length;
-  }
-  if (!parts.length) parts.push({ text: "" });
-  return parts;
 }
