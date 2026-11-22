@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { AppInfo, AppSettings, Locale, ThemePreference, UpdateCheckResult } from "../../shared/schema.ts";
+import { canReuseStoredAiApiKey } from "../../shared/validation.ts";
 import { translate, useI18n } from "./i18n/index.tsx";
 import { Icon } from "./icons.tsx";
 import { Button } from "./ui.tsx";
@@ -61,12 +62,26 @@ export function SettingsPage({
   );
   const aiErrors = useMemo(() => validateAiDraft(draft.ai, locale), [draft.ai, locale]);
   const locked = settings.lockedSecrets;
+  const apiKeyOriginMatches = canReuseStoredAiApiKey(settings.ai, draft.ai);
+  const apiKeyOriginChanged = Boolean(
+    (settings.secrets?.hasApiKey || locked?.apiKey)
+    && !apiKeyOriginMatches,
+  );
   const hasStoredApiKey = Boolean(
     settings.secrets?.hasApiKey
-    && draft.ai.provider === settings.ai.provider
+    && apiKeyOriginMatches
     && !clearApiKey,
   );
+  const canClearStoredApiKey = Boolean(
+    (settings.secrets?.hasApiKey || locked?.apiKey)
+    && apiKeyOriginMatches
+    && !draft.ai.apiKey,
+  );
   const hasStoredGithubToken = Boolean(settings.secrets?.hasGithubToken && !clearGithubToken);
+  const canClearStoredGithubToken = Boolean(
+    (settings.secrets?.hasGithubToken || locked?.githubToken)
+    && !draft.github.token,
+  );
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -76,10 +91,13 @@ export function SettingsPage({
   const setAi = (patch: Partial<AppSettings["ai"]>) => {
     testRun.current += 1;
     if (patch.apiKey) setClearApiKey(false);
-    setDraft((current) => ({
-      ...current,
-      ai: { ...current.ai, ...patch },
-    }));
+    setDraft((current) => {
+      const nextAi = { ...current.ai, ...patch };
+      if ((patch.baseUrl !== undefined || patch.provider !== undefined) && !canReuseStoredAiApiKey(settings.ai, nextAi)) {
+        setClearApiKey(false);
+      }
+      return { ...current, ai: nextAi };
+    });
   };
 
   async function save(): Promise<void> {
@@ -247,17 +265,19 @@ export function SettingsPage({
                   autocomplete="off"
                   placeholder={clearApiKey
                     ? t("settings.apiKeyClearPlaceholder")
-                    : hasStoredApiKey
-                      ? t("settings.apiKeyStoredPlaceholder", { hint: settings.secrets?.apiKeyHint ?? "••••" })
-                      : t("settings.apiKeyLocalPlaceholder")}
+                    : apiKeyOriginChanged
+                      ? t("settings.apiKeyReenterPlaceholder")
+                      : hasStoredApiKey
+                        ? t("settings.apiKeyStoredPlaceholder", { hint: settings.secrets?.apiKeyHint ?? "••••" })
+                        : t("settings.apiKeyLocalPlaceholder")}
                   onInput={(event) => setAi({ apiKey: event.currentTarget.value })}
                 />
                 <button class="icon-button" type="button" disabled={!draft.ai.enabled || saving || testing} onClick={() => setShowApiKey(!showApiKey)} aria-label={showApiKey ? t("settings.hideApiKey") : t("settings.showApiKey")}><Icon name={showApiKey ? "eye-off" : "eye"}/></button>
-                {settings.secrets?.hasApiKey && draft.ai.provider === settings.ai.provider && !draft.ai.apiKey && (
+                {canClearStoredApiKey && (
                   <button
                     class="icon-button"
                     type="button"
-                    disabled={!draft.ai.enabled || saving || testing}
+                    disabled={(!draft.ai.enabled && !locked?.apiKey) || saving || testing}
                     onClick={() => {
                       testRun.current += 1;
                       setClearApiKey(!clearApiKey);
@@ -269,13 +289,15 @@ export function SettingsPage({
                   </button>
                 )}
               </div>
-              {locked?.apiKey
-                ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>{t("settings.apiKeyLocked")}</small>
-                : clearApiKey
-                  ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyClearing")}</small>
-                  : hasStoredApiKey
-                    ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyStored", { hint: settings.secrets?.apiKeyHint ?? "••••" })}</small>
-                    : <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyDefaultNote")}</small>}
+              {clearApiKey
+                ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyClearing")}</small>
+                : apiKeyOriginChanged && !draft.ai.apiKey
+                  ? <small class="secure-note secure-note--locked"><Icon name="warning" size={14}/>{t("settings.apiKeyOriginChanged")}</small>
+                  : locked?.apiKey
+                    ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>{t("settings.apiKeyLocked")}</small>
+                    : hasStoredApiKey
+                      ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyStored", { hint: settings.secrets?.apiKeyHint ?? "••••" })}</small>
+                      : <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyDefaultNote")}</small>}
             </div>
           </div>
           <div class="settings-inline-action">
@@ -313,7 +335,7 @@ export function SettingsPage({
                 }}
               />
               <button class="icon-button" type="button" disabled={saving} onClick={() => setShowGithubToken(!showGithubToken)} aria-label={showGithubToken ? t("settings.hideGithubToken") : t("settings.showGithubToken")}><Icon name={showGithubToken ? "eye-off" : "eye"}/></button>
-              {settings.secrets?.hasGithubToken && !draft.github.token && (
+              {canClearStoredGithubToken && (
                 <button
                   class="icon-button"
                   type="button"
@@ -326,10 +348,10 @@ export function SettingsPage({
                 </button>
               )}
             </div>
-            {locked?.githubToken
-              ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>{t("settings.githubLocked")}</small>
-              : clearGithubToken
-                ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.githubClearing")}</small>
+            {clearGithubToken
+              ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.githubClearing")}</small>
+              : locked?.githubToken
+                ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>{t("settings.githubLocked")}</small>
                 : hasStoredGithubToken
                   ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.githubStored", { hint: settings.secrets?.githubTokenHint ?? "••••" })}</small>
                   : <small>{t("settings.githubDefaultNote")}</small>}

@@ -133,3 +133,44 @@ export function normalizeGithubUrl(value: string): string | undefined {
   const repo = parseGithubRepository(value);
   return repo ? `https://github.com/${repo.owner}/${repo.repo}` : undefined;
 }
+
+/**
+ * Extracts a canonical origin (`scheme://host[:port]`) for an AI Base URL if
+ * and only if it is a valid HTTPS URL or a loopback HTTP URL without embedded
+ * credentials, query parameters, or fragments.
+ */
+export function normalizeTrustedAiOrigin(baseUrl: string): string | undefined {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) return undefined;
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (url.username || url.password || url.search || url.hash) return undefined;
+  if (url.protocol === "https:") return url.origin;
+  if (url.protocol === "http:") {
+    const host = url.hostname.toLowerCase();
+    if (host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(host)) {
+      return url.origin;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Determines whether a stored AI API key may be reused for a target AI config.
+ * Both the provider identifier and the canonical trusted origin of `baseUrl`
+ * must match so changing `baseUrl` to another domain can never exfiltrate a
+ * previously saved `safeStorage` key.
+ */
+export function canReuseStoredAiApiKey(
+  stored: { provider: string; baseUrl: string },
+  candidate: { provider: string; baseUrl: string },
+): boolean {
+  if (stored.provider !== candidate.provider) return false;
+  const storedOrigin = normalizeTrustedAiOrigin(stored.baseUrl);
+  const candidateOrigin = normalizeTrustedAiOrigin(candidate.baseUrl);
+  return Boolean(storedOrigin && candidateOrigin && storedOrigin === candidateOrigin);
+}

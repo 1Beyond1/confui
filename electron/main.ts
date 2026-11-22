@@ -39,7 +39,7 @@ import {
 import { isForbiddenKey, normalizeGithubUrl } from "../shared/validation.ts";
 import { scanProject } from "../core/scanner.ts";
 import { searchProjectConfigs } from "../core/search.ts";
-import { SettingsStore, type SecretCodec } from "../core/settings.ts";
+import { resolveTestAIApiKey, SettingsStore, type SecretCodec } from "../core/settings.ts";
 import { checkForUpdates } from "../core/update.ts";
 import type {
   AppSettings,
@@ -532,9 +532,7 @@ function registerIpcHandlers(): void {
     let effectiveApiKey = settings.apiKey;
     if (!effectiveApiKey && settings.useStoredApiKey === true) {
       const stored = await settingsStore.load();
-      if (stored.ai.provider === settings.provider) {
-        effectiveApiKey = stored.ai.apiKey;
-      }
+      effectiveApiKey = resolveTestAIApiKey(stored.ai, settings, currentLocale);
     }
     return testAIConnection({
       enabled: settings.enabled,

@@ -571,6 +571,10 @@ export async function createConfigFromExample(
     throw new ConfuiError("INVALID_INPUT", "示例模板路径包含符号链接，已拒绝访问");
   }
   const normalizedExample = relative(projectRoot, lexicalExample).replace(/\\/g, "/");
+  const exampleName = basename(normalizedExample);
+  if (!isExampleFilename(exampleName) || /\.bak(?:\.|$)/i.test(exampleName)) {
+    throw new ConfuiError("INVALID_INPUT", "源文件不是有效的示例模板文件，已拒绝复制");
+  }
 
   let normalizedTarget: string;
   let format: ConfigFormat;

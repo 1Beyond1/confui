@@ -46,6 +46,14 @@ describe("template initialization, multi-env compare/sync & redacted export", ()
     const createdJsonc = await createConfigFromExample(root, "config.example.jsonc");
     expect(createdJsonc.file).toBe("config.jsonc");
     expect(await readFile(join(root, "config.jsonc"), "utf8")).toContain("// keep comment");
+
+    // Must refuse cloning non-example config files (e.g. secret-bearing .env or config.jsonc)
+    await expect(createConfigFromExample(root, ".env", ".env.cloned")).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+    } satisfies Partial<ConfuiError>);
+    await expect(createConfigFromExample(root, "config.jsonc", "config.copy.jsonc")).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+    } satisfies Partial<ConfuiError>);
   });
 
   it("blocks path traversal and symlinks during createConfigFromExample", async () => {

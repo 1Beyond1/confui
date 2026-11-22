@@ -2,8 +2,9 @@ import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SettingsStore, maskSecretHint, normalizeSettings, type SecretCodec } from "../core/settings.ts";
+import { resolveTestAIApiKey, SettingsStore, maskSecretHint, normalizeSettings, type SecretCodec } from "../core/settings.ts";
 import { DEFAULT_SETTINGS } from "../shared/schema.ts";
+import { canReuseStoredAiApiKey, normalizeTrustedAiOrigin } from "../shared/validation.ts";
 
 /** Mirrors the real codec: `enc:` values are readable only while unlocked. */
 function keychainCodec(state: { unlocked: boolean }): SecretCodec {
@@ -337,5 +338,121 @@ describe("settings store", () => {
 
     expect(flakyRename).toHaveBeenCalledTimes(3);
     await expect(store.load()).resolves.toMatchObject({ theme: "dark" });
+  });
+
+  it("blocks stored API key exfiltration when changing baseUrl origin under the same provider", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-settings-origin-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "settings.json");
+    const state = { unlocked: true };
+    const store = new SettingsStore(path, keychainCodec(state));
+
+    expect(normalizeTrustedAiOrigin("https://API.OPENAI.COM:443/v1")).toBe("https://api.openai.com");
+    expect(normalizeTrustedAiOrigin("http://127.0.0.1:11434/v1")).toBe("http://127.0.0.1:11434");
+    expect(normalizeTrustedAiOrigin("http://localhost:11434/v1")).toBe("http://localhost:11434");
+    expect(normalizeTrustedAiOrigin("http://[::1]:11434/v1")).toBe("http://[::1]:11434");
+    expect(normalizeTrustedAiOrigin("http://api.openai.com/v1")).toBeUndefined();
+    expect(normalizeTrustedAiOrigin("http://10.0.0.5:8080/v1")).toBeUndefined();
+    expect(normalizeTrustedAiOrigin("https://api.openai.com@evil.example/v1")).toBeUndefined();
+    expect(normalizeTrustedAiOrigin("https://api.openai.com/v1?x=1")).toBeUndefined();
+
+    // Save initial OpenAI key bound to https://api.openai.com
+    const initial = structuredClone(DEFAULT_SETTINGS);
+    initial.ai.enabled = true;
+    initial.ai.provider = "openai";
+    initial.ai.model = "gpt-4.1-mini";
+    initial.ai.baseUrl = "https://api.openai.com/v1";
+    initial.ai.apiKey = "sk-victim-secret-9999";
+    await store.saveFromRenderer(initial);
+    const stored = await store.load();
+
+    // Same provider + same canonical HTTPS origin (different path / default port) MAY reuse stored key
+    expect(canReuseStoredAiApiKey(stored.ai, { provider: "openai", baseUrl: "https://API.OPENAI.COM:443/v2" })).toBe(true);
+    expect(resolveTestAIApiKey(stored.ai, {
+      ...stored.ai,
+      apiKey: "",
+      baseUrl: "https://api.openai.com/v2",
+      useStoredApiKey: true,
+    })).toBe("sk-victim-secret-9999");
+
+    // Adversarial testAI attempts under the SAME provider with attacker domains / scheme downgrade / port change
+    for (const attackerUrl of [
+      "https://attacker.example/v1",
+      "https://api.openai.com.attacker.example/v1",
+      "https://api.openai.com:8443/v1",
+      "http://api.openai.com/v1",
+      "https://api.openai.com@attacker.example/v1",
+    ]) {
+      expect(canReuseStoredAiApiKey(stored.ai, { provider: "openai", baseUrl: attackerUrl })).toBe(false);
+      expect(() => resolveTestAIApiKey(stored.ai, {
+        ...stored.ai,
+        apiKey: "",
+        baseUrl: attackerUrl,
+        useStoredApiKey: true,
+      }, "en-US")).toThrow(/origin changed/i);
+    }
+
+    // Adversarial saveFromRenderer: keeping provider="openai" while redirecting baseUrl to attacker domain
+    // MUST wipe the stored safeStorage ciphertext instead of preserving it.
+    const redirected = await store.loadForRenderer();
+    redirected.ai.baseUrl = "https://attacker.example/v1";
+    const afterRedirect = await store.saveFromRenderer(redirected);
+    expect(afterRedirect.secrets?.hasApiKey).toBe(false);
+    await expect(store.load()).resolves.toMatchObject({
+      ai: { provider: "openai", baseUrl: "https://attacker.example/v1", apiKey: "" },
+    });
+    expect(await readFile(path, "utf8")).not.toContain("enc:");
+
+    // Localhost HTTP origin reuse works strictly for the exact same loopback origin
+    const localInit = structuredClone(DEFAULT_SETTINGS);
+    localInit.ai.enabled = true;
+    localInit.ai.provider = "ollama";
+    localInit.ai.model = "qwen2.5";
+    localInit.ai.baseUrl = "http://127.0.0.1:11434/v1";
+    localInit.ai.apiKey = "local-token-1234";
+    await store.saveFromRenderer(localInit);
+    const localStored = await store.load();
+    expect(resolveTestAIApiKey(localStored.ai, {
+      ...localStored.ai,
+      apiKey: "",
+      baseUrl: "http://127.0.0.1:11434/v2",
+      useStoredApiKey: true,
+    })).toBe("local-token-1234");
+    expect(() => resolveTestAIApiKey(localStored.ai, {
+      ...localStored.ai,
+      apiKey: "",
+      baseUrl: "http://127.0.0.1:11435/v1",
+      useStoredApiKey: true,
+    })).toThrow();
+  });
+
+  it("allows explicitly clearing locked or undecryptable secrets via saveFromRenderer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-clear-locked-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "settings.json");
+    const state = { unlocked: true };
+    const store = new SettingsStore(path, keychainCodec(state));
+
+    const initial = structuredClone(DEFAULT_SETTINGS);
+    initial.ai.provider = "openai";
+    initial.ai.baseUrl = "https://api.openai.com/v1";
+    initial.ai.apiKey = "sk-locked-api-key";
+    initial.github.token = "ghp_locked_github_token";
+    await store.saveFromRenderer(initial);
+
+    // Keychain becomes locked/corrupted
+    state.unlocked = false;
+    const lockedView = await store.loadForRenderer();
+    expect(lockedView.lockedSecrets).toEqual({ apiKey: true, githubToken: true });
+
+    // User explicitly requests clearing both locked credentials
+    const cleared = await store.saveFromRenderer({
+      ...lockedView,
+      clearSecrets: { apiKey: true, githubToken: true },
+    });
+    expect(cleared.lockedSecrets).toBeUndefined();
+    expect(cleared.secrets?.hasApiKey).toBe(false);
+    expect(cleared.secrets?.hasGithubToken).toBe(false);
+    expect(await readFile(path, "utf8")).not.toContain("enc:");
   });
 });

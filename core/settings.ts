@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { AppSettings, RecentProject } from "../shared/schema.ts";
+import type { AppSettings, Locale, RecentProject, TestAIRequest } from "../shared/schema.ts";
 import { DEFAULT_SETTINGS } from "../shared/schema.ts";
+import { canReuseStoredAiApiKey } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { renameWithRetry } from "./save.ts";
 import { normalizeGithubUrl } from "./scanner.ts";
@@ -82,7 +83,7 @@ export class SettingsStore {
    * Persists settings sent by the renderer without ever requiring plaintext
    * credentials to round-trip through the renderer. Existing stored secrets are
    * preserved unless the user supplies a new value, explicitly requests clear,
-   * or switches AI providers.
+   * switches AI providers, or changes the canonical trusted origin of `baseUrl`.
    */
   async saveFromRenderer(input: AppSettings): Promise<AppSettings> {
     return this.withWriteLock(async () => {
@@ -90,11 +91,11 @@ export class SettingsStore {
       const clearApiKey = isRecord(input) && isRecord(input.clearSecrets) && input.clearSecrets.apiKey === true;
       const clearGithubToken = isRecord(input) && isRecord(input.clearSecrets) && input.clearSecrets.githubToken === true;
       const stored = await this.readPersistedForWrite();
-      const providerChanged = settings.ai.provider !== stored.ai.provider;
+      const canReuseApiKey = canReuseStoredAiApiKey(stored.ai, settings.ai);
 
       const nextApiKey = settings.ai.apiKey
         ? this.codec.encode(settings.ai.apiKey)
-        : clearApiKey || providerChanged
+        : clearApiKey || !canReuseApiKey
           ? ""
           : stored.ai.apiKey;
       const nextGithubToken = settings.github.token
@@ -244,6 +245,29 @@ export function maskSecretHint(value: string): string | undefined {
   if (!value) return undefined;
   if (value.length <= 8) return "••••";
   return `${value.slice(0, 3)}•••${value.slice(-4)}`;
+}
+
+/**
+ * Resolves the API key used by `confui:testAI`. Refuses to attach a stored
+ * `safeStorage` API key unless both `provider` and the canonical trusted origin
+ * of `baseUrl` match the stored AI configuration.
+ */
+export function resolveTestAIApiKey(
+  storedAi: AppSettings["ai"],
+  request: TestAIRequest,
+  locale: Locale = "zh-CN",
+): string {
+  if (request.apiKey) return request.apiKey;
+  if (request.useStoredApiKey !== true) return "";
+  if (!canReuseStoredAiApiKey(storedAi, request)) {
+    throw new ConfuiError(
+      "AI_ERROR",
+      locale === "en-US"
+        ? "Provider or Base URL origin changed; please re-enter your API Key before testing."
+        : "AI 供应商或 Base URL 来源已变更，请重新输入 API Key 后再测试连接。",
+    );
+  }
+  return storedAi.apiKey;
 }
 
 export function redactSettingsForRenderer(settings: AppSettings): AppSettings {
