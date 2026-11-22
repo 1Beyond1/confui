@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
-import { collectSecretsFromFields } from "../../../shared/diff.ts";
+import {
+  buildYamlDocumentLineSecrets,
+  collectSecretsFromFields,
+  isSaveChangeSecret,
+} from "../../../shared/diff.ts";
 import type { ConfigFormSchema, FieldSpec, SavePreview } from "../../../shared/schema.ts";
-import { SECRET_KEY_PATTERN, valueContainsSecret } from "../../../shared/validation.ts";
+import { collectSecretStrings } from "../../../shared/validation.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button, Modal } from "../ui.tsx";
@@ -29,41 +33,90 @@ export function SaveConfirmModal({
   const [tab, setTab] = useState<DiffTab>("fields");
   const [revealSecrets, setRevealSecrets] = useState(false);
   const matchesActiveSchema = Boolean(schema && schema.file === savePreview.file);
+  const targetDocIndex = savePreview.documentIndex ?? 0;
   const matchesActiveDocument = matchesActiveSchema
-    && (savePreview.documentIndex ?? 0) === (schema?.activeDocumentIndex ?? 0);
+    && targetDocIndex === (schema?.activeDocumentIndex ?? 0);
   const fields = matchesActiveDocument ? (allFields ?? schema?.fields ?? []) : [];
+  const targetDocMeta = matchesActiveSchema
+    ? schema?.documentSecrets?.find((item) => item.documentIndex === targetDocIndex)
+    : undefined;
 
   useEffect(() => {
     setTab("fields");
     setRevealSecrets(false);
   }, [savePreview]);
 
+  const changeSecretFlags = useMemo(
+    () => savePreview.changes.map((change) => isSaveChangeSecret(change, fields, targetDocMeta)),
+    [fields, savePreview.changes, targetDocMeta],
+  );
+
   const { secretKeys, secretValues } = useMemo(() => {
     const base = collectSecretsFromFields(fields, savePreview.changes);
-    const docMeta = matchesActiveSchema
-      ? schema?.documentSecrets?.find((item) => item.documentIndex === (savePreview.documentIndex ?? 0))
-      : undefined;
-    if (!docMeta) return base;
-    return {
-      secretKeys: [...new Set([...base.secretKeys, ...docMeta.secretKeys])],
-      secretValues: [...new Set([...base.secretValues, ...docMeta.secretValues])],
-    };
-  }, [fields, savePreview.changes, savePreview.documentIndex, matchesActiveSchema, schema?.documentSecrets]);
+    const keySet = new Set<string>(base.secretKeys);
+    const valSet = new Set<string>(base.secretValues);
+    if (targetDocMeta) {
+      for (const k of targetDocMeta.secretKeys) keySet.add(k);
+      for (const v of targetDocMeta.secretValues) valSet.add(v);
+    }
+    for (let i = 0; i < savePreview.changes.length; i += 1) {
+      if (!changeSecretFlags[i]) continue;
+      const change = savePreview.changes[i]!;
+      keySet.add(change.path);
+      const leaf = change.path.split(".").at(-1)?.trim();
+      if (leaf) keySet.add(leaf);
+      collectSecretStrings(change.before, valSet);
+      collectSecretStrings(change.after, valSet);
+    }
+    return { secretKeys: [...keySet], secretValues: [...valSet] };
+  }, [fields, savePreview.changes, targetDocMeta, changeSecretFlags]);
 
-  const changeSecretFlags = useMemo(
-    () => savePreview.changes.map((change) => {
-      const field = fields.find((item) => item.path === change.path);
-      return Boolean(
-        field?.secret
-        || field?.type === "secret"
-        || SECRET_KEY_PATTERN.test(change.path)
-        || valueContainsSecret(change.before)
-        || valueContainsSecret(change.after),
-      );
-    }),
-    [fields, savePreview.changes],
+  const { oldDocumentSecrets, newDocumentSecrets } = useMemo(() => {
+    if (
+      !matchesActiveSchema
+      || savePreview.format !== "yaml"
+      || !schema?.documentSecrets
+      || schema.documentSecrets.length <= 1
+    ) {
+      return { oldDocumentSecrets: undefined, newDocumentSecrets: undefined };
+    }
+    const extraByDocument = new Map<number, { secretKeys: string[]; secretValues: string[] }>();
+    const addExtra = (docIdx: number, keys: readonly string[], vals: readonly string[]): void => {
+      const existing = extraByDocument.get(docIdx) ?? { secretKeys: [], secretValues: [] };
+      existing.secretKeys.push(...keys);
+      existing.secretValues.push(...vals);
+      extraByDocument.set(docIdx, existing);
+    };
+    const activeDocIdx = schema.activeDocumentIndex ?? 0;
+    const activeCollected = collectSecretsFromFields(allFields ?? schema.fields);
+    addExtra(activeDocIdx, activeCollected.secretKeys, activeCollected.secretValues);
+    addExtra(targetDocIndex, secretKeys, secretValues);
+    return {
+      oldDocumentSecrets: buildYamlDocumentLineSecrets(schema.rawText, schema.documentSecrets, extraByDocument),
+      newDocumentSecrets: buildYamlDocumentLineSecrets(savePreview.output, schema.documentSecrets, extraByDocument),
+    };
+  }, [
+    matchesActiveSchema,
+    savePreview.format,
+    savePreview.output,
+    schema?.documentSecrets,
+    schema?.activeDocumentIndex,
+    schema?.fields,
+    schema?.rawText,
+    allFields,
+    targetDocIndex,
+    secretKeys,
+    secretValues,
+  ]);
+
+  const hasDocSecrets = Boolean(
+    oldDocumentSecrets?.some((sec) => (sec.secretKeys?.length ?? 0) > 0 || (sec.secretValues?.length ?? 0) > 0)
+    || newDocumentSecrets?.some((sec) => (sec.secretKeys?.length ?? 0) > 0 || (sec.secretValues?.length ?? 0) > 0),
   );
-  const hasAnySecret = changeSecretFlags.some(Boolean) || secretKeys.length > 0 || secretValues.length > 0;
+  const hasAnySecret = changeSecretFlags.some(Boolean)
+    || secretKeys.length > 0
+    || secretValues.length > 0
+    || hasDocSecrets;
 
   return (
     <Modal
@@ -168,6 +221,8 @@ export function SaveConfirmModal({
           maskSecrets={!revealSecrets}
           secretKeys={secretKeys}
           secretValues={secretValues}
+          oldDocumentSecrets={oldDocumentSecrets}
+          newDocumentSecrets={newDocumentSecrets}
         />
       )}
     </Modal>

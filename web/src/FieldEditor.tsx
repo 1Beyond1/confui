@@ -127,6 +127,7 @@ export function FieldEditor({
     focusTimersRef.current.clear = window.setTimeout(() => {
       focusTimersRef.current.clear = undefined;
       setHighlightedPath((current) => (current === resolvedPath ? undefined : current));
+      setDeepFocusTarget((current) => (current?.token === requestToken ? undefined : current));
     }, 2_600);
   }, [focusRequest?.path, focusRequest?.segments, focusRequest?.token, fields, defaultGroupName, onConsumeFocusRequest]);
 

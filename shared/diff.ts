@@ -1,4 +1,4 @@
-import type { ConfigFormat, FieldSpec, SaveChangePreview } from "./schema.ts";
+import type { ConfigFormat, DocumentSecretMeta, FieldSpec, PathSegment, SaveChangePreview } from "./schema.ts";
 import {
   AUTH_BEARER_BASIC_RE,
   AUTH_DIGEST_RE,
@@ -12,6 +12,7 @@ import {
   SECRET_KEY_PATTERN,
   SLACK_WEBHOOK_RE,
   URL_CREDENTIALS_RE,
+  valueContainsSecret,
   VENDOR_TOKEN_RE,
 } from "./validation.ts";
 
@@ -41,6 +42,10 @@ export interface MaskUnifiedDiffOptions {
   secretValues?: readonly string[];
   /** Optional per-document secret scopes (used for multi-document YAML isolation). */
   documentSecrets?: readonly DocumentLineSecrets[];
+  /** Optional per-document secret scopes specific to `oldText` (when old/new doc line ranges differ). */
+  oldDocumentSecrets?: readonly DocumentLineSecrets[];
+  /** Optional per-document secret scopes specific to `newText` (when old/new doc line ranges differ). */
+  newDocumentSecrets?: readonly DocumentLineSecrets[];
   /** Replacement mask string (defaults to `••••••••`). */
   mask?: string;
 }
@@ -395,6 +400,189 @@ export function collectSecretsFromFields(
   return { secretKeys: [...keys], secretValues: [...values] };
 }
 
+export interface YamlDocumentSecretScopeInput {
+  documentIndex: number;
+  secretKeys?: readonly string[];
+  secretValues?: readonly string[];
+}
+
+/**
+ * Scans 1-based `[startLine, endLine)` document line ranges in a YAML file
+ * without requiring Node APIs, handling UTF-8 BOM, leading `---`, empty docs
+ * (`---\n---`), and `...` end-of-document boundaries.
+ */
+export function scanYamlDocumentLineRanges(
+  text: string,
+): Array<{ documentIndex: number; startLine: number; endLine?: number }> {
+  const clean = text.startsWith("\uFEFF") ? text.slice(1) : text;
+  const lines = clean.replace(/\r\n/g, "\n").split("\n");
+  const starts: number[] = [];
+  let seenDocBodyOrMarker = false;
+  let afterDocEnd = false;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    const lineNumber = i + 1;
+    const trimmed = line.trim();
+
+    if (/^---(?:[ \t]|$)/.test(line)) {
+      starts.push(starts.length === 0 ? 1 : lineNumber);
+      seenDocBodyOrMarker = true;
+      afterDocEnd = false;
+      continue;
+    }
+
+    if (/^\.\.\.(?:[ \t]|$)/.test(line)) {
+      if (starts.length === 0 && seenDocBodyOrMarker) {
+        starts.push(1);
+      }
+      afterDocEnd = true;
+      continue;
+    }
+
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("%")) {
+      continue;
+    }
+
+    if (starts.length === 0) {
+      starts.push(1);
+      seenDocBodyOrMarker = true;
+      afterDocEnd = false;
+    } else if (afterDocEnd) {
+      starts.push(lineNumber);
+      seenDocBodyOrMarker = true;
+      afterDocEnd = false;
+    }
+  }
+
+  if (starts.length === 0) return [{ documentIndex: 0, startLine: 1 }];
+  return starts.map((startLine, idx) => ({
+    documentIndex: idx,
+    startLine: idx === 0 ? 1 : startLine,
+    endLine: starts[idx + 1],
+  }));
+}
+
+/**
+ * Maps per-document secret metadata onto exact line ranges computed from the
+ * target YAML text (`oldText` or `newText`), preventing cross-document secret
+ * leaks and cross-document false masking even when edits shift line numbers.
+ */
+export function buildYamlDocumentLineSecrets(
+  text: string,
+  documentSecrets: readonly YamlDocumentSecretScopeInput[],
+  extraByDocument?: ReadonlyMap<number, { secretKeys?: readonly string[]; secretValues?: readonly string[] }>,
+): DocumentLineSecrets[] | undefined {
+  if (!documentSecrets.length) return undefined;
+  const ranges = scanYamlDocumentLineRanges(text);
+  if (ranges.length <= 1 && documentSecrets.length <= 1) return undefined;
+
+  const metaByDoc = new Map(documentSecrets.map((entry) => [entry.documentIndex, entry]));
+  const docCountMismatch = ranges.length !== documentSecrets.length;
+  let unionKeys: string[] | undefined;
+  let unionVals: string[] | undefined;
+  if (docCountMismatch) {
+    const allKeys = new Set<string>();
+    const allVals = new Set<string>();
+    for (const entry of documentSecrets) {
+      for (const k of entry.secretKeys ?? []) allKeys.add(k);
+      for (const v of entry.secretValues ?? []) allVals.add(v);
+    }
+    if (extraByDocument) {
+      for (const extra of extraByDocument.values()) {
+        for (const k of extra.secretKeys ?? []) allKeys.add(k);
+        for (const v of extra.secretValues ?? []) allVals.add(v);
+      }
+    }
+    unionKeys = [...allKeys];
+    unionVals = [...allVals];
+  }
+
+  return ranges.map((range) => {
+    if (docCountMismatch) {
+      return {
+        startLine: range.startLine,
+        endLine: range.endLine,
+        secretKeys: unionKeys ?? [],
+        secretValues: unionVals ?? [],
+      };
+    }
+    const meta = metaByDoc.get(range.documentIndex);
+    const extra = extraByDocument?.get(range.documentIndex);
+    const keys = new Set<string>(meta?.secretKeys ?? []);
+    const vals = new Set<string>(meta?.secretValues ?? []);
+    for (const k of extra?.secretKeys ?? []) keys.add(k);
+    for (const v of extra?.secretValues ?? []) vals.add(v);
+    return {
+      startLine: range.startLine,
+      endLine: range.endLine,
+      secretKeys: [...keys],
+      secretValues: [...vals],
+    };
+  });
+}
+
+function formatDiffSecretPath(segments: readonly PathSegment[]): string {
+  return segments
+    .map((segment, index) => {
+      if (typeof segment === "number") return `[${segment}]`;
+      if (/^[A-Za-z_$][\w$-]*$/.test(segment)) return `${index ? "." : ""}${segment}`;
+      return `[${JSON.stringify(segment)}]`;
+    })
+    .join("");
+}
+
+function isPathPrefixOrEqual(prefix: string, target: string): boolean {
+  return target === prefix || target.startsWith(`${prefix}.`) || target.startsWith(`${prefix}[`);
+}
+
+/**
+ * Determines whether a `SaveChangePreview` entry represents a secret field
+ * (combining active `fields`, key/value heuristics, and target YAML document
+ * schema metadata such as `writeOnly: true` / `format: "password"`).
+ */
+export function isSaveChangeSecret(
+  change: SaveChangePreview,
+  fields: readonly FieldSpec[],
+  docMeta?: Pick<DocumentSecretMeta, "secretPaths" | "secretKeys" | "secretValues">,
+): boolean {
+  const field = fields.find((item) => item.path === change.path);
+  if (
+    field?.secret
+    || field?.type === "secret"
+    || SECRET_KEY_PATTERN.test(change.path)
+    || valueContainsSecret(change.before)
+    || valueContainsSecret(change.after)
+  ) {
+    return true;
+  }
+  if (!docMeta) return false;
+
+  const formattedPaths = (docMeta.secretPaths ?? []).map(formatDiffSecretPath);
+  for (const sp of formattedPaths) {
+    if (isPathPrefixOrEqual(sp, change.path) || isPathPrefixOrEqual(change.path, sp)) {
+      return true;
+    }
+  }
+
+  const lowerPath = change.path.toLowerCase();
+  const leaf = change.path.split(".").at(-1)?.trim().toLowerCase();
+  for (const key of docMeta.secretKeys ?? []) {
+    const lowerKey = key.trim().toLowerCase();
+    if (!lowerKey) continue;
+    if (lowerKey === lowerPath || (formattedPaths.length === 0 && leaf && lowerKey === leaf)) {
+      return true;
+    }
+  }
+
+  const secretVals = new Set((docMeta.secretValues ?? []).filter((v) => v.length >= 6));
+  if (secretVals.size > 0) {
+    if (typeof change.before === "string" && secretVals.has(change.before)) return true;
+    if (typeof change.after === "string" && secretVals.has(change.after)) return true;
+  }
+  return false;
+}
+
 /**
  * Masks all lines of a complete configuration document in a single linear pass,
  * preserving multi-line secret state (YAML block scalars, YAML secret subtrees,
@@ -476,8 +664,16 @@ export function maskUnifiedDiff(
   const newText = options.newText ?? sources?.newText;
 
   if (oldText !== undefined && newText !== undefined) {
-    const oldMasked = maskDocumentLines(oldText, options);
-    const newMasked = maskDocumentLines(newText, options);
+    const oldDocSecrets = options.oldDocumentSecrets ?? options.documentSecrets;
+    const newDocSecrets = options.newDocumentSecrets ?? options.documentSecrets;
+    const oldMasked = maskDocumentLines(
+      oldText,
+      oldDocSecrets ? { ...options, documentSecrets: oldDocSecrets } : options,
+    );
+    const newMasked = maskDocumentLines(
+      newText,
+      newDocSecrets ? { ...options, documentSecrets: newDocSecrets } : options,
+    );
     let maskedLineCount = 0;
 
     const hunks: DiffHunk[] = diff.hunks.map((hunk) => {
@@ -694,20 +890,38 @@ function maskSecretAssignment(
 ): string {
   const { mask, format, extraValues } = config;
   const trimmedRest = rest.trim();
+  const isNpmrcKey = Boolean(rawKey.trim().startsWith("//"));
+
+  // `.npmrc` scoped credential lines (`//host/:_authToken=...`, `//host/:_password=...`)
+  // are always single-line raw credentials; mask the entire assigned value immediately.
+  if (isNpmrcKey) {
+    if (!trimmedRest) return `${prefix}${rawKey}${separator}${rest}`;
+    const maskedRest = maskAssignedValue(rest, mask, { format, extraValues, rawKey });
+    return `${prefix}${rawKey}${separator}${maskedRest}`;
+  }
 
   // TOML triple-quoted string (`"""..."""` or `'''...'''`)
-  if (trimmedRest.startsWith('"""') || trimmedRest.startsWith("'''")) {
+  if (
+    (format === "toml" || format === undefined)
+    && (trimmedRest.startsWith('"""') || trimmedRest.startsWith("'''"))
+  ) {
     const leadingWs = rest.match(/^\s*/)?.[0] ?? "";
     const delim: '"""' | "'''" = trimmedRest.startsWith('"""') ? '"""' : "'''";
     const afterOpen = trimmedRest.slice(3);
     const closing = findClosingTripleQuote(trimmedRest, 3, delim);
     if (closing) {
       const inner = trimmedRest.slice(3, closing.closeStart);
-      if (inner.length === 0) {
-        return `${prefix}${rawKey}${separator}${rest}`;
-      }
       const tail = trimmedRest.slice(closing.closeEnd);
-      return `${prefix}${rawKey}${separator}${leadingWs}${delim}${mask}${delim}${tail}`;
+      if (isAllowedQuotedScalarTail(tail, format ?? "toml")) {
+        if (inner.length === 0) {
+          return `${prefix}${rawKey}${separator}${rest}`;
+        }
+        return `${prefix}${rawKey}${separator}${leadingWs}${delim}${mask}${delim}${tail}`;
+      }
+      // Suspicious non-comment tail after closing triple quote (e.g. `""""""real_secret`): mask entire rest.
+      const body = rest.slice(leadingWs.length);
+      const trailingWs = body.match(/\s*$/)?.[0] ?? "";
+      return `${prefix}${rawKey}${separator}${leadingWs}${mask}${trailingWs}`;
     }
     state.tomlTripleQuote = delim;
     const maskedOpenTail = afterOpen.trim() ? mask : afterOpen;
@@ -732,8 +946,7 @@ function maskSecretAssignment(
   }
 
   // Inline or multi-line bracketed container (`[...]` / `{...}`)
-  const isNpmrcKey = format === "ini" && rawKey.trim().startsWith("//");
-  if (!isNpmrcKey && (trimmedRest.startsWith("[") || trimmedRest.startsWith("{"))) {
+  if (trimmedRest.startsWith("[") || trimmedRest.startsWith("{")) {
     const container = maskSecretContainerLine(rest, mask, [], format);
     if (container.nextStack.length > 0) state.secretContainerStack = container.nextStack;
     if (container.openedTripleQuote) state.tomlTripleQuote = container.openedTripleQuote;
@@ -914,6 +1127,31 @@ function findClosingQuote(text: string, openIdx: number, quote: string, allowEsc
   return -1;
 }
 
+function isAllowedQuotedScalarTail(tail: string, format?: ConfigFormat): boolean {
+  if (!tail || /^\s*$/.test(tail)) return true;
+  if (format === "properties") return false;
+  if (format === "json") {
+    return /^\s*,?\s*$/.test(tail);
+  }
+  if (format === "jsonc") {
+    return /^\s*,?\s*(?:\/\/.*|\/\*(?:(?!\*\/).)*\*\/\s*)?$/.test(tail);
+  }
+  if (format === "toml") {
+    return /^\s*(?:#.*)?$/.test(tail);
+  }
+  if (format === "yaml") {
+    return /^\s*,?\s*$/.test(tail) || /^\s*,?\s+#.*$/.test(tail);
+  }
+  if (format === "env" || format === "ini") {
+    return /^\s+#.*$/.test(tail);
+  }
+  // Unspecified format: allow optional trailing comma and/or legal inline comment (`#`, `//`, `/* ... */`).
+  return /^\s*,?\s*$/.test(tail)
+    || /^\s*,\s*(?:#|\/\/).*$/.test(tail)
+    || /^\s+(?:#|\/\/).*$/.test(tail)
+    || /^\s*,?\s*\/\*(?:(?!\*\/).)*\*\/\s*$/.test(tail);
+}
+
 function maskAssignedValue(
   rest: string,
   mask: string,
@@ -925,26 +1163,39 @@ function maskAssignedValue(
 
   const leadingWs = rest.match(/^\s*/)?.[0] ?? "";
   const body = rest.slice(leadingWs.length);
-  const quote = body.charAt(0);
-
-  // Quoted scalar value ("...", '...', `...`) preserving quotes, auth scheme, commas, and trailing comments
-  if (quote === '"' || quote === "'" || quote === "`") {
-    const allowEscape = quote !== "`" && !(format === "toml" && quote === "'");
-    const end = findClosingQuote(body, 0, quote, allowEscape);
-    if (end === 1) return rest; // Empty quoted string "" or ''
-    const inner = end > 1 ? body.slice(1, end) : body.slice(1);
-    const tail = end > 1 ? body.slice(end + 1) : "";
-    const authInside = inner.match(AUTH_SCHEME_VALUE_RE);
-    const maskedInner = authInside ? `${authInside[1]}${mask}` : mask;
-    return `${leadingWs}${quote}${maskedInner}${quote}${tail}`;
-  }
+  const trailingWs = body.match(/\s*$/)?.[0] ?? "";
 
   // `.npmrc` scoped credential lines (`//host/:_authToken=...`, `//host/:_password=...`)
-  // must mask the entire unquoted value regardless of spaces, commas, semicolons, or hashes.
+  // must mask the entire value before quote handling so leading `""` or `"tok1" tok2`
+  // can never bypass masking.
   const isNpmrcKey = Boolean(rawKey?.trim().startsWith("//"));
   if (isNpmrcKey) {
-    const trailingWs = body.match(/\s*$/)?.[0] ?? "";
     return `${leadingWs}${mask}${trailingWs}`;
+  }
+
+  const quote = body.charAt(0);
+
+  // Quoted scalar value ("...", '...', `...`) preserving quotes, auth scheme, commas, and legal trailing comments.
+  // Never treat quotes as delimiters in Java `.properties`, and reject arbitrary non-comment tails
+  // (e.g. `password=""real_secret` or `api_key="a"real_tail`) by masking the entire `rest`.
+  if (format !== "properties" && (quote === '"' || quote === "'" || quote === "`")) {
+    const allowEscape = quote !== "`" && !(format === "toml" && quote === "'");
+    const end = findClosingQuote(body, 0, quote, allowEscape);
+    if (end >= 1) {
+      const tail = body.slice(end + 1);
+      if (isAllowedQuotedScalarTail(tail, format)) {
+        if (end === 1) return rest; // Empty quoted string "" or '' with only whitespace/comma/comment tail
+        const inner = body.slice(1, end);
+        const authInside = inner.match(AUTH_SCHEME_VALUE_RE);
+        const maskedInner = authInside ? `${authInside[1]}${mask}` : mask;
+        return `${leadingWs}${quote}${maskedInner}${quote}${tail}`;
+      }
+      return `${leadingWs}${mask}${trailingWs}`;
+    }
+    const inner = body.slice(1);
+    const authInside = inner.match(AUTH_SCHEME_VALUE_RE);
+    const maskedInner = authInside ? `${authInside[1]}${mask}` : mask;
+    return `${leadingWs}${quote}${maskedInner}${quote}`;
   }
 
   // Unquoted scalar value: compute inline comment boundary safely without splitting inside values
