@@ -1,5 +1,6 @@
 import { useMemo } from "preact/hooks";
 import { computeUnifiedDiff, maskUnifiedDiff } from "../../../shared/diff.ts";
+import type { ConfigFormat } from "../../../shared/schema.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 
@@ -7,6 +8,7 @@ export function UnifiedDiffView({
   oldText,
   newText,
   fileName,
+  format,
   emptyLabel,
   maskSecrets = false,
   secretKeys,
@@ -16,6 +18,7 @@ export function UnifiedDiffView({
   oldText: string;
   newText: string;
   fileName: string;
+  format?: ConfigFormat;
   emptyLabel?: string;
   maskSecrets?: boolean;
   secretKeys?: readonly string[];
@@ -25,8 +28,8 @@ export function UnifiedDiffView({
   const { t } = useI18n();
   const rawDiff = useMemo(() => computeUnifiedDiff(oldText, newText, 3), [oldText, newText]);
   const maskedResult = useMemo(
-    () => maskUnifiedDiff(rawDiff, { secretKeys, secretValues }),
-    [rawDiff, secretKeys, secretValues],
+    () => maskUnifiedDiff(rawDiff, { format, oldText, newText, secretKeys, secretValues }),
+    [rawDiff, format, oldText, newText, secretKeys, secretValues],
   );
   const diff = maskSecrets ? maskedResult.diff : rawDiff;
   const hasSensitiveLines = maskedResult.maskedLineCount > 0 || Boolean(secretKeys?.length);

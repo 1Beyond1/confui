@@ -17,7 +17,15 @@ import type {
   SavePreview,
   SaveResult,
 } from "../shared/schema.ts";
-import { isForbiddenKey } from "../shared/validation.ts";
+import { maskDocumentLines } from "../shared/diff.ts";
+import {
+  collectSecretStrings,
+  containsSecretValuePattern,
+  isForbiddenKey,
+  SECRET_KEY_PATTERN,
+  setSafeProperty,
+  valueContainsSecret,
+} from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { HARD_FILE_LIMIT, currentVersion, hashText, readTextSnapshot } from "./files.ts";
 import { assertEditableSyntax, detectFormat, parseConfig, updateConfigText } from "./formats.ts";
@@ -690,7 +698,9 @@ export async function compareConfigFiles(
     const dst = targetLeaves.get(key);
     const segments = src?.segments ?? dst!.segments;
     const path = src?.path ?? dst!.path;
-    const secret = isSecretPath(segments);
+    const secret = isSecretPath(segments)
+      || (src !== undefined && valueContainsSecret(src.value))
+      || (dst !== undefined && valueContainsSecret(dst.value));
     const hasSource = src !== undefined;
     const hasTarget = dst !== undefined;
     let status: CompareEntryStatus;
@@ -805,18 +815,32 @@ export async function generateRedactedExport(
   const parsed = parseConfig(snapshot.text, format);
   const leaves = flattenConfigLeaves(parsed);
 
-  const extraPathKeys = new Set<string>(
-    extraSecretPaths
-      .filter((segments) => Array.isArray(segments) && segments.length > 0 && segments.length <= 32)
-      .map((segments) => pathKey(segments)),
+  const validExtraPaths = extraSecretPaths.filter(
+    (segments) => Array.isArray(segments) && segments.length > 0 && segments.length <= 32,
   );
+  const extraPathKeys = new Set<string>(validExtraPaths.map((segments) => pathKey(segments)));
+  const extraSecretKeys = new Set<string>();
+  const extraSecretValues = new Set<string>();
+  for (const segments of validExtraPaths) {
+    extraSecretKeys.add(formatPath(segments));
+    const leaf = segments.at(-1);
+    if (typeof leaf === "string" && leaf.trim()) extraSecretKeys.add(leaf);
+  }
 
   const redactChanges: ConfigChange[] = [];
   for (const [key, leaf] of leaves) {
-    if (!isSecretPath(leaf.segments) && !extraPathKeys.has(key)) continue;
+    const isMarkedSecret = isSecretPath(leaf.segments)
+      || extraPathKeys.has(key)
+      || validExtraPaths.some((prefix) => isStrictPrefix(prefix, leaf.segments));
     if (leaf.value === undefined || leaf.value === null || leaf.value === "") continue;
-    if (typeof leaf.value === "object") continue;
-    redactChanges.push({ segments: [...leaf.segments], value: "***" });
+    if (!isMarkedSecret && !valueContainsSecret(leaf.value)) continue;
+    if (isMarkedSecret) {
+      collectSecretStrings(leaf.value, extraSecretValues);
+    }
+    const redacted = redactStructuredValue(leaf.value, isMarkedSecret);
+    if (redacted.changed) {
+      redactChanges.push({ segments: [...leaf.segments], value: redacted.value });
+    }
   }
 
   let updatedText = snapshot.text;
@@ -824,11 +848,18 @@ export async function generateRedactedExport(
     try {
       updatedText = updateConfigText(snapshot.text, format, redactChanges).output;
     } catch {
-      // Fall back to pattern-based document masking if incremental patch fails.
+      // Fall back to line-aware document masking if incremental patch fails.
       updatedText = snapshot.text;
     }
   }
-  const content = maskDocumentSecrets(updatedText);
+  const eol = updatedText.includes("\r\n") ? "\r\n" : "\n";
+  const lineMasked = maskDocumentLines(updatedText, {
+    format,
+    secretKeys: [...extraSecretKeys],
+    secretValues: [...extraSecretValues],
+    mask: "***",
+  }).lines.join(eol);
+  const content = maskDocumentSecrets(lineMasked);
   const redactedCount = countChangedLines(snapshot.text, content);
 
   return {
@@ -1072,6 +1103,50 @@ function suggestRedactedFileName(fileName: string): string {
     return `${stem}.redacted${ext}`;
   }
   return `${fileName}.redacted`;
+}
+
+function redactStructuredValue(
+  value: unknown,
+  insideSecret: boolean,
+  depth = 0,
+): { value: unknown; changed: boolean } {
+  if (depth > 16 || value === undefined || value === null || value === "") {
+    return { value, changed: false };
+  }
+  if (typeof value === "string") {
+    if (insideSecret) {
+      return { value: "***", changed: value !== "***" };
+    }
+    if (containsSecretValuePattern(value)) {
+      const masked = maskDocumentSecrets(value);
+      return { value: masked, changed: masked !== value };
+    }
+    return { value, changed: false };
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return insideSecret ? { value: "***", changed: true } : { value, changed: false };
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const next = value.map((item) => {
+      const res = redactStructuredValue(item, insideSecret, depth + 1);
+      if (res.changed) changed = true;
+      return res.value;
+    });
+    return { value: changed ? next : value, changed };
+  }
+  if (typeof value === "object") {
+    let changed = false;
+    const next: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      const keySecret = insideSecret || SECRET_KEY_PATTERN.test(key);
+      const res = redactStructuredValue(item, keySecret, depth + 1);
+      if (res.changed) changed = true;
+      setSafeProperty(next, key, res.value);
+    }
+    return { value: changed ? next : value, changed };
+  }
+  return { value, changed: false };
 }
 
 function countChangedLines(before: string, after: string): number {

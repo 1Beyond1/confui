@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
+import { collectSecretsFromFields } from "../../../shared/diff.ts";
 import type { ConfigFormSchema, FieldSpec, SavePreview } from "../../../shared/schema.ts";
-import { SECRET_KEY_PATTERN } from "../../../shared/validation.ts";
+import { SECRET_KEY_PATTERN, valueContainsSecret } from "../../../shared/validation.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button, Modal } from "../ui.tsx";
@@ -35,28 +36,25 @@ export function SaveConfirmModal({
     setRevealSecrets(false);
   }, [savePreview]);
 
-  const { secretKeys, secretValues } = useMemo(() => {
-    const keys = new Set<string>();
-    const values = new Set<string>();
-    const pushValue = (value: unknown) => {
-      if (typeof value === "string" && value.length >= 6) values.add(value);
-    };
-    const secretPaths = new Set<string>();
-    for (const field of fields) {
-      if (!field.secret && field.type !== "secret") continue;
-      secretPaths.add(field.path);
-      keys.add(field.path);
-      const leaf = field.segments.at(-1);
-      if (typeof leaf === "string" && leaf.trim()) keys.add(leaf);
-      pushValue(field.value);
-    }
-    for (const change of savePreview.changes) {
-      if (!secretPaths.has(change.path)) continue;
-      pushValue(change.before);
-      pushValue(change.after);
-    }
-    return { secretKeys: [...keys], secretValues: [...values] };
-  }, [fields, savePreview.changes]);
+  const { secretKeys, secretValues } = useMemo(
+    () => collectSecretsFromFields(fields, savePreview.changes),
+    [fields, savePreview.changes],
+  );
+
+  const changeSecretFlags = useMemo(
+    () => savePreview.changes.map((change) => {
+      const field = fields.find((item) => item.path === change.path);
+      return Boolean(
+        field?.secret
+        || field?.type === "secret"
+        || SECRET_KEY_PATTERN.test(change.path)
+        || valueContainsSecret(change.before)
+        || valueContainsSecret(change.after),
+      );
+    }),
+    [fields, savePreview.changes],
+  );
+  const hasAnySecret = changeSecretFlags.some(Boolean) || secretKeys.length > 0 || secretValues.length > 0;
 
   return (
     <Modal
@@ -105,7 +103,7 @@ export function SaveConfirmModal({
             </button>
           )}
         </div>
-        {tab === "unified" && matchesActiveSchema && (
+        {(hasAnySecret || (tab === "unified" && matchesActiveSchema)) && (
           <button
             type="button"
             class="save-diff-secret-btn"
@@ -120,9 +118,10 @@ export function SaveConfirmModal({
 
       {tab === "fields" ? (
         <div class="diff-list">
-          {savePreview.changes.map((change) => {
+          {savePreview.changes.map((change, idx) => {
             const field = fields.find((item) => item.path === change.path);
-            const secret = field?.secret || field?.type === "secret" || SECRET_KEY_PATTERN.test(change.path);
+            const secret = changeSecretFlags[idx] === true;
+            const maskValue = secret && !revealSecrets;
             const kind = change.before === undefined
               ? "added"
               : change.after === undefined
@@ -143,9 +142,9 @@ export function SaveConfirmModal({
                   <code>{change.path}</code>
                 </div>
                 <div class="diff-values">
-                  <span>{secret && change.before !== undefined ? "••••••••" : formatDisplayValue(change.before, locale)}</span>
+                  <span>{maskValue && change.before !== undefined ? "••••••••" : formatDisplayValue(change.before, locale)}</span>
                   <Icon name="arrow-left" class="diff-arrow"/>
-                  <strong>{secret && change.after !== undefined ? "••••••••" : formatDisplayValue(change.after, locale)}</strong>
+                  <strong>{maskValue && change.after !== undefined ? "••••••••" : formatDisplayValue(change.after, locale)}</strong>
                 </div>
               </div>
             );
@@ -156,6 +155,7 @@ export function SaveConfirmModal({
           oldText={schema?.rawText ?? ""}
           newText={savePreview.output}
           fileName={savePreview.file}
+          format={savePreview.format}
           maskSecrets={!revealSecrets}
           secretKeys={secretKeys}
           secretValues={secretValues}

@@ -1,5 +1,6 @@
-import { useEffect, useState } from "preact/hooks";
-import type { RestoreBackupPreview } from "../../../shared/schema.ts";
+import { useEffect, useMemo, useState } from "preact/hooks";
+import { collectSecretsFromFields } from "../../../shared/diff.ts";
+import type { FieldSpec, RestoreBackupPreview } from "../../../shared/schema.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button, Modal } from "../ui.tsx";
@@ -7,11 +8,13 @@ import { UnifiedDiffView } from "./UnifiedDiffView.tsx";
 
 export function RestoreBackupModal({
   preview,
+  fields,
   restoring,
   onClose,
   onConfirm,
 }: {
   preview: RestoreBackupPreview;
+  fields?: readonly FieldSpec[];
   restoring: boolean;
   onClose: () => void;
   onConfirm: () => void;
@@ -21,6 +24,10 @@ export function RestoreBackupModal({
   useEffect(() => {
     setRevealSecrets(false);
   }, [preview]);
+  const { secretKeys, secretValues } = useMemo(
+    () => collectSecretsFromFields(fields ?? []),
+    [fields],
+  );
   const backupTime = new Date(preview.backupModifiedAt).toLocaleString(locale);
   const identical = preview.currentText === preview.backupText;
 
@@ -55,7 +62,10 @@ export function RestoreBackupModal({
           oldText={preview.currentText}
           newText={preview.backupText}
           fileName={`${preview.file} ← ${preview.file}.bak`}
+          format={preview.format}
           maskSecrets={!revealSecrets}
+          secretKeys={secretKeys}
+          secretValues={secretValues}
           onToggleRevealSecrets={() => setRevealSecrets((current) => !current)}
         />
       )}

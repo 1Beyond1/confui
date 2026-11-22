@@ -1,5 +1,13 @@
 import type { PathSegment } from "../../shared/schema.ts";
-import { setSafeProperty } from "../../shared/validation.ts";
+import {
+  AUTH_BEARER_BASIC_RE,
+  AUTH_DIGEST_RE,
+  JWT_TOKEN_RE,
+  setSafeProperty,
+  SLACK_WEBHOOK_RE,
+  URL_CREDENTIALS_RE,
+  VENDOR_TOKEN_RE,
+} from "../../shared/validation.ts";
 import { formatPath, pathKey } from "../paths.ts";
 import {
   groupForPath,
@@ -22,11 +30,15 @@ const MARKDOWN_TABLE_SECRET_RE = new RegExp(
   "gi",
 );
 const KEY_VALUE_SECRET_RE = new RegExp(
-  `(["']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*[=:]\\s*)("[^"]*"|'[^']*'|\\\`[^\\\`]*\\\`|[^\\s,;]+)`,
+  `(["']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*[=:]\\s*)("""(?:[^\\\\]|\\\\.)*?"""|'''[\\s\\S]*?'''|"[^"\\\\]*(?:\\\\.[^"\\\\]*)*"|'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'|\\\`[^\\\`]*\\\`|[^\\s,;}\\]]+)`,
   "gi",
 );
 const YAML_SECRET_BLOCK_RE = new RegExp(
   `^\\s*(?:-\\s+)?["']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*:\\s*[|>](?:[-+]?\\d*|\\d*[-+])?(?:\\s+#.*)?$`,
+  "i",
+);
+const TOML_SECRET_TRIPLE_START_RE = new RegExp(
+  `^(\\s*["']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*=\\s*)("""|''')(.*)$`,
   "i",
 );
 
@@ -142,19 +154,18 @@ function maskSecretsInternal(
 }
 
 export function maskDocumentSecrets(text: string): string {
-  return maskYamlSecretBlocks(text)
+  return maskTomlSecretBlocks(maskYamlSecretBlocks(text))
     .replace(
       /-----BEGIN ((?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----[\s\S]*?-----END \1-----/g,
       "-----BEGIN $1-----\n***\n-----END $1-----",
     )
-    // `@` is legal inside a userinfo password in several DSN spellings. Make
-    // the password part greedy up to the last `@` before the URL path, so a
-    // raw `@` cannot leave the tail of a password in AI context.
-    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^/\s]+)@/gi, "$1***:***@")
-    // Authorization headers are often written in README examples rather than
-    // as `token: value` pairs. Mask the whole credential for the common HTTP
-    // schemes before the generic key/value pass below.
-    .replace(/(\b(?:Bearer|Basic|Digest)\s+)[^\s"',;]+/gi, "$1***")
+    // `@` is legal inside a userinfo password in several DSN spellings, and the
+    // username may be empty (e.g. `redis://:pass@host:6379`).
+    .replace(URL_CREDENTIALS_RE, "$1***:***@")
+    // Authorization headers (Bearer / Basic / Digest) are often written in
+    // README examples or config values rather than as `token: value` pairs.
+    .replace(AUTH_DIGEST_RE, "$1***")
+    .replace(AUTH_BEARER_BASIC_RE, "$1***")
     // Markdown tables do not use `:` or `=` between a sensitive key and its
     // value, so the key/value expression below would otherwise miss them.
     .replace(MARKDOWN_TABLE_SECRET_RE, "$1***$3")
@@ -163,13 +174,54 @@ export function maskDocumentSecrets(text: string): string {
       (_match, prefix: string, value: string) => {
         if (/auth(?:orization)?/i.test(prefix) && /^(?:Bearer|Basic|Digest)$/i.test(value)) return `${prefix}${value}`;
         if (/^(?:[|>])(?:[-+]\d*|\d*[-+]?)?$/.test(value.trim())) return `${prefix}${value}`;
+        if (value === '""' || value === "''" || value === '""""""' || value === "''''''") return `${prefix}${value}`;
+        if (value.startsWith('"""') && value.endsWith('"""')) return `${prefix}"""***"""`;
+        if (value.startsWith("'''") && value.endsWith("'''")) return `${prefix}'''***'''`;
         const quote = value.at(0);
         return `${prefix}${quote === '"' || quote === "'" || quote === "`" ? `${quote}***${quote}` : "***"}`;
       },
     )
-    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]{12,}|sk_(?:live|test)_[A-Za-z0-9]{12,}|gsk_[A-Za-z0-9_-]{12,}|g2a_[A-Za-z0-9_-]{12,}|ark-[A-Za-z0-9-]{16,}|xai-[A-Za-z0-9_-]{12,}|pplx-[A-Za-z0-9_-]{12,}|gh[opsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|hf_[A-Za-z0-9]{12,}|r8_[A-Za-z0-9]{12,}|npm_[A-Za-z0-9]{20,})\b/g, "***")
-    .replace(/\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/gi, "https://hooks.slack.com/services/***")
-    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "***");
+    .replace(VENDOR_TOKEN_RE, "***")
+    .replace(SLACK_WEBHOOK_RE, "https://hooks.slack.com/services/***")
+    .replace(JWT_TOKEN_RE, "***");
+}
+
+/** Mask multi-line TOML triple-quoted secret strings (`"""..."""` / `'''...'''`). */
+function maskTomlSecretBlocks(text: string): string {
+  const lines = text.split(/\r?\n/);
+  let activeDelim: '"""' | "'''" | undefined;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (activeDelim) {
+      const closeIdx = line.indexOf(activeDelim);
+      if (closeIdx < 0) {
+        const indent = line.match(/^\s*/)?.[0] ?? "";
+        if (line.trim()) lines[index] = `${indent}***`;
+      } else {
+        const before = line.slice(0, closeIdx);
+        const after = line.slice(closeIdx + 3);
+        const maskedBefore = before.trim() ? `${before.match(/^\s*/)?.[0] ?? ""}***` : before;
+        lines[index] = `${maskedBefore}${activeDelim}${after}`;
+        activeDelim = undefined;
+      }
+      continue;
+    }
+    const startMatch = line.match(TOML_SECRET_TRIPLE_START_RE);
+    if (!startMatch) continue;
+    const [, prefix = "", delim = '"""', tail = ""] = startMatch;
+    if (delim !== '"""' && delim !== "'''") continue;
+    const closeIdx = tail.indexOf(delim);
+    if (closeIdx >= 0) {
+      const inner = tail.slice(0, closeIdx);
+      if (inner.length > 0) {
+        lines[index] = `${prefix}${delim}***${delim}${tail.slice(closeIdx + 3)}`;
+      }
+    } else {
+      activeDelim = delim;
+      lines[index] = tail.trim() ? `${prefix}${delim}***` : line;
+    }
+  }
+  return lines.join("\n");
 }
 
 /** Mask YAML literal/folded block values whose key is clearly sensitive. */

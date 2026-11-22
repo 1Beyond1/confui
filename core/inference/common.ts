@@ -74,7 +74,8 @@ export function candidatePath(segments: readonly PathSegment[]): string {
 }
 
 export function isSecretPath(segments: readonly PathSegment[]): boolean {
-  return segments.some((segment) =>
-    typeof segment === "string" && SECRET_KEY_PATTERN.test(segment),
-  );
+  if (segments.some((segment) => typeof segment === "string" && SECRET_KEY_PATTERN.test(segment))) {
+    return true;
+  }
+  return segments.length > 1 && SECRET_KEY_PATTERN.test(formatPath(segments));
 }

@@ -1143,6 +1143,7 @@ export function App() {
             {view === "editor" && schema && editorTab === "raw" && (
               <RawViewer
                 schema={schema}
+                fields={allFields}
                 focusLine={focusLineRequest?.file === schema.file ? focusLineRequest : undefined}
               />
             )}
@@ -1205,6 +1206,7 @@ export function App() {
         {restorePreview && (
           <RestoreBackupModal
             preview={restorePreview}
+            fields={schema?.file === restorePreview.file ? allFields : undefined}
             restoring={busy === "restore"}
             onClose={() => { if (busy !== "restore") setRestorePreview(undefined); }}
             onConfirm={() => void confirmRestoreBackup()}

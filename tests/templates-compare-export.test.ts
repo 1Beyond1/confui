@@ -126,7 +126,9 @@ describe("template initialization, multi-env compare/sync & redacted export", ()
     const tokenEntry = diff.entries.find((entry) => entry.path === "API_TOKEN");
     expect(tokenEntry).toMatchObject({ status: "different", secret: true });
     const redisEntry = diff.entries.find((entry) => entry.path === "REDIS_URL");
-    expect(redisEntry).toMatchObject({ status: "missing-in-target", secret: false });
+    expect(redisEntry).toMatchObject({ status: "missing-in-target", secret: true });
+    const logEntry = diff.entries.find((entry) => entry.path === "LOG_LEVEL");
+    expect(logEntry).toMatchObject({ status: "missing-in-target", secret: false });
 
     // Sync only LOG_LEVEL and REDIS_URL into .env
     const preview = await previewSyncFromFile(
@@ -202,5 +204,67 @@ describe("template initialization, multi-env compare/sync & redacted export", ()
     await expect(writeRedactedExport(root, ".env", ".env.example")).rejects.toMatchObject({
       code: "FILE_CONFLICT",
     });
+  });
+
+  it("redacts secret arrays, nested secret objects, value-pattern credentials, TOML triple-quotes and .properties continuations in compare and export", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-export-complex-"));
+    temporaryDirectories.push(root);
+    await Promise.all([
+      writeFile(
+        join(root, "app.json"),
+        JSON.stringify({
+          api_keys: ["plain-array-secret-1", "plain-array-secret-2"],
+          custom_endpoints: ["https://public.example.com", "redis://:my_pass@redis.local:6379"],
+          port: 3000,
+        }, null, 2) + "\n",
+        "utf8",
+      ),
+      writeFile(
+        join(root, "app.prod.json"),
+        JSON.stringify({
+          api_keys: ["prod-array-secret"],
+          custom_endpoints: ["redis://:prod_pass@redis.prod:6379"],
+          port: 8080,
+        }, null, 2) + "\n",
+        "utf8",
+      ),
+      writeFile(
+        join(root, "secrets.toml"),
+        'api_secret = """\ntoml-secret-a\ntoml-secret-b\n"""\nport = 8080\n',
+        "utf8",
+      ),
+      writeFile(
+        join(root, "app.properties"),
+        "db.password space-secret\nsmtp.pass = part1\\\n  part2\napp.name = demo\n",
+        "utf8",
+      ),
+    ]);
+
+    // Compare detects value-pattern secrets even under non-secret key name `custom_endpoints`
+    const cmp = await compareConfigFiles(root, "app.prod.json", "app.json");
+    expect(cmp.entries.find((e) => e.path === "custom_endpoints")).toMatchObject({ secret: true });
+    expect(cmp.entries.find((e) => e.path === "api_keys")).toMatchObject({ secret: true });
+    expect(cmp.entries.find((e) => e.path === "port")).toMatchObject({ secret: false });
+
+    // Export redacts arrays and value-pattern array items in JSON
+    const jsonExport = await generateRedactedExport(root, "app.json");
+    expect(jsonExport.content).not.toContain("plain-array-secret-1");
+    expect(jsonExport.content).not.toContain("plain-array-secret-2");
+    expect(jsonExport.content).not.toContain("my_pass");
+    expect(jsonExport.content).toContain("https://public.example.com");
+    expect(jsonExport.content).toContain("3000");
+
+    // Export redacts TOML triple-quoted multi-line secrets
+    const tomlExport = await generateRedactedExport(root, "secrets.toml");
+    expect(tomlExport.content).not.toContain("toml-secret-a");
+    expect(tomlExport.content).not.toContain("toml-secret-b");
+    expect(tomlExport.content).toContain("port = 8080");
+
+    // Export redacts .properties whitespace-separated and backslash-continued secrets
+    const propExport = await generateRedactedExport(root, "app.properties");
+    expect(propExport.content).not.toContain("space-secret");
+    expect(propExport.content).not.toContain("part1");
+    expect(propExport.content).not.toContain("part2");
+    expect(propExport.content).toContain("app.name = demo");
   });
 });

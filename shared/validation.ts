@@ -35,35 +35,145 @@ export const SECRET_KEY_FRAGMENT = [
   "passwd",
   "pwd",
   "passphrase",
+  "passcode",
+  "(?:smtp|mail|db|redis|mongo(?:db)?|mysql|postgres(?:ql)?|pg|amqp|rabbitmq|kafka|proxy|ftp|ldap|ssh|admin|root|user|basic|vault|keystore|truststore)[\\s_.-]?pass",
   "secret",
   "token",
-  "api[\\s_-]?key",
-  "private[\\s_-]?key",
-  "app[\\s_-]?key",
-  "master[\\s_-]?key",
-  "encryption[\\s_-]?key",
-  "cipher[\\s_-]?key",
-  "hmac[\\s_-]?key",
-  "aes[\\s_-]?key",
-  "ssh[\\s_-]?key",
-  "tls[\\s_-]?key",
-  "ssl[\\s_-]?key",
+  "bearer",
+  "api[\\s_.-]?key",
+  "private[\\s_.-]?(?:key|pem)",
+  "pem[\\s_.-]?key",
+  "cert[\\s_.-]?key",
+  "app[\\s_.-]?key",
+  "master[\\s_.-]?key",
+  "encryption[\\s_.-]?key",
+  "cipher[\\s_.-]?key",
+  "hmac[\\s_.-]?key",
+  "aes[\\s_.-]?key",
+  "ssh[\\s_.-]?key",
+  "tls[\\s_.-]?key",
+  "ssl[\\s_.-]?key",
+  "oauth[\\s_.-]?key",
+  "service[\\s_.-]?account[\\s_.-]?key",
   "credential",
   "auth(?:orization)?",
   "cookie",
   "jwt",
-  "session[\\s_-]?key",
-  "signing[\\s_-]?key",
-  "client[\\s_-]?secret",
-  "access[\\s_-]?key",
-  "database[\\s_-]?url",
-  "connection[\\s_-]?string",
+  "session[\\s_.-]?key",
+  "signing[\\s_.-]?key",
+  "client[\\s_.-]?secret",
+  "access[\\s_.-]?key",
+  "(?:database|db|redis|mongo(?:db)?|postgres(?:ql)?|mysql|mariadb|amqp|rabbitmq|kafka|broker|jdbc|sqlalchemy)[\\s_.-]?(?:url|uri)",
+  "connection[\\s_.-]?string",
   "dsn",
-  "webhook[\\s_-]?(?:url|secret)",
-  "(?:openai|anthropic|google|gemini|stripe|slack)[\\s_-]?key",
+  "webhook[\\s_.-]?(?:url|secret)",
+  "(?:openai|anthropic|google|gemini|stripe|slack|aws|gcp|azure|github|gitlab|twilio|sendgrid|mailgun|cloudflare|datadog|algolia|firebase|supabase|deepseek|openrouter|groq|mistral|cohere)[\\s_.-]?(?:key|pat)",
 ].join("|");
 
 export const SECRET_KEY_PATTERN = new RegExp(SECRET_KEY_FRAGMENT, "i");
+
+export const PEM_BEGIN_RE = /-----BEGIN (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----/;
+export const PEM_END_RE = /-----END (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----/;
+export const URL_CREDENTIALS_RE = /(\b[a-z][a-z0-9+.-]*:\/\/)([^/\s:@"'<>]*):([^/\s"'<>]+)@/gi;
+export const AUTH_BEARER_BASIC_RE = /(\b(?:Bearer|Basic)\s+)[^\s"',;#]+/gi;
+const DIGEST_VALUE_FRAGMENT = `(?:\\\\"(?:[^"\\\\]|\\\\(?!").)*\\\\"|"(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[^\\s,;#"']+)`;
+const DIGEST_PARAM_FRAGMENT = `[A-Za-z0-9_-]+\\s*=\\s*${DIGEST_VALUE_FRAGMENT}`;
+export const AUTH_DIGEST_RE = new RegExp(
+  `(\\bDigest\\s+)(?:${DIGEST_PARAM_FRAGMENT}(?:\\s*,\\s*${DIGEST_PARAM_FRAGMENT})*|[^\\s"',;#]+)`,
+  "gi",
+);
+export const VENDOR_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]{12,}|sk_(?:live|test)_[A-Za-z0-9]{12,}|gsk_[A-Za-z0-9_-]{12,}|g2a_[A-Za-z0-9_-]{12,}|ark-[A-Za-z0-9-]{16,}|xai-[A-Za-z0-9_-]{12,}|pplx-[A-Za-z0-9_-]{12,}|gh[opsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|hf_[A-Za-z0-9]{12,}|r8_[A-Za-z0-9]{12,}|npm_[A-Za-z0-9]{20,})\b/g;
+export const SLACK_WEBHOOK_RE = /\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/gi;
+export const JWT_TOKEN_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+
+// Non-global copies for stateless `.test()` calls.
+const URL_CREDENTIALS_TEST_RE = new RegExp(URL_CREDENTIALS_RE.source, "i");
+const AUTH_BEARER_BASIC_TEST_RE = new RegExp(AUTH_BEARER_BASIC_RE.source, "i");
+const AUTH_DIGEST_TEST_RE = new RegExp(AUTH_DIGEST_RE.source, "i");
+const VENDOR_TOKEN_TEST_RE = new RegExp(VENDOR_TOKEN_RE.source);
+const SLACK_WEBHOOK_TEST_RE = new RegExp(SLACK_WEBHOOK_RE.source, "i");
+const JWT_TOKEN_TEST_RE = new RegExp(JWT_TOKEN_RE.source);
+
+/** Returns true if a string contains a recognized credential/key/token pattern. */
+export function containsSecretValuePattern(text: string): boolean {
+  if (!text) return false;
+  return PEM_BEGIN_RE.test(text)
+    || URL_CREDENTIALS_TEST_RE.test(text)
+    || AUTH_BEARER_BASIC_TEST_RE.test(text)
+    || AUTH_DIGEST_TEST_RE.test(text)
+    || VENDOR_TOKEN_TEST_RE.test(text)
+    || SLACK_WEBHOOK_TEST_RE.test(text)
+    || JWT_TOKEN_TEST_RE.test(text);
+}
+
+/**
+ * Recursively inspects a scalar, array, or object value and returns true if
+ * any nested key name matches `SECRET_KEY_PATTERN` or any nested string matches
+ * a credential pattern (DSN with password, PEM key, Bearer/Digest, JWT, vendor
+ * token, Slack webhook).
+ */
+export function valueContainsSecret(value: unknown, maxDepth = 16, maxNodes = 2_000): boolean {
+  let visited = 0;
+  function walk(current: unknown, depth: number): boolean {
+    if (visited >= maxNodes || depth > maxDepth) return false;
+    visited += 1;
+    if (typeof current === "string") return containsSecretValuePattern(current);
+    if (current === null || typeof current !== "object") return false;
+    if (Array.isArray(current)) {
+      for (const item of current) {
+        if (walk(item, depth + 1)) return true;
+      }
+      return false;
+    }
+    for (const [key, item] of Object.entries(current as Record<string, unknown>)) {
+      if (SECRET_KEY_PATTERN.test(key) && item !== undefined && item !== null && item !== "") {
+        return true;
+      }
+      if (walk(item, depth + 1)) return true;
+    }
+    return false;
+  }
+  return walk(value, 0);
+}
+
+/**
+ * Recursively extracts string secret candidates (including individual lines of
+ * multi-line secrets) from scalars, arrays, and nested objects.
+ */
+export function collectSecretStrings(
+  value: unknown,
+  out: Set<string>,
+  minLength = 6,
+  maxDepth = 16,
+  maxNodes = 2_000,
+): void {
+  let visited = 0;
+  function walk(current: unknown, depth: number): void {
+    if (visited >= maxNodes || depth > maxDepth) return;
+    visited += 1;
+    if (typeof current === "string") {
+      if (current.length >= minLength) out.add(current);
+      if (current.includes("\n") || current.includes("\r")) {
+        for (const line of current.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (trimmed.length >= minLength && !PEM_BEGIN_RE.test(trimmed) && !PEM_END_RE.test(trimmed)) {
+            out.add(trimmed);
+          }
+        }
+      }
+      return;
+    }
+    if (current === null || typeof current !== "object") return;
+    if (Array.isArray(current)) {
+      for (const item of current) walk(item, depth + 1);
+      return;
+    }
+    for (const item of Object.values(current as Record<string, unknown>)) {
+      walk(item, depth + 1);
+    }
+  }
+  walk(value, 0);
+}
 
 export function isSafePathSegment(segment: unknown): segment is PathSegment {
   if (typeof segment === "number") return Number.isSafeInteger(segment) && segment >= 0;

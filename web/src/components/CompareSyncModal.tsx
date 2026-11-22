@@ -7,6 +7,7 @@ import type {
   PathSegment,
   SavePreview,
 } from "../../../shared/schema.ts";
+import { SECRET_KEY_PATTERN, valueContainsSecret } from "../../../shared/validation.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { Button, Modal } from "../ui.tsx";
@@ -331,7 +332,13 @@ export function CompareSyncModal({
                 const key = JSON.stringify(entry.segments);
                 const syncable = entry.status === "missing-in-target" || entry.status === "different";
                 const checked = selected.has(key);
-                const maskVal = entry.secret && !revealSecrets;
+                const isSecret = Boolean(
+                  entry.secret
+                  || SECRET_KEY_PATTERN.test(entry.path)
+                  || valueContainsSecret(entry.sourceValue)
+                  || valueContainsSecret(entry.targetValue),
+                );
+                const maskVal = isSecret && !revealSecrets;
                 const sourceText = !entry.hasSource
                   ? t("common.unset")
                   : maskVal
@@ -358,7 +365,7 @@ export function CompareSyncModal({
                     <div class="compare-row__key">
                       <div class="diff-item__head">
                         <span class={`diff-badge compare-badge--${entry.status}`}>{statusLabel(entry.status)}</span>
-                        {entry.secret && (
+                        {isSecret && (
                           <span class="compare-secret-tag" title={t("diff.secretsMaskedHint")}>
                             <Icon name="shield" size={11}/>
                           </span>

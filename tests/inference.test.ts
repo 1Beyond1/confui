@@ -173,6 +173,26 @@ describe("inference pipeline", () => {
     const maskedPrototypeKey = maskSecrets(prototypeKey) as Record<string, unknown>;
     expect(Object.prototype.hasOwnProperty.call(maskedPrototypeKey, "__proto__")).toBe(true);
     expect((maskedPrototypeKey.__proto__ as Record<string, unknown>).token).toBe("***");
+
+    // Empty-username DSN, REDIS_URL, SMTP_PASS, Digest auth header & TOML triple-quoted secrets
+    const extendedDoc = [
+      "cache=redis://:my_pass@host:6379",
+      "REDIS_URL=redis://:redis_secret@cache.internal:6379/0",
+      "SMTP_PASS=mail-secret-123",
+      'Authorization: Digest username="Mufasa", realm="test", nonce="abc", response="6629fae4"',
+      'api_secret = """toml-inline-secret"""',
+      'pem_secret = """\ntoml-ml-line-1\ntoml-ml-line-2\n"""',
+    ].join("\n");
+    const maskedExtended = maskDocumentSecrets(extendedDoc);
+    expect(maskedExtended).toContain("cache=redis://***:***@host:6379");
+    expect(maskedExtended).not.toContain("my_pass");
+    expect(maskedExtended).not.toContain("redis_secret");
+    expect(maskedExtended).not.toContain("mail-secret-123");
+    expect(maskedExtended).not.toContain("Mufasa");
+    expect(maskedExtended).not.toContain("6629fae4");
+    expect(maskedExtended).not.toContain("toml-inline-secret");
+    expect(maskedExtended).not.toContain("toml-ml-line-1");
+    expect(maskedExtended).not.toContain("toml-ml-line-2");
   });
 
   it("masks prefixed keys, expanded credential keywords, PGP private keys and schema-marked secret paths", async () => {

@@ -1,10 +1,30 @@
-import { SECRET_KEY_FRAGMENT } from "./validation.ts";
+import type { ConfigFormat, FieldSpec, SaveChangePreview } from "./schema.ts";
+import {
+  AUTH_BEARER_BASIC_RE,
+  AUTH_DIGEST_RE,
+  collectSecretStrings,
+  containsSecretValuePattern,
+  JWT_TOKEN_RE,
+  PEM_BEGIN_RE,
+  PEM_END_RE,
+  SECRET_KEY_FRAGMENT,
+  SECRET_KEY_PATTERN,
+  SLACK_WEBHOOK_RE,
+  URL_CREDENTIALS_RE,
+  VENDOR_TOKEN_RE,
+} from "./validation.ts";
 
 export type DiffLineKind = "context" | "add" | "remove";
 
 export const DIFF_SECRET_MASK = "••••••••";
 
 export interface MaskUnifiedDiffOptions {
+  /** Optional format hint (e.g. `properties`, `toml`, `yaml`, `jsonc`) for format-accurate masking. */
+  format?: ConfigFormat;
+  /** Full original text before hunk splitting (used to precompute multi-line secret state). */
+  oldText?: string;
+  /** Full updated text before hunk splitting (used to precompute multi-line secret state). */
+  newText?: string;
   /** Extra key names (e.g. leaf names or paths of schema-marked secret fields). */
   secretKeys?: readonly string[];
   /** Explicit known secret values (length >= 6) used as fallback redaction for multi-line values. */
@@ -15,6 +35,12 @@ export interface MaskUnifiedDiffOptions {
 
 export interface MaskedUnifiedDiffResult {
   diff: UnifiedDiffResult;
+  maskedLineCount: number;
+}
+
+export interface MaskedDocumentLinesResult {
+  lines: string[];
+  maskedLineFlags: boolean[];
   maskedLineCount: number;
 }
 
@@ -43,6 +69,13 @@ export interface UnifiedDiffResult {
 const MAX_LCS_CELLS = 2_500_000;
 
 /**
+ * Remembers the full source texts that produced a `UnifiedDiffResult` without
+ * polluting its serializable shape, so `maskUnifiedDiff(diff)` always has
+ * complete multi-line secret state even across truncated hunks.
+ */
+const diffSourceTexts = new WeakMap<UnifiedDiffResult, { oldText: string; newText: string }>();
+
+/**
  * Computes line-level unified diff hunks between two texts using LCS with
  * common prefix/suffix trimming and a safe fallback for very large edits.
  */
@@ -51,9 +84,13 @@ export function computeUnifiedDiff(
   newText: string,
   contextLines = 3,
 ): UnifiedDiffResult {
-  if (oldText === newText) return { hunks: [], added: 0, removed: 0, truncated: false };
-  const oldLines = splitLines(oldText);
-  const newLines = splitLines(newText);
+  if (oldText === newText) {
+    const empty: UnifiedDiffResult = { hunks: [], added: 0, removed: 0, truncated: false };
+    diffSourceTexts.set(empty, { oldText, newText });
+    return empty;
+  }
+  const oldLines = splitDiffLines(oldText);
+  const newLines = splitDiffLines(newText);
 
   let prefix = 0;
   const minLen = Math.min(oldLines.length, newLines.length);
@@ -103,7 +140,9 @@ export function computeUnifiedDiff(
   }
 
   const hunks = groupIntoHunks(ops, contextLines);
-  return { hunks, added, removed, truncated };
+  const result: UnifiedDiffResult = { hunks, added, removed, truncated };
+  diffSourceTexts.set(result, { oldText, newText });
+  return result;
 }
 
 export function formatUnifiedDiffText(
@@ -125,7 +164,7 @@ export function formatUnifiedDiffText(
   return out.join("\n");
 }
 
-function splitLines(text: string): string[] {
+function splitDiffLines(text: string): string[] {
   if (!text) return [];
   const normalized = text.replace(/\r\n/g, "\n");
   const lines = normalized.split("\n");
@@ -224,30 +263,50 @@ function groupIntoHunks(ops: readonly DiffLine[], contextLines: number): DiffHun
   });
 }
 
-const DEFAULT_SECRET_KEY_RE = new RegExp(SECRET_KEY_FRAGMENT, "i");
-const PEM_BEGIN_RE = /-----BEGIN (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----/;
-const PEM_END_RE = /-----END (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----/;
-const URL_CREDENTIALS_RE = /(\b[a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^/\s]+)@/gi;
-const AUTH_SCHEME_RE = /(\b(?:Bearer|Basic|Digest)\s+)[^\s"',;]+/gi;
 const INLINE_KEY_VALUE_SECRET_RE = new RegExp(
-  `(["']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*[=:]\\s*)("[^"\\\\]*(?:\\\\.[^"\\\\]*)*"|'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'|\`[^\`]*\`|[^\\s,;}\\]#]+)`,
+  `(["']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*[=:]\\s*)("""(?:[^\\\\]|\\\\.)*?"""|'''[\\s\\S]*?'''|"[^"\\\\]*(?:\\\\.[^"\\\\]*)*"|'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'|\`[^\`]*\`|[^\\s,;}\\]]+)`,
   "gi",
 );
-const VENDOR_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]{12,}|sk_(?:live|test)_[A-Za-z0-9]{12,}|gsk_[A-Za-z0-9_-]{12,}|g2a_[A-Za-z0-9_-]{12,}|ark-[A-Za-z0-9-]{16,}|xai-[A-Za-z0-9_-]{12,}|pplx-[A-Za-z0-9_-]{12,}|gh[opsu]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|hf_[A-Za-z0-9]{12,}|r8_[A-Za-z0-9]{12,}|npm_[A-Za-z0-9]{20,})\b/g;
-const SLACK_WEBHOOK_RE = /\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/gi;
-const JWT_TOKEN_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+const INLINE_SECRET_CONTAINER_RE = new RegExp(
+  `(["']?[\\w.-]*(?:${SECRET_KEY_FRAGMENT})[\\w.-]*["']?\\s*[=:]\\s*)([\\[{])`,
+  "gi",
+);
+const INLINE_PEM_SINGLE_LINE_RE = /(-----BEGIN (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----)([\s\S]*?)(-----END (?:(?:(?:RSA|EC|OPENSSH|DSA|PGP) )?(?:ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----)/g;
 const YAML_BLOCK_SCALAR_RE = /^[|>](?:[-+]?\d*|\d*[-+])?(?:\s+#.*)?$/;
 const KV_LINE_RE = /^(\s*(?:export\s+|-\s+)?)((?:"[^"]*"|'[^']*'|[^:=#\r\n]+?))(\s*[:=]\s*)(.*)$/;
+const PROPERTIES_KV_LINE_RE = /^(\s*)((?:\\.|[^:=\s#!])+?)(\s*(?:[:=]|\s)\s*)(.*)$/;
+const WHITESPACE_SECRET_KV_RE = /^(\s*)((?:\\.|[A-Za-z_][\w.-]*))(\s+)(\S.*)$/;
+const YAML_SEQ_ITEM_RE = /^(\s*-\s+)(.*)$/;
+const COMMENT_LINE_RE = /^\s*(?:#|;|\/\/|\/\*|\*\/)/;
 
-/**
- * Redacts sensitive values inside computed Unified Diff hunks AFTER diffing, so
- * changed secret lines remain visible as `-` / `+` hunks without exposing
- * plaintext credentials during screen sharing or review.
- */
-export function maskUnifiedDiff(
-  diff: UnifiedDiffResult,
-  options: MaskUnifiedDiffOptions = {},
-): MaskedUnifiedDiffResult {
+interface MaskConfig {
+  mask: string;
+  format?: ConfigFormat;
+  extraKeys: ReadonlySet<string>;
+  extraValues: readonly string[];
+}
+
+interface DocumentMaskState {
+  inPemBlock: boolean;
+  yamlBlockIndent: number | undefined;
+  yamlSecretSubtreeIndent: number | undefined;
+  tomlTripleQuote: '"""' | "'''" | undefined;
+  secretContainerStack: Array<"array" | "object">;
+  inBackslashContinuation: boolean;
+}
+
+function createInitialState(): DocumentMaskState {
+  return {
+    inPemBlock: false,
+    yamlBlockIndent: undefined,
+    yamlSecretSubtreeIndent: undefined,
+    tomlTripleQuote: undefined,
+    secretContainerStack: [],
+    inBackslashContinuation: false,
+  };
+}
+
+function buildMaskConfig(options: MaskUnifiedDiffOptions): MaskConfig {
   const mask = options.mask ?? DIFF_SECRET_MASK;
   const extraKeys = new Set(
     (options.secretKeys ?? [])
@@ -256,21 +315,163 @@ export function maskUnifiedDiff(
   );
   const extraValues = [...new Set((options.secretValues ?? []).filter((v) => v.length >= 6))]
     .sort((left, right) => right.length - left.length);
+  return { mask, format: options.format, extraKeys, extraValues };
+}
 
+/**
+ * Recursively collects schema-marked and nested secret key names and string
+ * values (scalars, arrays, nested objects, and multi-line sub-lines) from
+ * `FieldSpec` lists and optional `SaveChangePreview` entries.
+ */
+export function collectSecretsFromFields(
+  fields: readonly FieldSpec[],
+  changes?: readonly SaveChangePreview[],
+): { secretKeys: string[]; secretValues: string[] } {
+  const keys = new Set<string>();
+  const values = new Set<string>();
+  const secretPaths = new Set<string>();
+
+  function collectNested(value: unknown, insideSecret: boolean, depth = 0): void {
+    if (depth > 16 || value === undefined || value === null) return;
+    if (typeof value === "string") {
+      if (insideSecret || containsSecretValuePattern(value)) {
+        collectSecretStrings(value, values);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      if (insideSecret) {
+        collectSecretStrings(value, values);
+        return;
+      }
+      for (const item of value) collectNested(item, false, depth + 1);
+      return;
+    }
+    if (typeof value === "object") {
+      for (const [k, item] of Object.entries(value as Record<string, unknown>)) {
+        const keySecret = insideSecret || SECRET_KEY_PATTERN.test(k);
+        if (keySecret && k.trim()) keys.add(k);
+        collectNested(item, keySecret, depth + 1);
+      }
+    }
+  }
+
+  for (const field of fields) {
+    const isFieldSecret = Boolean(field.secret || field.type === "secret" || SECRET_KEY_PATTERN.test(field.path));
+    if (isFieldSecret) {
+      secretPaths.add(field.path);
+      keys.add(field.path);
+      const leaf = field.segments.at(-1);
+      if (typeof leaf === "string" && leaf.trim()) keys.add(leaf);
+    }
+    collectNested(field.value, isFieldSecret);
+  }
+
+  for (const change of changes ?? []) {
+    const isChangeSecret = secretPaths.has(change.path) || SECRET_KEY_PATTERN.test(change.path);
+    if (isChangeSecret) {
+      keys.add(change.path);
+      const lastSegment = change.path.split(".").at(-1)?.trim();
+      if (lastSegment) keys.add(lastSegment);
+    }
+    collectNested(change.before, isChangeSecret);
+    collectNested(change.after, isChangeSecret);
+  }
+
+  return { secretKeys: [...keys], secretValues: [...values] };
+}
+
+/**
+ * Masks all lines of a complete configuration document in a single linear pass,
+ * preserving multi-line secret state (YAML block scalars, YAML secret subtrees,
+ * PEM private key blocks, TOML triple-quoted strings, multi-line JSON/TOML
+ * secret arrays/objects, and `.properties` backslash continuations).
+ */
+export function maskDocumentLines(
+  text: string,
+  options: MaskUnifiedDiffOptions = {},
+): MaskedDocumentLinesResult {
+  const config = buildMaskConfig(options);
+  const rawLines = text.replace(/\r\n/g, "\n").split("\n");
+  const state = createInitialState();
+  const maskedLines: string[] = new Array(rawLines.length);
+  const maskedLineFlags: boolean[] = new Array(rawLines.length);
+  let maskedLineCount = 0;
+
+  for (let i = 0; i < rawLines.length; i += 1) {
+    const rawLine = rawLines[i] ?? "";
+    const result = maskLineWithState(rawLine, state, config);
+    maskedLines[i] = result.text;
+    maskedLineFlags[i] = result.masked;
+    if (result.masked) maskedLineCount += 1;
+  }
+
+  return { lines: maskedLines, maskedLineFlags, maskedLineCount };
+}
+
+/**
+ * Redacts sensitive values inside computed Unified Diff hunks AFTER diffing, so
+ * changed secret lines remain visible as `-` / `+` hunks without exposing
+ * plaintext credentials during screen sharing or review.
+ *
+ * Precomputes multi-line secret state across the complete `oldText` and
+ * `newText` BEFORE mapping hunk lines, eliminating cross-hunk truncation leaks.
+ */
+export function maskUnifiedDiff(
+  diff: UnifiedDiffResult,
+  options: MaskUnifiedDiffOptions = {},
+): MaskedUnifiedDiffResult {
+  const sources = diffSourceTexts.get(diff);
+  const oldText = options.oldText ?? sources?.oldText;
+  const newText = options.newText ?? sources?.newText;
+
+  if (oldText !== undefined && newText !== undefined) {
+    const oldMasked = maskDocumentLines(oldText, options);
+    const newMasked = maskDocumentLines(newText, options);
+    let maskedLineCount = 0;
+
+    const hunks: DiffHunk[] = diff.hunks.map((hunk) => {
+      const lines = hunk.lines.map((line) => {
+        let nextText = line.text;
+        let wasMasked = false;
+        if (line.kind === "remove" && line.oldLine !== undefined && line.oldLine >= 1 && line.oldLine <= oldMasked.lines.length) {
+          nextText = oldMasked.lines[line.oldLine - 1]!;
+          wasMasked = oldMasked.maskedLineFlags[line.oldLine - 1] === true;
+        } else if (line.kind === "add" && line.newLine !== undefined && line.newLine >= 1 && line.newLine <= newMasked.lines.length) {
+          nextText = newMasked.lines[line.newLine - 1]!;
+          wasMasked = newMasked.maskedLineFlags[line.newLine - 1] === true;
+        } else if (line.kind === "context") {
+          const oldIdx = line.oldLine !== undefined ? line.oldLine - 1 : -1;
+          const newIdx = line.newLine !== undefined ? line.newLine - 1 : -1;
+          const oldWasMasked = oldIdx >= 0 && oldIdx < oldMasked.maskedLineFlags.length && oldMasked.maskedLineFlags[oldIdx] === true;
+          const newWasMasked = newIdx >= 0 && newIdx < newMasked.maskedLineFlags.length && newMasked.maskedLineFlags[newIdx] === true;
+          if (oldWasMasked) {
+            nextText = oldMasked.lines[oldIdx]!;
+            wasMasked = true;
+          } else if (newWasMasked) {
+            nextText = newMasked.lines[newIdx]!;
+            wasMasked = true;
+          }
+        }
+        if (wasMasked) maskedLineCount += 1;
+        return nextText === line.text ? line : { ...line, text: nextText };
+      });
+      return { ...hunk, lines };
+    });
+
+    return {
+      diff: { ...diff, hunks },
+      maskedLineCount,
+    };
+  }
+
+  // Fallback for synthetic UnifiedDiffResult without backing full texts
+  const config = buildMaskConfig(options);
   let maskedLineCount = 0;
   const hunks: DiffHunk[] = diff.hunks.map((hunk) => {
-    let yamlBlockIndent: number | undefined;
-    let inPemBlock = false;
+    const state = createInitialState();
     const lines = hunk.lines.map((line) => {
-      const result = maskDiffLine(line.text, {
-        mask,
-        extraKeys,
-        extraValues,
-        yamlBlockIndent,
-        inPemBlock,
-      });
-      yamlBlockIndent = result.yamlBlockIndent;
-      inPemBlock = result.inPemBlock;
+      const result = maskLineWithState(line.text, state, config);
       if (result.masked) maskedLineCount += 1;
       return result.text === line.text ? line : { ...line, text: result.text };
     });
@@ -283,139 +484,604 @@ export function maskUnifiedDiff(
   };
 }
 
-interface LineMaskContext {
-  mask: string;
-  extraKeys: ReadonlySet<string>;
-  extraValues: readonly string[];
-  yamlBlockIndent: number | undefined;
-  inPemBlock: boolean;
-}
-
-function maskDiffLine(
+function maskLineWithState(
   text: string,
-  context: LineMaskContext,
-): { text: string; masked: boolean; yamlBlockIndent: number | undefined; inPemBlock: boolean } {
-  const { mask, extraKeys, extraValues } = context;
-  let { yamlBlockIndent, inPemBlock } = context;
+  state: DocumentMaskState,
+  config: MaskConfig,
+): { text: string; masked: boolean } {
+  const { mask, format, extraKeys, extraValues } = config;
+  const indent = text.match(/^\s*/)?.[0] ?? "";
+  const indentLen = indent.length;
 
-  if (PEM_BEGIN_RE.test(text)) {
-    return { text, masked: false, yamlBlockIndent: undefined, inPemBlock: true };
-  }
-  if (PEM_END_RE.test(text)) {
-    return { text, masked: false, yamlBlockIndent: undefined, inPemBlock: false };
-  }
-  if (inPemBlock) {
-    const indent = text.match(/^\s*/)?.[0] ?? "";
-    const maskedText = text.trim() ? `${indent}${mask}` : text;
-    return { text: maskedText, masked: maskedText !== text, yamlBlockIndent: undefined, inPemBlock: true };
-  }
-
-  const indentLen = text.match(/^\s*/)?.[0].length ?? 0;
-  if (yamlBlockIndent !== undefined && text.trim()) {
-    if (indentLen > yamlBlockIndent) {
-      const maskedText = `${text.slice(0, indentLen)}${mask}`;
-      return { text: maskedText, masked: maskedText !== text, yamlBlockIndent, inPemBlock };
+  // 1. Active PEM private key block
+  const hasPemBegin = PEM_BEGIN_RE.test(text);
+  const hasPemEnd = PEM_END_RE.test(text);
+  if (hasPemBegin && !hasPemEnd) {
+    state.inPemBlock = true;
+    const match = text.match(PEM_BEGIN_RE);
+    if (match && match.index !== undefined) {
+      const endOfHeader = match.index + match[0].length;
+      const tail = text.slice(endOfHeader);
+      if (tail.trim()) {
+        const maskedText = `${text.slice(0, endOfHeader)}${mask}`;
+        return { text: maskedText, masked: maskedText !== text };
+      }
     }
-    yamlBlockIndent = undefined;
+    return { text, masked: false };
+  }
+  if (state.inPemBlock) {
+    if (hasPemEnd) {
+      state.inPemBlock = false;
+      const match = text.match(PEM_END_RE);
+      if (match && match.index !== undefined && text.slice(0, match.index).trim()) {
+        const maskedText = `${indent}${mask}${text.slice(match.index)}`;
+        return { text: maskedText, masked: maskedText !== text };
+      }
+      return { text, masked: false };
+    }
+    const maskedText = text.trim() ? `${indent}${mask}` : text;
+    return { text: maskedText, masked: maskedText !== text };
+  }
+
+  // 2. Active TOML multi-line triple-quoted secret string
+  if (state.tomlTripleQuote) {
+    const delim = state.tomlTripleQuote;
+    const closing = findClosingTripleQuote(text, 0, delim);
+    if (!closing) {
+      const maskedText = text.trim() ? `${indent}${mask}` : text;
+      return { text: maskedText, masked: maskedText !== text };
+    }
+    state.tomlTripleQuote = undefined;
+    const before = text.slice(0, closing.closeStart);
+    const after = text.slice(closing.closeEnd);
+    const maskedBefore = before.trim() ? `${before.match(/^\s*/)?.[0] ?? ""}${mask}` : before;
+    let maskedAfter = after;
+    if (state.secretContainerStack.length > 0 && after) {
+      const container = maskSecretContainerLine(after, mask, state.secretContainerStack, format);
+      state.secretContainerStack = container.nextStack;
+      if (container.openedTripleQuote) state.tomlTripleQuote = container.openedTripleQuote;
+      maskedAfter = container.text;
+    }
+    const combined = applyFallbackRedactions(`${maskedBefore}${delim}${maskedAfter}`, mask, extraValues);
+    return { text: combined, masked: combined !== text };
+  }
+
+  // 3. Active `.properties` / backslash line continuation under a secret key
+  if (state.inBackslashContinuation) {
+    const continues = hasTrailingBackslashContinuation(text);
+    state.inBackslashContinuation = continues;
+    if (!text.trim()) return { text, masked: false };
+    if (continues) {
+      const beforeSlash = text.slice(0, -1);
+      const maskedText = beforeSlash.trim() ? `${indent}${mask}\\` : text;
+      return { text: maskedText, masked: maskedText !== text };
+    }
+    const maskedText = `${indent}${mask}`;
+    return { text: maskedText, masked: maskedText !== text };
+  }
+
+  // 4. Active YAML literal/folded block scalar (`|` / `>`)
+  if (state.yamlBlockIndent !== undefined) {
+    if (!text.trim()) return { text, masked: false };
+    if (indentLen > state.yamlBlockIndent) {
+      const maskedText = `${indent}${mask}`;
+      return { text: maskedText, masked: maskedText !== text };
+    }
+    state.yamlBlockIndent = undefined;
+  }
+
+  // 5. Active multi-line secret bracketed container (`[...]` / `{...}`)
+  if (state.secretContainerStack.length > 0) {
+    const container = maskSecretContainerLine(text, mask, state.secretContainerStack, format);
+    state.secretContainerStack = container.nextStack;
+    if (container.openedTripleQuote) state.tomlTripleQuote = container.openedTripleQuote;
+    const output = applyFallbackRedactions(container.text, mask, extraValues);
+    return { text: output, masked: output !== text };
+  }
+
+  // 6. Active YAML secret subtree (`api_keys:\n  - ...` or `credentials:\n  child: ...`)
+  let forcedSecretBySubtree = false;
+  if (state.yamlSecretSubtreeIndent !== undefined) {
+    if (!text.trim() || /^\s*#/.test(text)) {
+      const output = applyFallbackRedactions(text, mask, extraValues);
+      return { text: output, masked: output !== text };
+    }
+    if (indentLen <= state.yamlSecretSubtreeIndent) {
+      state.yamlSecretSubtreeIndent = undefined;
+    } else {
+      forcedSecretBySubtree = true;
+    }
+  }
+
+  // 7. Full-line comments: never treat as KV assignments, still redact leaked patterns/values
+  if (COMMENT_LINE_RE.test(text) || (format === "properties" && /^\s*!/.test(text))) {
+    const output = applyFallbackRedactions(text, mask, extraValues);
+    return { text: output, masked: output !== text };
   }
 
   let output = text;
+  const kv = matchKeyValueLine(text, format, extraKeys);
+  if (kv) {
+    const unquotedKey = unquoteAndUnescapeKey(kv.rawKey, format);
+    const keyWithoutIniArray = unquotedKey.endsWith("[]") ? unquotedKey.slice(0, -2) : unquotedKey;
+    const lowerKey = keyWithoutIniArray.toLowerCase();
+    const isExplicitKey = extraKeys.has(lowerKey) || extraKeys.has(unquotedKey.toLowerCase());
+    const isPatternKey = SECRET_KEY_PATTERN.test(keyWithoutIniArray);
+
+    if (forcedSecretBySubtree || isExplicitKey || isPatternKey) {
+      output = maskSecretAssignment(kv.prefix, kv.rawKey, kv.separator, kv.rest, indentLen, state, config);
+    }
+  } else if (forcedSecretBySubtree) {
+    const seqMatch = text.match(YAML_SEQ_ITEM_RE);
+    if (seqMatch) {
+      const [, seqPrefix = "", seqRest = ""] = seqMatch;
+      output = maskSecretAssignment(seqPrefix, "", "", seqRest, indentLen, state, config);
+    } else if (text.trim()) {
+      output = `${indent}${mask}`;
+    }
+  }
+
+  output = applyFallbackRedactions(output, mask, extraValues);
+  return { text: output, masked: output !== text };
+}
+
+function maskSecretAssignment(
+  prefix: string,
+  rawKey: string,
+  separator: string,
+  rest: string,
+  indentLen: number,
+  state: DocumentMaskState,
+  config: MaskConfig,
+): string {
+  const { mask, format, extraValues } = config;
+  const trimmedRest = rest.trim();
+
+  // TOML triple-quoted string (`"""..."""` or `'''...'''`)
+  if (trimmedRest.startsWith('"""') || trimmedRest.startsWith("'''")) {
+    const leadingWs = rest.match(/^\s*/)?.[0] ?? "";
+    const delim: '"""' | "'''" = trimmedRest.startsWith('"""') ? '"""' : "'''";
+    const afterOpen = trimmedRest.slice(3);
+    const closing = findClosingTripleQuote(trimmedRest, 3, delim);
+    if (closing) {
+      const inner = trimmedRest.slice(3, closing.closeStart);
+      if (inner.length === 0) {
+        return `${prefix}${rawKey}${separator}${rest}`;
+      }
+      const tail = trimmedRest.slice(closing.closeEnd);
+      return `${prefix}${rawKey}${separator}${leadingWs}${delim}${mask}${delim}${tail}`;
+    }
+    state.tomlTripleQuote = delim;
+    const maskedOpenTail = afterOpen.trim() ? mask : afterOpen;
+    return `${prefix}${rawKey}${separator}${leadingWs}${delim}${maskedOpenTail}`;
+  }
+
+  // YAML literal/folded block scalar (`|` / `>`)
+  if (YAML_BLOCK_SCALAR_RE.test(trimmedRest)) {
+    state.yamlBlockIndent = indentLen;
+    return `${prefix}${rawKey}${separator}${rest}`;
+  }
+
+  // `.properties` / backslash line continuation (`key = part1\` or `key = \`)
+  if (hasTrailingBackslashContinuation(rest) && !isClosedQuotedScalar(trimmedRest)) {
+    state.inBackslashContinuation = true;
+    const beforeSlash = rest.slice(0, -1);
+    if (!beforeSlash.trim()) {
+      return `${prefix}${rawKey}${separator}${rest}`;
+    }
+    const leadingWs = beforeSlash.match(/^\s*/)?.[0] ?? "";
+    return `${prefix}${rawKey}${separator}${leadingWs}${mask}\\`;
+  }
+
+  // Inline or multi-line bracketed container (`[...]` / `{...}`)
+  if (trimmedRest.startsWith("[") || trimmedRest.startsWith("{")) {
+    const container = maskSecretContainerLine(rest, mask, [], format);
+    if (container.nextStack.length > 0) state.secretContainerStack = container.nextStack;
+    if (container.openedTripleQuote) state.tomlTripleQuote = container.openedTripleQuote;
+    return `${prefix}${rawKey}${separator}${container.text}`;
+  }
+
+  // YAML empty mapping value starting an indented secret block/sequence
+  if (separator.includes(":") && (!trimmedRest || trimmedRest.startsWith("#"))) {
+    if (state.yamlSecretSubtreeIndent === undefined) {
+      state.yamlSecretSubtreeIndent = indentLen;
+    }
+    return `${prefix}${rawKey}${separator}${rest}`;
+  }
+
+  if (!trimmedRest) {
+    return `${prefix}${rawKey}${separator}${rest}`;
+  }
+
+  const maskedRest = maskAssignedValue(rest, mask, { format, extraValues });
+  return `${prefix}${rawKey}${separator}${maskedRest}`;
+}
+
+function matchKeyValueLine(
+  text: string,
+  format: ConfigFormat | undefined,
+  extraKeys: ReadonlySet<string>,
+): { prefix: string; rawKey: string; separator: string; rest: string } | undefined {
+  if (format === "properties") {
+    const propMatch = text.match(PROPERTIES_KV_LINE_RE);
+    if (propMatch) {
+      return {
+        prefix: propMatch[1] ?? "",
+        rawKey: propMatch[2] ?? "",
+        separator: propMatch[3] ?? "",
+        rest: propMatch[4] ?? "",
+      };
+    }
+    return undefined;
+  }
+
   const kvMatch = text.match(KV_LINE_RE);
   if (kvMatch) {
-    const [, prefix = "", rawKey = "", separator = "", rest = ""] = kvMatch;
-    const unquotedKey = rawKey.trim().replace(/^["']|["']$/g, "");
-    const lowerKey = unquotedKey.toLowerCase();
-    const isExplicitKey = extraKeys.has(lowerKey);
-    const isPatternKey = DEFAULT_SECRET_KEY_RE.test(unquotedKey);
+    return {
+      prefix: kvMatch[1] ?? "",
+      rawKey: kvMatch[2] ?? "",
+      separator: kvMatch[3] ?? "",
+      rest: kvMatch[4] ?? "",
+    };
+  }
 
-    if (isExplicitKey || isPatternKey) {
-      const trimmedRest = rest.trim();
-      if (YAML_BLOCK_SCALAR_RE.test(trimmedRest)) {
-        yamlBlockIndent = indentLen;
-      } else if (trimmedRest && !trimmedRest.startsWith("{") && !trimmedRest.startsWith("[")) {
-        const maskedRest = maskAssignedValue(rest, mask);
-        output = `${prefix}${rawKey}${separator}${maskedRest}`;
+  // Whitespace-separated `.properties`-style secret line when format is unspecified
+  const wsMatch = text.match(WHITESPACE_SECRET_KV_RE);
+  if (wsMatch) {
+    const rawKey = wsMatch[2] ?? "";
+    const rest = wsMatch[4] ?? "";
+    if (!rest.startsWith(":") && !rest.startsWith("=")) {
+      const key = unquoteAndUnescapeKey(rawKey, "properties");
+      if (SECRET_KEY_PATTERN.test(key) || extraKeys.has(key.toLowerCase())) {
+        return {
+          prefix: wsMatch[1] ?? "",
+          rawKey,
+          separator: wsMatch[3] ?? " ",
+          rest,
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
+function unquoteAndUnescapeKey(rawKey: string, format: ConfigFormat | undefined): string {
+  const trimmed = rawKey.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  if (format === "properties" || trimmed.includes("\\")) {
+    return trimmed.replace(/\\(.)/g, "$1");
+  }
+  return trimmed;
+}
+
+function findClosingTripleQuote(
+  text: string,
+  startIndex: number,
+  delim: '"""' | "'''",
+): { closeStart: number; closeEnd: number } | undefined {
+  const quoteChar = delim[0]!;
+  const allowEscape = delim === '"""';
+  for (let i = startIndex; i <= text.length - 3; i += 1) {
+    if (allowEscape && text[i] === "\\") {
+      i += 1;
+      continue;
+    }
+    if (text.startsWith(delim, i)) {
+      // TOML allows up to 2 extra quote chars immediately before the closing triple quote.
+      let runEnd = i + 3;
+      while (runEnd < text.length && text[runEnd] === quoteChar && runEnd - i < 5) {
+        runEnd += 1;
+      }
+      return { closeStart: runEnd - 3, closeEnd: runEnd };
+    }
+  }
+  return undefined;
+}
+
+function hasTrailingBackslashContinuation(line: string): boolean {
+  let slashes = 0;
+  for (let i = line.length - 1; i >= 0 && line[i] === "\\"; i -= 1) slashes += 1;
+  return slashes % 2 === 1;
+}
+
+function isClosedQuotedScalar(trimmed: string): boolean {
+  if (trimmed.length < 2) return false;
+  const q = trimmed[0];
+  if (q !== '"' && q !== "'" && q !== "`") return false;
+  const end = findClosingQuote(trimmed, 0, q, q !== "`");
+  return end > 0 && end === trimmed.length - 1;
+}
+
+function findClosingQuote(text: string, openIdx: number, quote: string, allowEscape: boolean): number {
+  for (let index = openIdx + 1; index < text.length; index += 1) {
+    const ch = text[index];
+    if (allowEscape && ch === "\\") {
+      index += 1;
+      continue;
+    }
+    if (ch === quote) return index;
+  }
+  return -1;
+}
+
+function maskAssignedValue(
+  rest: string,
+  mask: string,
+  options: { format?: ConfigFormat; extraValues?: readonly string[] } = {},
+): string {
+  const { format, extraValues = [] } = options;
+  const trimmed = rest.trim();
+  if (!trimmed || trimmed === "null" || trimmed === "~") return rest;
+
+  const leadingWs = rest.match(/^\s*/)?.[0] ?? "";
+  const body = rest.slice(leadingWs.length);
+  const quote = body.charAt(0);
+
+  // Quoted scalar value ("...", '...', `...`) preserving quotes, auth scheme, commas, and trailing comments
+  if (quote === '"' || quote === "'" || quote === "`") {
+    const allowEscape = quote !== "`" && !(format === "toml" && quote === "'");
+    const end = findClosingQuote(body, 0, quote, allowEscape);
+    if (end === 1) return rest; // Empty quoted string "" or ''
+    const inner = end > 1 ? body.slice(1, end) : body.slice(1);
+    const tail = end > 1 ? body.slice(end + 1) : "";
+    const authInside = inner.match(/^((?:Bearer|Basic|Digest)\s+)(.+)$/i);
+    const maskedInner = authInside ? `${authInside[1]}${mask}` : mask;
+    return `${leadingWs}${quote}${maskedInner}${quote}${tail}`;
+  }
+
+  // Unquoted scalar value: compute inline comment boundary safely without splitting inside values
+  let commentIdx = findSafeInlineCommentIndex(body, format);
+  if (commentIdx >= 0 && extraValues.length > 0) {
+    for (const secretValue of extraValues) {
+      const idx = body.indexOf(secretValue);
+      if (idx >= 0 && idx + secretValue.length > commentIdx) {
+        commentIdx = -1;
+        break;
       }
     }
   }
 
-  output = applyPatternRedactions(output, mask);
+  const valuePart = commentIdx >= 0 ? body.slice(0, commentIdx) : body;
+  const commentPart = commentIdx >= 0 ? body.slice(commentIdx) : "";
+  const trailingMatch = valuePart.match(/^(.+?)(\s*,?\s*)$/);
+  if (!trailingMatch) return rest;
+  const coreValue = trailingMatch[1]!.trim();
+  if (!coreValue || coreValue === "null" || coreValue === "~") return rest;
 
+  // Preserve leading Authorization scheme (Bearer / Basic / Digest) and mask entire credential payload
+  const authMatch = coreValue.match(/^((?:Bearer|Basic|Digest)\s+)(.+)$/i);
+  if (authMatch) {
+    return `${leadingWs}${authMatch[1]}${mask}${trailingMatch[2]}${commentPart}`;
+  }
+  return `${leadingWs}${mask}${trailingMatch[2]}${commentPart}`;
+}
+
+function findSafeInlineCommentIndex(text: string, format?: ConfigFormat): number {
+  if (format === "properties") return -1;
+  const hashIdx = format === "json" || format === "jsonc" ? -1 : text.search(/\s+#/);
+  // `//` is only an inline comment in JSONC (and JSONC strings are always quoted).
+  let slashIdx = -1;
+  if (format === "jsonc") {
+    slashIdx = text.search(/\s+\/\//);
+  } else if (format === undefined) {
+    const candidate = text.search(/\s+\/\//);
+    if (candidate > 0) {
+      const before = text.slice(0, candidate).trim().replace(/,$/, "").trim();
+      if (/^(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)$/.test(before)) {
+        slashIdx = candidate;
+      }
+    }
+  }
+  if (hashIdx >= 0 && slashIdx >= 0) return Math.min(hashIdx, slashIdx);
+  return Math.max(hashIdx, slashIdx);
+}
+
+/**
+ * Masks all non-empty scalar values inside a bracketed secret container line
+ * (`[...]` / `{...}`) across JSON, JSONC, TOML, and YAML flow syntax while
+ * preserving object keys, brackets, commas, quotes, and comments.
+ */
+function maskSecretContainerLine(
+  line: string,
+  mask: string,
+  initialStack: readonly ("array" | "object")[],
+  format?: ConfigFormat,
+): { text: string; nextStack: Array<"array" | "object">; openedTripleQuote?: '"""' | "'''" } {
+  const stack: Array<"array" | "object"> = [...initialStack];
+  let out = "";
+  let i = 0;
+
+  while (i < line.length) {
+    const ch = line[i]!;
+
+    // Inline comment ends the container tokens on this line
+    if (
+      (ch === "#" && format !== "json" && format !== "jsonc" && (i === 0 || /\s/.test(line[i - 1] ?? "")))
+      || (ch === "/" && line[i + 1] === "/" && (format === "jsonc" || (format === undefined && (i === 0 || /\s/.test(line[i - 1] ?? "")))))
+    ) {
+      out += line.slice(i);
+      break;
+    }
+
+    if (ch === "[") {
+      stack.push("array");
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "{") {
+      stack.push("object");
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "]" || ch === "}") {
+      stack.pop();
+      out += ch;
+      i += 1;
+      continue;
+    }
+
+    if (stack.length === 0) {
+      out += ch;
+      i += 1;
+      continue;
+    }
+
+    const inObject = stack.at(-1) === "object";
+
+    // Preserve whitespace and structural punctuation
+    if (/[\s,]/.test(ch) || (inObject && (ch === ":" || ch === "="))) {
+      out += ch;
+      i += 1;
+      continue;
+    }
+
+    // TOML triple-quoted element inside container
+    if (line.startsWith('"""', i) || line.startsWith("'''", i)) {
+      const delim: '"""' | "'''" = line.startsWith('"""', i) ? '"""' : "'''";
+      const closing = findClosingTripleQuote(line, i + 3, delim);
+      if (closing) {
+        const inner = line.slice(i + 3, closing.closeStart);
+        out += inner.length === 0 ? `${delim}${delim}` : `${delim}${mask}${delim}`;
+        i = closing.closeEnd;
+        continue;
+      }
+      const afterOpen = line.slice(i + 3);
+      out += afterOpen.trim() ? `${delim}${mask}` : `${delim}${afterOpen}`;
+      return { text: out, nextStack: stack, openedTripleQuote: delim };
+    }
+
+    // Quoted string token (either object key or secret value)
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const allowEscape = ch !== "`" && !(format === "toml" && ch === "'");
+      const end = findClosingQuote(line, i, ch, allowEscape);
+      if (end < 0) {
+        out += `${ch}${mask}${ch}`;
+        break;
+      }
+      const token = line.slice(i, end + 1);
+      const isObjectKey = inObject && isFollowedByKeySeparator(line, end + 1);
+      if (isObjectKey || end === i + 1) {
+        out += token;
+      } else {
+        const inner = line.slice(i + 1, end);
+        const authInside = inner.match(/^((?:Bearer|Basic|Digest)\s+)(.+)$/i);
+        out += authInside ? `${ch}${authInside[1]}${mask}${ch}` : `${ch}${mask}${ch}`;
+      }
+      i = end + 1;
+      continue;
+    }
+
+    // Unquoted token (bare object key, YAML flow scalar, number, boolean, null)
+    let end = i;
+    while (end < line.length && !/[\s,[\]{}]/.test(line[end]!)) {
+      if (inObject && (line[end] === ":" || line[end] === "=") && !line.startsWith("://", end)) break;
+      if (line[end] === "#" && (end === 0 || /\s/.test(line[end - 1] ?? ""))) break;
+      if (line[end] === "/" && line[end + 1] === "/" && (end === 0 || /\s/.test(line[end - 1] ?? ""))) break;
+      end += 1;
+    }
+    const token = line.slice(i, end);
+    const isObjectKey = inObject && isFollowedByKeySeparator(line, end);
+    if (isObjectKey || !token || token === "null" || token === "~") {
+      out += token;
+    } else {
+      out += mask;
+    }
+    i = end;
+  }
+
+  return { text: out, nextStack: stack };
+}
+
+function isFollowedByKeySeparator(text: string, index: number): boolean {
+  let j = index;
+  while (j < text.length && /\s/.test(text[j]!)) j += 1;
+  if (text[j] === "=") return true;
+  return text[j] === ":" && !text.startsWith("://", j);
+}
+
+function applyFallbackRedactions(line: string, mask: string, extraValues: readonly string[]): string {
+  let output = applyPatternRedactions(line, mask);
   for (const secretValue of extraValues) {
     if (output.includes(secretValue)) {
       output = output.split(secretValue).join(mask);
     }
   }
-
-  return {
-    text: output,
-    masked: output !== text,
-    yamlBlockIndent,
-    inPemBlock,
-  };
+  return output;
 }
 
-function maskAssignedValue(rest: string, mask: string): string {
-  const trimmed = rest.trim();
-  if (!trimmed || trimmed === "null" || trimmed === "~") return rest;
+function maskInlineSecretContainers(line: string, mask: string): string {
+  INLINE_SECRET_CONTAINER_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let result = "";
+  let lastIndex = 0;
 
-  // Preserve leading Authorization scheme (Bearer / Basic / Digest)
-  const authMatch = rest.match(/^(\s*(?:["'])?(?:Bearer|Basic|Digest)\s+)([^\s"',;#]+)(.*)$/i);
-  if (authMatch) {
-    return `${authMatch[1]}${mask}${authMatch[3]}`;
+  while ((match = INLINE_SECRET_CONTAINER_RE.exec(line)) !== null) {
+    const containerStart = match.index + match[1]!.length;
+    const endIdx = findMatchingContainerEnd(line, containerStart);
+    const sliceEnd = endIdx >= 0 ? endIdx + 1 : line.length;
+    const masked = maskSecretContainerLine(line.slice(containerStart, sliceEnd), mask, []);
+    result += line.slice(lastIndex, containerStart) + masked.text;
+    lastIndex = sliceEnd;
+    INLINE_SECRET_CONTAINER_RE.lastIndex = sliceEnd;
   }
 
-  // Quoted scalar value ("...", '...', `...`) preserving quotes, commas and comments
-  const quote = rest.charAt(0);
-  if (quote === '"' || quote === "'" || quote === "`") {
-    let end = -1;
-    for (let index = 1; index < rest.length; index += 1) {
-      const ch = rest[index];
-      if (ch === "\\" && quote !== "`") {
-        index += 1;
+  if (lastIndex === 0) return line;
+  return result + line.slice(lastIndex);
+}
+
+function findMatchingContainerEnd(line: string, startIdx: number): number {
+  let depth = 0;
+  let quote: string | undefined;
+  let escaped = false;
+  for (let i = startIdx; i < line.length; i += 1) {
+    const ch = line[i]!;
+    if (quote) {
+      if (escaped) {
+        escaped = false;
         continue;
       }
-      if (ch === quote) {
-        end = index;
-        break;
+      if (ch === "\\" && quote !== "`") {
+        escaped = true;
+        continue;
       }
+      if (ch === quote) quote = undefined;
+      continue;
     }
-    if (end === 1) return rest; // Empty quoted string "" or ''
-    if (end > 1) {
-      return `${quote}${mask}${quote}${rest.slice(end + 1)}`;
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      continue;
     }
-    return `${quote}${mask}${quote}`;
+    if (ch === "[" || ch === "{") {
+      depth += 1;
+    } else if (ch === "]" || ch === "}") {
+      depth -= 1;
+      if (depth <= 0) return i;
+    }
   }
-
-  // Unquoted scalar value: preserve trailing comma and inline comments (# / //)
-  const commentIdx = findInlineCommentIndex(rest);
-  const valuePart = commentIdx >= 0 ? rest.slice(0, commentIdx) : rest;
-  const commentPart = commentIdx >= 0 ? rest.slice(commentIdx) : "";
-  const trailingMatch = valuePart.match(/^(.+?)(\s*,?\s*)$/);
-  if (!trailingMatch) return rest;
-  const coreValue = trailingMatch[1]!.trim();
-  if (!coreValue || coreValue === "null" || coreValue === "~") return rest;
-  return `${mask}${trailingMatch[2]}${commentPart}`;
-}
-
-function findInlineCommentIndex(text: string): number {
-  const hashIdx = text.search(/\s+#/);
-  const slashIdx = text.search(/\s+\/\//);
-  if (hashIdx >= 0 && slashIdx >= 0) return Math.min(hashIdx, slashIdx);
-  return Math.max(hashIdx, slashIdx);
+  return -1;
 }
 
 function applyPatternRedactions(line: string, mask: string): string {
-  return line
+  return maskInlineSecretContainers(line, mask)
+    .replace(INLINE_PEM_SINGLE_LINE_RE, `$1${mask}$3`)
     .replace(URL_CREDENTIALS_RE, `$1${mask}:${mask}@`)
-    .replace(AUTH_SCHEME_RE, `$1${mask}`)
+    .replace(AUTH_DIGEST_RE, `$1${mask}`)
+    .replace(AUTH_BEARER_BASIC_RE, `$1${mask}`)
     .replace(INLINE_KEY_VALUE_SECRET_RE, (_match, prefix: string, value: string) => {
       if (value.includes(mask)) return `${prefix}${value}`;
       if (/auth(?:orization)?/i.test(prefix) && /^(?:Bearer|Basic|Digest)$/i.test(value)) {
         return `${prefix}${value}`;
       }
       if (/^(?:[|>])(?:[-+]\d*|\d*[-+]?)?$/.test(value.trim())) return `${prefix}${value}`;
-      if (value === '""' || value === "''" || value === "null" || value === "~") return `${prefix}${value}`;
+      if (value === '""' || value === "''" || value === '""""""' || value === "''''''" || value === "null" || value === "~") {
+        return `${prefix}${value}`;
+      }
+      if (value.startsWith('"""') && value.endsWith('"""')) return `${prefix}"""${mask}"""`;
+      if (value.startsWith("'''") && value.endsWith("'''")) return `${prefix}'''${mask}'''`;
       const quote = value.at(0);
       return `${prefix}${quote === '"' || quote === "'" || quote === "`" ? `${quote}${mask}${quote}` : mask}`;
     })

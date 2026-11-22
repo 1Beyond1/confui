@@ -2,7 +2,14 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { computeUnifiedDiff, DIFF_SECRET_MASK, formatUnifiedDiffText, maskUnifiedDiff } from "../shared/diff.ts";
+import {
+  collectSecretsFromFields,
+  computeUnifiedDiff,
+  DIFF_SECRET_MASK,
+  formatUnifiedDiffText,
+  maskDocumentLines,
+  maskUnifiedDiff,
+} from "../shared/diff.ts";
 import type { FieldSpec } from "../shared/schema.ts";
 import {
   isForbiddenKey,
@@ -10,6 +17,8 @@ import {
   isHexColor6,
   normalizeGithubUrl,
   parseGithubRepository,
+  SECRET_KEY_PATTERN,
+  valueContainsSecret,
 } from "../shared/validation.ts";
 import {
   allowedCustomFieldTypes,
@@ -106,6 +115,134 @@ describe("UI state, diff, validation & i18n integration", () => {
     expect(yamlLines).not.toContain("line-secret");
     expect(yamlLines).toContain(`  ${DIFF_SECRET_MASK}`);
     expect(yamlLines).toContain("safe: ok");
+  });
+
+  it("prevents cross-format & cross-hunk secret redaction bypasses (TOML triple quotes, PEM, YAML blocks, arrays, .properties, Digest, empty-user DSN)", () => {
+    // 1. Expanded secret key names & empty-username DSNs
+    expect(SECRET_KEY_PATTERN.test("REDIS_URL")).toBe(true);
+    expect(SECRET_KEY_PATTERN.test("SMTP_PASS")).toBe(true);
+    expect(valueContainsSecret("redis://:my_pass@host:6379")).toBe(true);
+    expect(valueContainsSecret(["safe", "redis://:my_pass@host:6379"])).toBe(true);
+    expect(valueContainsSecret({ nested: { header: 'Digest username="alice", nonce="abc", response="deadbeef"' } })).toBe(true);
+    expect(valueContainsSecret({ host: "localhost", port: 6379 })).toBe(false);
+
+    // 2. TOML triple-quoted strings (single-line + multi-line + empty preservation)
+    const tomlBefore = [
+      'api_secret = """single-line-top-secret"""',
+      "token = '''literal-secret\\tail'''",
+      'empty_secret = """"""',
+      'multiline_secret = """',
+      ...Array.from({ length: 12 }, (_, i) => `toml-secret-line-${i + 1}`),
+      '"""',
+      'host = "localhost"',
+    ].join("\n") + "\n";
+    const tomlAfter = tomlBefore.replace("toml-secret-line-8", "toml-secret-line-8-changed");
+    const tomlMasked = maskUnifiedDiff(computeUnifiedDiff(tomlBefore, tomlAfter, 2), { format: "toml" });
+    const tomlDiffText = tomlMasked.diff.hunks.flatMap((h) => h.lines.map((l) => l.text)).join("\n");
+    expect(tomlDiffText).not.toContain("toml-secret-line");
+    expect(tomlDiffText).toContain(DIFF_SECRET_MASK);
+
+    const tomlFullDoc = maskDocumentLines(tomlBefore, { format: "toml" }).lines.join("\n");
+    expect(tomlFullDoc).toContain(`api_secret = """${DIFF_SECRET_MASK}"""`);
+    expect(tomlFullDoc).toContain(`token = '''${DIFF_SECRET_MASK}'''`);
+    expect(tomlFullDoc).toContain('empty_secret = """"""');
+    expect(tomlFullDoc).not.toContain("single-line-top-secret");
+    expect(tomlFullDoc).not.toContain("literal-secret");
+    expect(tomlFullDoc).not.toContain("toml-secret-line");
+    expect(tomlFullDoc).toContain('host = "localhost"');
+
+    // 3. Cross-hunk truncation for YAML block scalar, PEM block, and JSON/YAML secret arrays
+    const yamlDeepBefore = [
+      "private_key: |",
+      ...Array.from({ length: 14 }, (_, i) => `  yaml-secret-row-${i + 1}`),
+      "api_keys:",
+      ...Array.from({ length: 12 }, (_, i) => `  - yaml-arr-secret-${i + 1}`),
+      "safe: keep",
+    ].join("\n") + "\n";
+    const yamlDeepAfter = yamlDeepBefore
+      .replace("yaml-secret-row-9", "yaml-secret-row-9-edited")
+      .replace("yaml-arr-secret-8", "yaml-arr-secret-8-edited");
+    const yamlDeepMasked = maskUnifiedDiff(computeUnifiedDiff(yamlDeepBefore, yamlDeepAfter, 2), { format: "yaml" });
+    const yamlDeepText = yamlDeepMasked.diff.hunks.flatMap((h) => h.lines.map((l) => l.text)).join("\n");
+    expect(yamlDeepText).not.toContain("yaml-secret-row");
+    expect(yamlDeepText).not.toContain("yaml-arr-secret");
+
+    const pemBefore = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      ...Array.from({ length: 14 }, (_, i) => `MIIE_BASE64_SECRET_LINE_${i + 1}`),
+      "-----END RSA PRIVATE KEY-----",
+    ].join("\n") + "\n";
+    const pemAfter = pemBefore.replace("MIIE_BASE64_SECRET_LINE_8", "MIIE_BASE64_SECRET_LINE_8_MOD");
+    const pemMasked = maskUnifiedDiff(computeUnifiedDiff(pemBefore, pemAfter, 2));
+    const pemText = pemMasked.diff.hunks.flatMap((h) => h.lines.map((l) => l.text)).join("\n");
+    expect(pemText).not.toContain("MIIE_BASE64_SECRET");
+
+    const jsonArrBefore = [
+      "{",
+      '  "api_keys": [',
+      ...Array.from({ length: 12 }, (_, i) => `    "json-arr-secret-${i + 1}"${i < 11 ? "," : ""}`),
+      "  ],",
+      '  "credentials": {"primary": "obj-secret-1", "backup": "obj-secret-2"},',
+      '  "mixed": {"host": "localhost", "apiKeys": ["nested-arr-1", "nested-arr-2"]},',
+      '  "cache": "redis://:empty_user_pass@redis.internal:6379"',
+      "}",
+    ].join("\n") + "\n";
+    const jsonArrAfter = jsonArrBefore.replace("json-arr-secret-7", "json-arr-secret-7-mod");
+    const jsonArrMasked = maskUnifiedDiff(computeUnifiedDiff(jsonArrBefore, jsonArrAfter, 2), { format: "json" });
+    expect(jsonArrMasked.diff.hunks.flatMap((h) => h.lines.map((l) => l.text)).join("\n")).not.toContain("json-arr-secret");
+    const jsonFullMasked = maskDocumentLines(jsonArrBefore, { format: "json" }).lines.join("\n");
+    expect(jsonFullMasked).not.toContain("obj-secret-1");
+    expect(jsonFullMasked).not.toContain("obj-secret-2");
+    expect(jsonFullMasked).not.toContain("nested-arr-1");
+    expect(jsonFullMasked).not.toContain("nested-arr-2");
+    expect(jsonFullMasked).not.toContain("empty_user_pass");
+    expect(jsonFullMasked).toContain('"host": "localhost"');
+
+    // 4. .properties whitespace separator, backslash continuation, unquoted ` #` / ` //`, and Bearer/Digest headers
+    const propsDoc = [
+      "db.password whitespace-secret-val",
+      "smtp.pass = first-part-secret\\",
+      "  second-part-secret\\",
+      "  third-part-secret",
+      "mail.password = secret-with #hash-inside",
+      "auth.header = Digest username=\"Mufasa\", realm=\"test\", nonce=\"abc\", response=\"6629fae4\"",
+      "service.host = example.com",
+    ].join("\n");
+    const propsMasked = maskDocumentLines(propsDoc, { format: "properties" }).lines.join("\n");
+    expect(propsMasked).not.toContain("whitespace-secret-val");
+    expect(propsMasked).not.toContain("first-part-secret");
+    expect(propsMasked).not.toContain("second-part-secret");
+    expect(propsMasked).not.toContain("third-part-secret");
+    expect(propsMasked).not.toContain("hash-inside");
+    expect(propsMasked).not.toContain("Mufasa");
+    expect(propsMasked).not.toContain("6629fae4");
+    expect(propsMasked).toContain("service.host = example.com");
+
+    // Unquoted value with ` //` in .env must not leak tail after ` //`
+    const envWithSlashes = [
+      "SMTP_PASS=my-secret //not-a-comment",
+      'CUSTOM_HDR="Digest username=\\"bob\\", nonce=\\"xyz\\", response=\\"9f86d08\\""',
+      "CUSTOM_BEARER=Bearer secret-bearer-token-99",
+    ].join("\n");
+    const envMasked = maskDocumentLines(envWithSlashes, { format: "env" }).lines.join("\n");
+    expect(envMasked).not.toContain("not-a-comment");
+    expect(envMasked).not.toContain("bob");
+    expect(envMasked).not.toContain("9f86d08");
+    expect(envMasked).not.toContain("secret-bearer-token-99");
+
+    // 5. Recursive secret collection from fields (arrays, objects, multi-line)
+    const collected = collectSecretsFromFields([
+      makeField({ path: "apiKeys", segments: ["apiKeys"], type: "array", secret: true, value: ["arr-key-111", "arr-key-222"] }),
+      makeField({ path: "pem", segments: ["pem"], type: "secret", secret: true, value: "line-one-secret\nline-two-secret" }),
+      makeField({ path: "services", segments: ["services"], type: "json", value: { redis: { password: "nested-obj-pass" } } }),
+    ]);
+    expect(collected.secretValues).toEqual(expect.arrayContaining([
+      "arr-key-111",
+      "arr-key-222",
+      "line-one-secret",
+      "line-two-secret",
+      "nested-obj-pass",
+    ]));
   });
 
   it("excludes input, textarea and contenteditable targets from global Ctrl+Z/Y hijacking", () => {

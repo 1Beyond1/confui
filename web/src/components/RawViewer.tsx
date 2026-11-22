@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { ConfigFormSchema } from "../../../shared/schema.ts";
+import { collectSecretsFromFields, maskDocumentLines } from "../../../shared/diff.ts";
+import type { ConfigFormSchema, FieldSpec } from "../../../shared/schema.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
 import { SourceBadge } from "../ui.tsx";
@@ -17,15 +18,18 @@ const DEFAULT_VIEWPORT_HEIGHT = 520;
 
 export function RawViewer({
   schema,
+  fields,
   focusLine,
 }: {
   schema: ConfigFormSchema;
+  fields?: readonly FieldSpec[];
   focusLine?: { line: number; token: number };
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [activeMatch, setActiveMatch] = useState(0);
   const [highlightedLine, setHighlightedLine] = useState<number>();
+  const [revealSecrets, setRevealSecrets] = useState(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(DEFAULT_VIEWPORT_HEIGHT);
   const codeContainerRef = useRef<HTMLDivElement>(null);
@@ -35,13 +39,31 @@ export function RawViewer({
     [schema.rawText],
   );
 
+  const { secretKeys, secretValues } = useMemo(
+    () => collectSecretsFromFields(fields ?? schema.fields),
+    [fields, schema.fields],
+  );
+
+  const maskedDoc = useMemo(
+    () => maskDocumentLines(schema.rawText, { format: schema.format, secretKeys, secretValues }),
+    [schema.rawText, schema.format, secretKeys, secretValues],
+  );
+
+  const displayLines = revealSecrets ? rawLines : maskedDoc.lines;
+  const hasSensitiveContent = maskedDoc.maskedLineCount > 0 || secretKeys.length > 0;
+
   useEffect(() => {
     setQuery("");
     setActiveMatch(0);
     setHighlightedLine(undefined);
+    setRevealSecrets(false);
     setScrollTop(0);
     if (codeContainerRef.current) codeContainerRef.current.scrollTop = 0;
   }, [schema.file]);
+
+  useEffect(() => {
+    if (focusLine?.token) setRevealSecrets(false);
+  }, [focusLine?.token]);
 
   useEffect(() => {
     const container = codeContainerRef.current;
@@ -58,7 +80,7 @@ export function RawViewer({
 
   const trimmedQuery = query.trim();
   const { totalMatches, matchLines, lineMatchStart } = useMemo(() => {
-    const starts = new Int32Array(rawLines.length);
+    const starts = new Int32Array(displayLines.length);
     starts.fill(-1);
     if (!trimmedQuery) {
       return { totalMatches: 0, matchLines: [] as number[], lineMatchStart: starts };
@@ -66,8 +88,8 @@ export function RawViewer({
     const lowerNeedle = trimmedQuery.toLocaleLowerCase();
     const linesOfMatches: number[] = [];
     let count = 0;
-    for (let i = 0; i < rawLines.length; i += 1) {
-      const lowerLine = rawLines[i]!.toLocaleLowerCase();
+    for (let i = 0; i < displayLines.length; i += 1) {
+      const lowerLine = displayLines[i]!.toLocaleLowerCase();
       let cursor = 0;
       let firstOnLine = -1;
       while (cursor < lowerLine.length) {
@@ -81,7 +103,7 @@ export function RawViewer({
       starts[i] = firstOnLine;
     }
     return { totalMatches: count, matchLines: linesOfMatches, lineMatchStart: starts };
-  }, [rawLines, trimmedQuery]);
+  }, [displayLines, trimmedQuery]);
 
   useEffect(() => {
     setActiveMatch(0);
@@ -146,9 +168,26 @@ export function RawViewer({
         <header>
           <div class="raw-card__title">
             <span>{schema.file}</span>
-            <small>{t("raw.meta", { format: FORMAT_LABELS[schema.format], lines: rawLines.length })}</small>
+            <small>{t("raw.meta", { format: FORMAT_LABELS[schema.format], lines: displayLines.length })}</small>
+            {!revealSecrets && maskedDoc.maskedLineCount > 0 && (
+              <span class="udiff__masked-pill" title={t("diff.secretsMaskedHint")}>
+                <Icon name="shield" size={12}/>
+                <span>{t("diff.secretsMaskedBadge")}</span>
+              </span>
+            )}
           </div>
           <div class="raw-search">
+            {hasSensitiveContent && (
+              <button
+                type="button"
+                class="udiff__secret-toggle"
+                aria-pressed={revealSecrets}
+                onClick={() => setRevealSecrets((current) => !current)}
+              >
+                <Icon name={revealSecrets ? "eye-off" : "eye"} size={13}/>
+                <span>{revealSecrets ? t("diff.hideSecrets") : t("diff.showSecrets")}</span>
+              </button>
+            )}
             <label class="raw-search__input">
               <Icon name="search" size={14}/>
               <input
@@ -208,7 +247,7 @@ export function RawViewer({
               <div class="raw-spacer" style={{ height: `${virtualWindow.topSpacerPx}px` }} aria-hidden="true"/>
             )}
             {visibleIndices.map((lineIndex) => {
-              const lineText = rawLines[lineIndex] ?? "";
+              const lineText = displayLines[lineIndex] ?? "";
               const startMatch = lineMatchStart[lineIndex] ?? -1;
               const segments = startMatch >= 0 && trimmedQuery
                 ? segmentLine(lineText, trimmedQuery, startMatch)
