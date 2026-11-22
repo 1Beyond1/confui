@@ -64,7 +64,7 @@ type EditorTab = "form" | "raw";
 type BusyState = "scan" | "infer" | "preview" | "save" | "restore" | null;
 type ToastType = "success" | "error" | "info";
 type PendingAction =
-  | { kind: "file"; file: ConfigFile; focusFieldPath?: string; focusLine?: number; openRaw?: boolean }
+  | { kind: "file"; file: ConfigFile; focusFieldPath?: string; focusFieldSegments?: PathSegment[]; focusLine?: number; openRaw?: boolean }
   | { kind: "home" }
   | { kind: "settings" }
   | { kind: "reload" }
@@ -106,7 +106,7 @@ export function App() {
   const [compareOpen, setCompareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [focusFieldRequest, setFocusFieldRequest] = useState<{ file: string; path: string; token: number }>();
+  const [focusFieldRequest, setFocusFieldRequest] = useState<{ file: string; path: string; segments?: PathSegment[]; token: number }>();
   const [focusLineRequest, setFocusLineRequest] = useState<{ file: string; line: number; token: number }>();
   const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [settingsDirty, setSettingsDirty] = useState(false);
@@ -363,7 +363,7 @@ export function App() {
     root = project?.root,
     githubUrl = githubInput,
     targetLocale = locale,
-    focusTarget?: { focusFieldPath?: string; focusLine?: number; openRaw?: boolean },
+    focusTarget?: { focusFieldPath?: string; focusFieldSegments?: PathSegment[]; focusLine?: number; openRaw?: boolean },
   ): Promise<void> {
     if (!root) return;
     if (file.status === "too-large" || file.status === "unsupported" || file.status === "unreadable") {
@@ -393,7 +393,12 @@ export function App() {
       setExternalChange(false);
       void refreshBackupStatus(root, file.path, sequence);
       if (focusTarget?.focusFieldPath && !focusTarget.openRaw) {
-        setFocusFieldRequest({ file: result.data.file, path: focusTarget.focusFieldPath, token: Date.now() });
+        setFocusFieldRequest({
+          file: result.data.file,
+          path: focusTarget.focusFieldPath,
+          segments: focusTarget.focusFieldSegments,
+          token: Date.now(),
+        });
       } else if (focusTarget?.focusLine && focusTarget.openRaw) {
         setFocusLineRequest({ file: result.data.file, line: focusTarget.focusLine, token: Date.now() });
       }
@@ -424,7 +429,12 @@ export function App() {
         }
       } else if (action.focusFieldPath) {
         setEditorTab("form");
-        setFocusFieldRequest({ file: action.file.path, path: action.focusFieldPath, token: Date.now() });
+        setFocusFieldRequest({
+          file: action.file.path,
+          path: action.focusFieldPath,
+          segments: action.focusFieldSegments,
+          token: Date.now(),
+        });
       }
       return;
     }
@@ -468,6 +478,7 @@ export function App() {
       case "file":
         await loadFile(action.file, project?.root, githubInput, locale, {
           focusFieldPath: action.focusFieldPath,
+          focusFieldSegments: action.focusFieldSegments,
           focusLine: action.focusLine,
           openRaw: action.openRaw,
         });
@@ -501,7 +512,12 @@ export function App() {
       setEditorTab("form");
       const firstInvalid = allFields.find((field) => errors.has(fieldKey(field)));
       if (firstInvalid) {
-        setFocusFieldRequest({ file: schema.file, path: firstInvalid.path, token: Date.now() });
+        setFocusFieldRequest({
+          file: schema.file,
+          path: firstInvalid.path,
+          segments: [...firstInvalid.segments],
+          token: Date.now(),
+        });
       } else {
         window.setTimeout(() => document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus(), 0);
       }
@@ -759,6 +775,7 @@ export function App() {
       kind: "file",
       file: targetFile,
       focusFieldPath: hit.path,
+      focusFieldSegments: hit.segments,
       focusLine: hit.line,
       openRaw,
     });

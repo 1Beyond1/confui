@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { FieldAssistResult, FieldSpec } from "../../shared/schema.ts";
+import type { FieldAssistResult, FieldSpec, PathSegment } from "../../shared/schema.ts";
 import { isHexColor6 } from "../../shared/validation.ts";
 import { StructuredArrayControl, StructuredObjectControl } from "./components/StructuredControls.tsx";
 import {
@@ -9,6 +9,7 @@ import {
   filterFieldsByStatus,
   isFieldModified,
   isInactiveExamplePlaceholder,
+  resolveFocusField,
   type EditorValues,
   type FieldStatusFilter,
 } from "./editor-state.ts";
@@ -51,7 +52,7 @@ export function FieldEditor({
   aiAvailable?: boolean;
   onExplain?: (field: FieldSpec) => Promise<FieldAssistResult>;
   disabled?: boolean;
-  focusRequest?: { path: string; token: number };
+  focusRequest?: { path: string; segments?: readonly PathSegment[]; token: number };
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
@@ -72,15 +73,16 @@ export function FieldEditor({
     if (!focusRequest?.path) return;
     setQuery("");
     setStatusFilter("all");
-    const targetField = fields.find((item) => item.path === focusRequest.path);
+    const targetField = resolveFocusField(fields, focusRequest.path, focusRequest.segments);
+    const resolvedPath = targetField?.path ?? focusRequest.path;
     if (targetField) {
       const targetGroup = normalizeGroupName(targetField.group, defaultGroupName);
       setCollapsedGroups((prev) => (prev[targetGroup] ? { ...prev, [targetGroup]: false } : prev));
     }
-    setHighlightedPath(focusRequest.path);
+    setHighlightedPath(resolvedPath);
     const scrollTimer = window.setTimeout(() => {
       const rows = editorRef.current?.querySelectorAll<HTMLElement>("[data-field-path]");
-      const target = rows ? [...rows].find((el) => el.dataset.fieldPath === focusRequest.path) : undefined;
+      const target = rows ? [...rows].find((el) => el.dataset.fieldPath === resolvedPath) : undefined;
       if (target) {
         target.scrollIntoView({ behavior: "smooth", block: "center" });
         const focusable = target.querySelector<HTMLElement>("input, select, textarea, button[role='switch']");
@@ -88,13 +90,13 @@ export function FieldEditor({
       }
     }, 30);
     const clearTimer = window.setTimeout(() => {
-      setHighlightedPath((current) => (current === focusRequest.path ? undefined : current));
+      setHighlightedPath((current) => (current === resolvedPath ? undefined : current));
     }, 2_600);
     return () => {
       window.clearTimeout(scrollTimer);
       window.clearTimeout(clearTimer);
     };
-  }, [focusRequest?.path, focusRequest?.token, fields, defaultGroupName]);
+  }, [focusRequest?.path, focusRequest?.segments, focusRequest?.token, fields, defaultGroupName]);
 
   const statusCounts = useMemo(() => {
     let modified = 0;

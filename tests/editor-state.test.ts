@@ -11,6 +11,7 @@ import {
   isSafeRegexPattern,
   parseJsonDraft,
   reconcileSavedState,
+  resolveFocusField,
   validationErrors,
 } from "../web/src/editor-state.ts";
 
@@ -291,5 +292,18 @@ describe("editor state", () => {
     };
     expect(collectChanges([existing, stringCustom], strValues)).toEqual([{ segments: ["EXTRA_STR"], value: "" }]);
     expect(isEditorDirty([existing, stringCustom], strValues)).toBe(true);
+  });
+
+  it("resolves collapsed deep search hits (e.g. scripts.test) to their enclosing parent field", () => {
+    const scriptsField = field({ path: "scripts", segments: ["scripts"], type: "json", value: { test: "vitest" } });
+    const scriptPrefix = field({ path: "script", segments: ["script"], type: "string", value: "x" });
+    const deepParent = field({ path: "a.b.c", segments: ["a", "b", "c"], type: "json", value: { d: 1 } });
+    const fields = [scriptPrefix, scriptsField, deepParent];
+
+    expect(resolveFocusField(fields, "scripts", ["scripts"])?.path).toBe("scripts");
+    expect(resolveFocusField(fields, "scripts.test", ["scripts", "test"])?.path).toBe("scripts");
+    expect(resolveFocusField(fields, "scripts.test")?.path).toBe("scripts");
+    expect(resolveFocusField(fields, "a.b.c.d.e", ["a", "b", "c", "d", "e"])?.path).toBe("a.b.c");
+    expect(resolveFocusField([scriptPrefix], "scripts.test", ["scripts", "test"])).toBeUndefined();
   });
 });

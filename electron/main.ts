@@ -11,7 +11,8 @@ import {
   type OpenDialogOptions,
 } from "electron";
 import { existsSync, watch, type FSWatcher } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { realpath } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OpenAICompatibleProvider, testAIConnection } from "../core/ai/provider.ts";
 import { toAppError, ConfuiError } from "../core/errors.ts";
@@ -44,6 +45,7 @@ import { checkForUpdates } from "../core/update.ts";
 import type {
   AppSettings,
   ConfigChange,
+  ConfigFile,
   FileChangedEvent,
   FileVersion,
   FieldAssistField,
@@ -77,6 +79,9 @@ let hasUnsavedChanges = false;
 let currentLocale: Locale = "zh-CN";
 let lastVerifiedReleasePage = "https://github.com/1Beyond1/confui/releases/latest";
 let fieldAssistInFlight = 0;
+let lastScannedProject: { root: string; files: ConfigFile[] } | undefined;
+let activeSearchController: AbortController | undefined;
+let activeSearchSeq = 0;
 
 app.setName("Confui");
 if (process.platform === "win32") app.setAppUserModelId("com.1beyond1.confui");
@@ -117,6 +122,9 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on("window-all-closed", () => {
   closeWatcher();
+  activeSearchController?.abort();
+  activeSearchController = undefined;
+  lastScannedProject = undefined;
   if (process.platform !== "darwin") app.quit();
 });
 
@@ -252,6 +260,7 @@ function registerIpcHandlers(): void {
     // Stop watching any previously opened project file before switching.
     closeWatcher();
     const result = await scanProject(root);
+    lastScannedProject = { root: result.root, files: result.files };
     const requestedGithubUrl = typeof githubUrl === "string" ? normalizeGithubUrl(githubUrl) : undefined;
     const effectiveGithubUrl = requestedGithubUrl ?? result.detectedGithubUrl;
     await settingsStore.rememberProject({
@@ -417,7 +426,9 @@ function registerIpcHandlers(): void {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertString(exampleFile, "示例模板路径", MAX_CONFIG_PATH_CHARS);
     assertOptionalString(targetFile, "目标配置文件路径", MAX_CONFIG_PATH_CHARS);
-    return createConfigFromExample(root, exampleFile, targetFile);
+    const created = await createConfigFromExample(root, exampleFile, targetFile);
+    lastScannedProject = undefined;
+    return created;
   });
 
   handle("confui:compareConfigs", async (_event, root: unknown, sourceFile: unknown, targetFile: unknown) => {
@@ -506,7 +517,32 @@ function registerIpcHandlers(): void {
         safeOptions.concurrency = candidate.concurrency;
       }
     }
-    return searchProjectConfigs(root, query, safeOptions);
+    // Single-flight cancellation: abort any superseded search before starting a new one.
+    activeSearchController?.abort();
+    const controller = new AbortController();
+    activeSearchController = controller;
+    const seq = ++activeSearchSeq;
+    if (!query.trim()) {
+      return { query: "", hits: [], searchedFiles: 0, skippedFiles: 0, truncated: false };
+    }
+    let preScanned: { root: string; files: ConfigFile[] } | undefined;
+    if (lastScannedProject) {
+      const canonicalRoot = await realpath(resolve(root.trim())).catch(() => undefined);
+      if (canonicalRoot && sameFsPath(canonicalRoot, lastScannedProject.root)) {
+        preScanned = lastScannedProject;
+      }
+    }
+    try {
+      return await searchProjectConfigs(root, query, {
+        ...safeOptions,
+        signal: controller.signal,
+        preScanned,
+      });
+    } finally {
+      if (seq === activeSearchSeq && activeSearchController === controller) {
+        activeSearchController = undefined;
+      }
+    }
   });
 
   handle("confui:getSettings", async () => settingsStore.loadForRenderer());
@@ -756,6 +792,12 @@ function isAppSettings(value: unknown): value is AppSettings {
 
 function boundedString(value: unknown, maxLength: number): value is string {
   return typeof value === "string" && value.length <= maxLength && !value.includes("\0");
+}
+
+function sameFsPath(left: string, right: string): boolean {
+  return process.platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
 }
 
 function isFieldAssistField(value: unknown): value is FieldAssistField {

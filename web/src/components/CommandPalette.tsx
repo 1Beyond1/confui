@@ -50,15 +50,28 @@ export function CommandPalette({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const searchSeq = useRef(0);
+  const inFlightRootRef = useRef<string>();
 
   useEffect(() => {
     inputRef.current?.focus();
+    return () => {
+      if (inFlightRootRef.current) {
+        const rootToCancel = inFlightRootRef.current;
+        inFlightRootRef.current = undefined;
+        void window.confui.searchProject(rootToCancel, "");
+      }
+    };
   }, []);
 
   useEffect(() => {
     const trimmed = query.trim();
     if (!project || !trimmed) {
       searchSeq.current += 1;
+      if (inFlightRootRef.current) {
+        const rootToCancel = inFlightRootRef.current;
+        inFlightRootRef.current = undefined;
+        void window.confui.searchProject(rootToCancel, "");
+      }
       setHits([]);
       setSearching(false);
       setTruncated(false);
@@ -69,8 +82,10 @@ export function CommandPalette({
     setSearching(true);
     setSearchError(undefined);
     const timer = window.setTimeout(() => {
+      inFlightRootRef.current = project.root;
       void window.confui.searchProject(project.root, trimmed, { limit: 40 }).then((response) => {
         if (seq !== searchSeq.current) return;
+        inFlightRootRef.current = undefined;
         setSearching(false);
         if (!response.ok) {
           setHits([]);

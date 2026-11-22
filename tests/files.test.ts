@@ -1,8 +1,8 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
-import { readTextSnapshot } from "../core/files.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { HARD_FILE_LIMIT, readTextSnapshot } from "../core/files.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -33,5 +33,24 @@ describe("bounded text snapshots", () => {
 
     await writeFile(path, Buffer.from([0x61, 0x00, 0x62]));
     await expect(readTextSnapshot(path)).rejects.toMatchObject({ code: "PARSE_ERROR" });
+  });
+
+  it("allocates buffer proportionally to file size instead of a fixed 5 MiB slab", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-files-alloc-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "tiny.env");
+    await writeFile(path, "PORT=3000\n", "utf8"); // 10 bytes
+
+    const allocSpy = vi.spyOn(Buffer, "allocUnsafe");
+    try {
+      const snap = await readTextSnapshot(path, HARD_FILE_LIMIT);
+      expect(snap.text).toBe("PORT=3000\n");
+      expect(allocSpy).toHaveBeenCalled();
+      const requestedSizes = allocSpy.mock.calls.map((call) => call[0]);
+      expect(requestedSizes).toContain(11); // stat.size (10) + 1
+      expect(Math.max(...requestedSizes)).toBeLessThan(1_024);
+    } finally {
+      allocSpy.mockRestore();
+    }
   });
 });

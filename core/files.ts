@@ -35,9 +35,11 @@ export async function readTextSnapshot(
   let handle;
   try {
     handle = await open(absolutePath, "r");
-    // Read one extra byte so a file that grows after the initial stat cannot
-    // bypass the limit. This also avoids allocating an unbounded buffer.
-    const buffer = Buffer.allocUnsafe(maxBytes + 1);
+    // Allocate proportionally to the observed file size plus one guard byte so
+    // hundreds of small config files never allocate 5 MiB each, while still
+    // detecting files that grow past `info.size` or `maxBytes` during read.
+    const allocSize = Math.min(Math.max(0, info.size), maxBytes) + 1;
+    const buffer = Buffer.allocUnsafe(allocSize);
     let bytesRead = 0;
     while (bytesRead < buffer.length) {
       const chunk = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
@@ -49,6 +51,20 @@ export async function readTextSnapshot(
         "FILE_TOO_LARGE",
         "文件超过 5 MB，Confui 为避免误操作不会打开它",
         `${bytesRead} bytes`,
+      );
+    }
+    if (bytesRead > info.size) {
+      const grown = await handle.stat();
+      if (grown.size > maxBytes) {
+        throw new ConfuiError(
+          "FILE_TOO_LARGE",
+          "文件超过 5 MB，Confui 为避免误操作不会打开它",
+          `${grown.size} bytes`,
+        );
+      }
+      throw new ConfuiError(
+        "FILE_CONFLICT",
+        "文件在读取过程中发生变化，请重新加载后再试",
       );
     }
 

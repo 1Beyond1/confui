@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { scanProject } from "../core/scanner.ts";
 import { extractFileComments, searchProjectConfigs } from "../core/search.ts";
 
 const tempDirs: string[] = [];
@@ -132,5 +133,181 @@ describe("cross-file project config search", () => {
       { line: 1, text: "accent color" },
       { line: 2, text: "top note" },
     ]);
+
+    // YAML block scalar `#` content must NOT be misclassified as comments (header comment IS kept)
+    const yamlBlockComments = extractFileComments(
+      [
+        "script: | # real header comment",
+        "  # bash comment inside block",
+        "  echo hello # inline inside block",
+        "next: 1 # real trailing comment",
+      ].join("\n"),
+      "yaml",
+    );
+    expect(yamlBlockComments).toEqual([
+      { line: 1, text: "real header comment" },
+      { line: 4, text: "real trailing comment" },
+    ]);
+
+    // TOML triple-quoted multi-line strings must NOT leak `#` lines as comments
+    const tomlBlockComments = extractFileComments(
+      [
+        'body = """',
+        "# heading inside multiline string",
+        'value = 1 # not a comment',
+        '""" # real toml comment',
+        "lit = '''",
+        "# literal multiline hash",
+        "'''",
+        "# top toml comment",
+      ].join("\n"),
+      "toml",
+    );
+    expect(tomlBlockComments).toEqual([
+      { line: 4, text: "real toml comment" },
+      { line: 8, text: "top toml comment" },
+    ]);
+  });
+
+  it("ranks path > value > comment across ALL files before truncating limit, supports AbortSignal and preScanned reuse", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-search-priority-"));
+    tempDirs.push(root);
+    const commentLines = Array.from({ length: 20 }, (_, i) => `# gateway note ${i}`).join("\n") + "\nA=1\n";
+    const valueLines = Array.from({ length: 20 }, (_, i) => `ITEM_${i}=gateway-worker-${i}`).join("\n") + "\n";
+    await Promise.all([
+      writeFile(join(root, "a-comments.env"), commentLines, "utf8"),
+      writeFile(join(root, "b-values.env"), valueLines, "utf8"),
+      writeFile(join(root, "z-path.yaml"), "gateway: 8080\n", "utf8"),
+    ]);
+
+    const scanned = await scanProject(root);
+    // Even with limit=5 and concurrency=1 (processing a-comments.env first), z-path.yaml's exact path hit MUST rank #1!
+    const res = await searchProjectConfigs(root, "gateway", {
+      limit: 5,
+      concurrency: 1,
+      preScanned: { root: scanned.root, files: scanned.files },
+    });
+    expect(res.truncated).toBe(true);
+    expect(res.hits).toHaveLength(5);
+    expect(res.hits[0]).toMatchObject({
+      file: "z-path.yaml",
+      path: "gateway",
+      matchKind: "path",
+      line: 1,
+    });
+    expect(res.hits.slice(1).every((h) => h.matchKind === "value")).toBe(true);
+
+    // Pre-aborted signal returns immediately without searching any files
+    const controller = new AbortController();
+    controller.abort();
+    const aborted = await searchProjectConfigs(root, "gateway", {
+      signal: controller.signal,
+      preScanned: { root: scanned.root, files: scanned.files },
+    });
+    expect(aborted.hits).toEqual([]);
+    expect(aborted.searchedFiles).toBe(0);
+  });
+
+  it("locates accurate line numbers for identically-named keys across multiple services in YAML, TOML, JSON and INI", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-search-lines-"));
+    tempDirs.push(root);
+    await Promise.all([
+      writeFile(
+        join(root, "docker-compose.yml"),
+        [
+          "services:",
+          "  web:",
+          "    image: nginx",
+          "    port: 80",
+          "  api:",
+          "    image: node",
+          "    port: 3000",
+        ].join("\n") + "\n",
+        "utf8",
+      ),
+      writeFile(
+        join(root, "services.toml"),
+        [
+          "[services.web]",
+          "port = 80",
+          "",
+          "[services.api]",
+          "port = 3000",
+        ].join("\n") + "\n",
+        "utf8",
+      ),
+      writeFile(
+        join(root, "services.json"),
+        [
+          "{",
+          '  "services": {',
+          '    "web": {',
+          '      "port": 80',
+          "    },",
+          '    "api": {',
+          '      "port": 3000',
+          "    }",
+          "  }",
+          "}",
+        ].join("\n") + "\n",
+        "utf8",
+      ),
+      writeFile(
+        join(root, "services.ini"),
+        [
+          "[web]",
+          "port=80",
+          "",
+          "[api]",
+          "port=3000",
+        ].join("\n") + "\n",
+        "utf8",
+      ),
+    ]);
+
+    const hits = (await searchProjectConfigs(root, "port")).hits;
+    expect(hits.find((h) => h.file === "docker-compose.yml" && h.path === "services.web.port")?.line).toBe(4);
+    expect(hits.find((h) => h.file === "docker-compose.yml" && h.path === "services.api.port")?.line).toBe(7);
+    expect(hits.find((h) => h.file === "services.toml" && h.path === "services.web.port")?.line).toBe(2);
+    expect(hits.find((h) => h.file === "services.toml" && h.path === "services.api.port")?.line).toBe(5);
+    expect(hits.find((h) => h.file === "services.json" && h.path === "services.web.port")?.line).toBe(4);
+    expect(hits.find((h) => h.file === "services.json" && h.path === "services.api.port")?.line).toBe(7);
+    expect(hits.find((h) => h.file === "services.ini" && h.path === "web.port")?.line).toBe(2);
+    expect(hits.find((h) => h.file === "services.ini" && h.path === "api.port")?.line).toBe(5);
+  });
+
+  it("detects and skips intra-project file symlinks via lexical lstat before reading", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-search-symlink-"));
+    tempDirs.push(root);
+    await writeFile(join(root, "real.env"), "TARGET_KEY=found\n", "utf8");
+    let linkCreated = false;
+    try {
+      await symlink(join(root, "real.env"), join(root, "linked.env"));
+      linkCreated = true;
+    } catch {
+      // OS may disallow file symlink creation without privileges
+    }
+    if (!linkCreated) return;
+
+    // Pass preScanned explicitly referencing the symlink (simulating a TOCTOU swap after scan)
+    const res = await searchProjectConfigs(root, "TARGET_KEY", {
+      preScanned: {
+        root,
+        files: [
+          {
+            path: "linked.env",
+            kind: "env",
+            size: 17,
+            modifiedAt: Date.now(),
+            format: "env",
+            confidence: "likely",
+            status: "ready",
+          },
+        ],
+      },
+    });
+    expect(res.searchedFiles).toBe(0);
+    expect(res.skippedFiles).toBe(1);
+    expect(res.hits).toEqual([]);
   });
 });

@@ -431,6 +431,51 @@ export function createCustomFieldSpec(
   };
 }
 
+/**
+ * Resolves a search hit target (`focusPath` / `focusSegments`) to either an
+ * exact `FieldSpec` or its deepest enclosing parent `FieldSpec` when the target
+ * leaf lives inside a collapsed JSON/object/array field (e.g. `scripts.test` ->
+ * `scripts` in `package.json`).
+ */
+export function resolveFocusField(
+  fields: readonly FieldSpec[],
+  focusPath: string,
+  focusSegments?: readonly PathSegment[],
+): FieldSpec | undefined {
+  if (focusSegments?.length) {
+    const exactKey = JSON.stringify(focusSegments);
+    const exactBySegments = fields.find((field) => fieldKey(field) === exactKey);
+    if (exactBySegments) return exactBySegments;
+  }
+  const exactByPath = fields.find((field) => field.path === focusPath);
+  if (exactByPath) return exactByPath;
+
+  if (focusSegments?.length) {
+    let bestAncestor: FieldSpec | undefined;
+    for (const field of fields) {
+      if (isStrictSegmentPrefix(field.segments, focusSegments)) {
+        if (!bestAncestor || field.segments.length > bestAncestor.segments.length) {
+          bestAncestor = field;
+        }
+      }
+    }
+    if (bestAncestor) return bestAncestor;
+  }
+
+  let bestByPath: FieldSpec | undefined;
+  for (const field of fields) {
+    if (
+      focusPath.length > field.path.length
+      && (focusPath.startsWith(`${field.path}.`) || focusPath.startsWith(`${field.path}[`))
+    ) {
+      if (!bestByPath || field.path.length > bestByPath.path.length) {
+        bestByPath = field;
+      }
+    }
+  }
+  return bestByPath;
+}
+
 function isStrictSegmentPrefix(prefix: readonly PathSegment[], full: readonly PathSegment[]): boolean {
   return prefix.length < full.length && prefix.every((part, idx) => part === full[idx]);
 }
