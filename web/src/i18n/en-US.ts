@@ -102,6 +102,8 @@ export const enUS: TranslationDict = {
   "editor.emptyNoneTitle": "No configuration files found",
   "editor.emptySelectDesc": "Confui combines Schema, examples, README, and structure heuristics to generate an editable form.",
   "editor.emptyNoneDesc": "Verify the project folder path or check whether your config files use a supported format.",
+  "editor.emptyTemplatesTitle": "Example templates ready to initialize",
+  "editor.emptyTemplatesDesc": "No active config files exist yet, but {count} example template(s) were detected. Use 'Templates to Initialize' in the sidebar to create one.",
   "editor.openLocalProject": "Open Local Project",
   "editor.noFormTitle": "No editable fields detected yet",
   "editor.noFormDesc": "No key-value fields were detected in this file. You can add a new key below or inspect it in Raw view.",

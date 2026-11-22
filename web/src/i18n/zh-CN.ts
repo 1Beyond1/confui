@@ -100,6 +100,8 @@ export const zhCN = {
   "editor.emptyNoneTitle": "没有发现配置文件",
   "editor.emptySelectDesc": "Confui 会组合 Schema、示例、README 与结构推断，生成可编辑表单。",
   "editor.emptyNoneDesc": "可以确认项目路径，或检查配置文件是否属于当前支持的格式。",
+  "editor.emptyTemplatesTitle": "发现可初始化的示例模板",
+  "editor.emptyTemplatesDesc": "项目暂未创建实际配置文件，但检测到 {count} 个示例模板。请在左侧“可初始化模板”中一键创建。",
   "editor.openLocalProject": "打开本地项目",
   "editor.noFormTitle": "暂时无法生成表单",
   "editor.noFormDesc": "这个文件没有可识别的键值字段。你可以点击下方新增配置项，或在“原始内容”中查看它。",

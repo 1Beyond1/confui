@@ -331,7 +331,7 @@ export function App() {
       if (refreshedSettings.ok) setSettings(refreshedSettings.data);
       const first = scanned.files.find((file) => file.status === "ready" || file.status === "large");
       if (first) await loadFile(first, scanned.root, resolvedGithub);
-      else if (!scanned.files.length) notify(t("toast.noSupportedFiles"), "info");
+      else if (!scanned.files.length && !(scanned.templates?.length)) notify(t("toast.noSupportedFiles"), "info");
     } catch (error) {
       if (sequence === openSequence.current) notify(errorMessage(error, t("common.actionFailed")), "error");
     } finally {
@@ -1068,8 +1068,20 @@ export function App() {
             ) : view === "editor" && !schema && busy !== "infer" && (
               <div class="editor-empty">
                 <EmptyIllustration/>
-                <h1>{project?.files.length ? t("editor.emptySelectTitle") : t("editor.emptyNoneTitle")}</h1>
-                <p>{project?.files.length ? t("editor.emptySelectDesc") : t("editor.emptyNoneDesc")}</p>
+                <h1>
+                  {project?.files.length
+                    ? t("editor.emptySelectTitle")
+                    : project?.templates?.length
+                      ? t("editor.emptyTemplatesTitle")
+                      : t("editor.emptyNoneTitle")}
+                </h1>
+                <p>
+                  {project?.files.length
+                    ? t("editor.emptySelectDesc")
+                    : project?.templates?.length
+                      ? t("editor.emptyTemplatesDesc", { count: project.templates.length })
+                      : t("editor.emptyNoneDesc")}
+                </p>
                 {!project && (
                   <Button variant="primary" icon="folder-open" onClick={() => void browseForProject()}>
                     {t("editor.openLocalProject")}
