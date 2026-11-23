@@ -14,10 +14,13 @@ import {
   containsSecretValuePattern,
   isForbiddenKey,
   isHexColor,
+  isSafeRegexPattern,
   isSensitiveKey,
   setSafeProperty,
   valueContainsSecret,
 } from "../../shared/validation.ts";
+
+export { isSafeRegexPattern };
 import { translate } from "./i18n/index.tsx";
 
 export const MAX_NESTED_TREE_DEPTH = 4;
@@ -47,11 +50,7 @@ export interface DeepFieldEntry {
   searchableValue: string;
 }
 
-const MAX_REGEX_PATTERN_LENGTH = 512;
 const MAX_REGEX_TEST_VALUE_LENGTH = 4_096;
-const MAX_REGEX_GROUP_DEPTH = 6;
-const MAX_REGEX_UNBOUNDED_QUANTIFIERS = 20;
-const MAX_REGEX_BRACE_BOUND = 1_000;
 
 export interface JsonDraft {
   __confuiJsonDraft: true;
@@ -870,6 +869,14 @@ export function validateNewKeyPath(
     segments = [trimmed];
   } else if (format === "properties") {
     segments = [trimmed];
+  } else if (format === "ini") {
+    if (/[=\u0000-\u001f\u007f]/.test(rawPath)) {
+      return { segments: [], error: translate(locale, "validation.keyIniInvalid") };
+    }
+    segments = trimmed.split(".").map((part) => part.trim());
+    if (segments.some((part) => !part)) {
+      return { segments: [], error: translate(locale, "validation.keyEmptySegment") };
+    }
   } else {
     segments = trimmed.split(".").map((part) => part.trim());
     if (segments.some((part) => !part)) {
@@ -966,171 +973,6 @@ export function resolveFocusField(
 
 function isStrictSegmentPrefix(prefix: readonly PathSegment[], full: readonly PathSegment[]): boolean {
   return prefix.length < full.length && prefix.every((part, idx) => part === full[idx]);
-}
-
-/**
- * Static linear-time ReDoS guard for regex patterns sourced from untrusted
- * `$schema` files or AI inference. Rejects overly long patterns, backreferences,
- * nested quantifiers (star-height > 1), repeated alternation groups, and
- * consecutive unbounded wildcard sequences.
- */
-export function isSafeRegexPattern(pattern: string): boolean {
-  if (!pattern || pattern.length > MAX_REGEX_PATTERN_LENGTH) return false;
-  interface GroupFrame {
-    hasQuantifier: boolean;
-    hasAlternation: boolean;
-    isLookaround: boolean;
-  }
-  const stack: GroupFrame[] = [];
-  let lastToken: "none" | "atom" | "group" | "quantifier" = "none";
-  let lastAtomWasDot = false;
-  let lastClosedGroup: GroupFrame | undefined;
-  let unboundedCount = 0;
-  let prevWasWildcardRepeat = false;
-
-  for (let i = 0; i < pattern.length; i += 1) {
-    const ch = pattern[i]!;
-
-    if (ch === "\\") {
-      if (i + 1 >= pattern.length) return false;
-      const next = pattern[i + 1]!;
-      if ((next >= "1" && next <= "9") || next === "k") return false;
-      i += 1;
-      lastToken = "atom";
-      lastAtomWasDot = false;
-      prevWasWildcardRepeat = false;
-      continue;
-    }
-
-    if (ch === "[") {
-      let closed = false;
-      for (i += 1; i < pattern.length; i += 1) {
-        if (pattern[i] === "\\") {
-          i += 1;
-          continue;
-        }
-        if (pattern[i] === "]") {
-          closed = true;
-          break;
-        }
-      }
-      if (!closed) return false;
-      lastToken = "atom";
-      lastAtomWasDot = false;
-      prevWasWildcardRepeat = false;
-      continue;
-    }
-
-    if (ch === "(") {
-      if (stack.length >= MAX_REGEX_GROUP_DEPTH) return false;
-      let isLookaround = false;
-      if (pattern[i + 1] === "?") {
-        if (pattern.startsWith("(?<=", i) || pattern.startsWith("(?<!", i)) {
-          isLookaround = true;
-          i += 3;
-        } else if (pattern.startsWith("(?=", i) || pattern.startsWith("(?!", i)) {
-          isLookaround = true;
-          i += 2;
-        } else if (pattern.startsWith("(?:", i)) {
-          i += 2;
-        } else if (pattern.startsWith("(?<", i)) {
-          const endName = pattern.indexOf(">", i + 3);
-          if (endName < 0) return false;
-          i = endName;
-        }
-      }
-      stack.push({ hasQuantifier: false, hasAlternation: false, isLookaround });
-      lastToken = "none";
-      lastAtomWasDot = false;
-      prevWasWildcardRepeat = false;
-      continue;
-    }
-
-    if (ch === ")") {
-      const closed = stack.pop();
-      if (!closed) return false;
-      if (closed.isLookaround && closed.hasQuantifier) return false;
-      if (closed.hasQuantifier && stack.length > 0) {
-        stack.at(-1)!.hasQuantifier = true;
-      }
-      lastClosedGroup = closed;
-      lastToken = "group";
-      lastAtomWasDot = false;
-      prevWasWildcardRepeat = false;
-      continue;
-    }
-
-    if (ch === "|") {
-      if (stack.length > 0) stack.at(-1)!.hasAlternation = true;
-      lastToken = "none";
-      lastAtomWasDot = false;
-      prevWasWildcardRepeat = false;
-      continue;
-    }
-
-    if (ch === "?" && lastToken === "quantifier") {
-      // Lazy quantifier suffix (`*?`, `+?`, `{m,n}?`)
-      continue;
-    }
-
-    let quant: { min: number; max: number; isUnbounded: boolean } | undefined;
-    if (ch === "*") {
-      quant = { min: 0, max: Number.POSITIVE_INFINITY, isUnbounded: true };
-    } else if (ch === "+") {
-      quant = { min: 1, max: Number.POSITIVE_INFINITY, isUnbounded: true };
-    } else if (ch === "?") {
-      quant = { min: 0, max: 1, isUnbounded: false };
-    } else if (ch === "{") {
-      const braceMatch = pattern.slice(i).match(/^\{(\d+)(?:,(\d*))?\}/);
-      if (braceMatch) {
-        const min = Number(braceMatch[1]);
-        const hasComma = braceMatch[0].includes(",");
-        const max = !hasComma
-          ? min
-          : braceMatch[2]
-            ? Number(braceMatch[2])
-            : Number.POSITIVE_INFINITY;
-        if (!Number.isFinite(min) || (Number.isFinite(max) && max < min)) return false;
-        quant = { min, max, isUnbounded: !Number.isFinite(max) };
-        i += braceMatch[0].length - 1;
-      }
-    }
-
-    if (quant) {
-      if (lastToken === "none" || lastToken === "quantifier") return false;
-      if (quant.min > MAX_REGEX_BRACE_BOUND || (Number.isFinite(quant.max) && quant.max > MAX_REGEX_BRACE_BOUND)) {
-        return false;
-      }
-      if (quant.isUnbounded) {
-        unboundedCount += 1;
-        if (unboundedCount > MAX_REGEX_UNBOUNDED_QUANTIFIERS) return false;
-      }
-      const repeatsMultiple = quant.isUnbounded || quant.max > 1;
-      if (lastToken === "group" && lastClosedGroup && repeatsMultiple) {
-        const highRepeat = quant.isUnbounded || quant.max > 5;
-        if (lastClosedGroup.hasQuantifier && highRepeat) return false;
-        if (lastClosedGroup.hasAlternation && highRepeat) return false;
-      }
-      if (repeatsMultiple && stack.length > 0) {
-        stack.at(-1)!.hasQuantifier = true;
-      }
-      if (lastToken === "atom" && lastAtomWasDot && quant.isUnbounded) {
-        if (prevWasWildcardRepeat) return false;
-        prevWasWildcardRepeat = true;
-      } else {
-        prevWasWildcardRepeat = false;
-      }
-      lastToken = "quantifier";
-      lastAtomWasDot = false;
-      continue;
-    }
-
-    lastToken = "atom";
-    lastAtomWasDot = ch === ".";
-    if (ch !== ".") prevWasWildcardRepeat = false;
-  }
-
-  return stack.length === 0;
 }
 
 function deepEqual(left: unknown, right: unknown): boolean {

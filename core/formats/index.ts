@@ -1,6 +1,6 @@
 import type { ConfigChange, ConfigFormat } from "../../shared/schema.ts";
 import { ConfuiError } from "../errors.ts";
-import { normalizeLineEndings, stripBom, UTF8_BOM } from "./common.ts";
+import { extractBaseName, normalizeLineEndings, stripBom, UTF8_BOM } from "./common.ts";
 import { parseEnv, patchEnv, stringifyEnv } from "./env.ts";
 import { isUnambiguousIniName, looksLikeIni, parseIni, patchIni, stringifyIni } from "./ini.ts";
 import { parseJsonc, stringifyJsonc, updateJsonc } from "./json.ts";
@@ -30,7 +30,8 @@ export interface FormatDocumentOptions {
 }
 
 export function detectFormat(filename: string): ConfigFormat | null {
-  const lower = filename.toLowerCase();
+  const lower = extractBaseName(filename).toLowerCase();
+  if (!lower) return null;
   if (lower.endsWith(".jsonc")) return "jsonc";
   if (lower.endsWith(".json") || lower === ".eslintrc" || lower === ".prettierrc") return "json";
   if (lower.endsWith(".yaml") || lower.endsWith(".yml")) return "yaml";

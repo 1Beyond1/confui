@@ -10,6 +10,8 @@ import {
   parseDocument,
   stringify as stringifyYamlLib,
   type Document,
+  type Pair,
+  type YAMLMap,
 } from "yaml";
 import type { ConfigChange, PathSegment, YamlDocumentSummary } from "../../shared/schema.ts";
 import { containsSecretValuePattern, setSafeProperty } from "../../shared/validation.ts";
@@ -220,7 +222,7 @@ function updateSingleYamlDocument(
     const indent = detectYamlIndent(sliceSource);
     for (const item of prepared) {
       if (item.value === YAML_DELETE) {
-        doc.deleteIn(item.segments);
+        deleteCstPath(doc, item.segments);
       } else {
         applyCstUpdate(doc, item.segments, item.value);
       }
@@ -357,6 +359,70 @@ function cloneWithoutSharedRefs(value: unknown): unknown {
   return result;
 }
 
+function matchYamlMapPair(map: YAMLMap, segment: PathSegment): Pair | undefined {
+  const exact = map.items.find((item) => {
+    if (!isPair(item)) return false;
+    const keyVal = isScalar(item.key) ? item.key.value : item.key;
+    return Object.is(keyVal, segment);
+  });
+  if (exact) return exact;
+  if (typeof segment !== "string") return undefined;
+  return map.items.find((item) => {
+    if (!isPair(item) || !isScalar(item.key)) return false;
+    const keyVal = item.key.value;
+    if (keyVal === null || keyVal === undefined) {
+      return segment === "" || item.key.source === segment;
+    }
+    if (typeof keyVal === "number" || typeof keyVal === "boolean") {
+      return String(keyVal) === segment || item.key.source === segment;
+    }
+    if (typeof keyVal === "bigint") {
+      return keyVal.toString() === segment || item.key.source === segment;
+    }
+    return typeof item.key.source === "string" && item.key.source === segment;
+  });
+}
+
+function resolveYamlCstPath(doc: Document, segments: readonly PathSegment[]): unknown[] {
+  const resolved: unknown[] = [];
+  let current: unknown = doc.contents;
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i]!;
+    if (isMap(current)) {
+      const pair = matchYamlMapPair(current, segment);
+      if (pair) {
+        resolved.push(isScalar(pair.key) ? pair.key.value : pair.key);
+        current = pair.value;
+        continue;
+      }
+      resolved.push(...segments.slice(i));
+      break;
+    }
+    if (isSeq(current) && typeof segment === "number") {
+      resolved.push(segment);
+      current = current.items[segment];
+      continue;
+    }
+    resolved.push(...segments.slice(i));
+    break;
+  }
+  return resolved;
+}
+
+function deleteCstPath(doc: Document, segments: readonly PathSegment[]): void {
+  if (!segments.length) return;
+  const cstPath = resolveYamlCstPath(doc, segments);
+  if (doc.deleteIn(cstPath)) return;
+  const parent = cstPath.length === 1 ? doc.contents : doc.getIn(cstPath.slice(0, -1), true);
+  if (isMap(parent)) {
+    const targetPair = matchYamlMapPair(parent, segments.at(-1)!);
+    if (targetPair) {
+      const idx = parent.items.indexOf(targetPair);
+      if (idx >= 0) parent.items.splice(idx, 1);
+    }
+  }
+}
+
 function applyCstUpdate(doc: Document, segments: readonly PathSegment[], value: unknown): void {
   if (!segments.length) return;
   if (doc.contents === null || doc.contents === undefined || (isScalar(doc.contents) && doc.contents.value === null)) {
@@ -369,7 +435,8 @@ function applyCstUpdate(doc: Document, segments: readonly PathSegment[], value: 
     }
     doc.contents = rootNode;
   }
-  const existing = doc.getIn(segments, true);
+  const cstPath = resolveYamlCstPath(doc, segments);
+  const existing = doc.getIn(cstPath, true);
   if (isScalar(existing) && isYamlScalarJsValue(value)) {
     const prevType = existing.type;
     existing.value = value instanceof Date ? value.toISOString() : value;
@@ -387,7 +454,7 @@ function applyCstUpdate(doc: Document, segments: readonly PathSegment[], value: 
     if (existing.commentBefore) nextNode.commentBefore = existing.commentBefore;
     if (existing.spaceBefore) nextNode.spaceBefore = existing.spaceBefore;
   }
-  doc.setIn(segments, nextNode);
+  doc.setIn(cstPath, nextNode);
 }
 
 function isYamlScalarJsValue(value: unknown): boolean {
@@ -403,11 +470,7 @@ function pathCrossesAlias(doc: Document, segments: readonly PathSegment[]): bool
   for (const segment of segments) {
     if (isAlias(current)) return true;
     if (isMap(current)) {
-      const pair = current.items.find((item) => {
-        if (!isPair(item)) return false;
-        const keyVal = isScalar(item.key) ? item.key.value : item.key;
-        return keyVal === segment;
-      });
+      const pair = matchYamlMapPair(current, segment);
       if (!pair) {
         // Also check merge keys (`<<: *alias`) where the edited key might originate from an alias.
         const hasMerge = current.items.some((item) => {

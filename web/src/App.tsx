@@ -12,6 +12,7 @@ import type {
   FieldType,
   Locale,
   PathSegment,
+  ProjectDiagnosticIssue,
   ProjectScanResult,
   ProjectSearchHit,
   RecentProject,
@@ -27,10 +28,12 @@ import { CompareSyncModal } from "./components/CompareSyncModal.tsx";
 import { EditorSkeleton, EditorSummary } from "./components/EditorSummary.tsx";
 import { ExportRedactedModal } from "./components/ExportRedactedModal.tsx";
 import { HomePage } from "./components/HomePage.tsx";
+import { ProjectDiagnosticsModal } from "./components/ProjectDiagnosticsModal.tsx";
 import { RawViewer } from "./components/RawViewer.tsx";
 import { RestoreBackupModal } from "./components/RestoreBackupModal.tsx";
 import { SaveConfirmModal } from "./components/SaveConfirmModal.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
+import { SnapshotsModal } from "./components/SnapshotsModal.tsx";
 import { UnsavedConfigModal, UnsavedSettingsModal } from "./components/UnsavedModals.tsx";
 import { FieldEditor } from "./FieldEditor.tsx";
 import {
@@ -109,6 +112,8 @@ export function App() {
   const [addKeyOpen, setAddKeyOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [snapshotsOpen, setSnapshotsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [focusFieldRequest, setFocusFieldRequest] = useState<{ file: string; documentIndex?: number; path: string; segments?: PathSegment[]; token: number }>();
   const [focusLineRequest, setFocusLineRequest] = useState<{ file: string; line: number; token: number }>();
@@ -266,7 +271,15 @@ export function App() {
   const keydownHandlerRef = useRef<(event: KeyboardEvent) => void>();
   keydownHandlerRef.current = (event: KeyboardEvent) => {
     const anyBlockingModal = Boolean(
-      savePreview || restorePreview || addKeyOpen || compareOpen || exportOpen || pendingAction || pendingSettingsAction,
+      savePreview
+      || restorePreview
+      || addKeyOpen
+      || compareOpen
+      || exportOpen
+      || diagnosticsOpen
+      || snapshotsOpen
+      || pendingAction
+      || pendingSettingsAction,
     );
     const anyModalOpen = anyBlockingModal || commandPaletteOpen;
     const mod = event.ctrlKey || event.metaKey;
@@ -303,14 +316,9 @@ export function App() {
       }
     }
     if (event.key === "Escape") {
+      // `<Modal>` dialogs handle Escape directly (respecting `closeDisabled` while busy);
+      // only close CommandPalette here when no blocking modal is active.
       if (commandPaletteOpen) setCommandPaletteOpen(false);
-      else if (savePreview) closeSavePreview();
-      else if (restorePreview && busy !== "restore") setRestorePreview(undefined);
-      else if (addKeyOpen) setAddKeyOpen(false);
-      else if (compareOpen) setCompareOpen(false);
-      else if (exportOpen) setExportOpen(false);
-      else if (pendingAction) setPendingAction(undefined);
-      else if (pendingSettingsAction) setPendingSettingsAction(undefined);
     }
   };
 
@@ -470,8 +478,20 @@ export function App() {
     }
   }
 
-  function requestAction(action: PendingAction): void {
-    if (busy !== null || savePreview || restorePreview || addKeyOpen || compareOpen || exportOpen || pendingAction || pendingSettingsAction) return;
+  function requestAction(action: PendingAction, options?: { ignoreDiagnosticsOpen?: boolean }): void {
+    const blockedByDiagnostics = diagnosticsOpen && !options?.ignoreDiagnosticsOpen;
+    if (
+      busy !== null
+      || savePreview
+      || restorePreview
+      || addKeyOpen
+      || compareOpen
+      || exportOpen
+      || blockedByDiagnostics
+      || snapshotsOpen
+      || pendingAction
+      || pendingSettingsAction
+    ) return;
     if (view === "settings" && settingsDirty && action.kind !== "settings") {
       setPendingSettingsAction(action);
       return;
@@ -896,6 +916,40 @@ export function App() {
     });
   }
 
+  function handleSelectDiagnosticIssue(issue: ProjectDiagnosticIssue): void {
+    setDiagnosticsOpen(false);
+    if (!project) return;
+    const targetFile = project.files.find((file) => file.path === issue.file);
+    if (!targetFile) {
+      notify(t("toast.fileUnopenable"), "error");
+      return;
+    }
+    const openRaw = issue.category === "parse-error" || !issue.path;
+    requestAction(
+      {
+        kind: "file",
+        file: targetFile,
+        focusFieldPath: openRaw ? undefined : issue.path,
+        focusFieldSegments: openRaw ? undefined : issue.segments,
+        focusLine: issue.line,
+        openRaw,
+        documentIndex: issue.documentIndex,
+      },
+      { ignoreDiagnosticsOpen: true },
+    );
+  }
+
+  async function handleSnapshotRestored(restoredFile: string, backupPath: string): Promise<void> {
+    setSnapshotsOpen(false);
+    const backupName = backupPath.split(/[\\/]/).at(-1) ?? ".bak";
+    notify(t("toast.restoredFromSnapshot", { file: restoredFile, backup: backupName }), "success");
+    if (project && activeFile && activeFile.path === restoredFile) {
+      await loadFile(activeFile, project.root, githubInput, locale, {
+        documentIndex: schema?.activeDocumentIndex,
+      });
+    }
+  }
+
   function handleSelectDeepField(entry: DeepFieldEntry): void {
     if (!schema) return;
     setView("editor");
@@ -961,6 +1015,24 @@ export function App() {
         icon: "download",
         disabled: !(view === "editor" && schema),
         run: () => setExportOpen(true),
+      },
+      {
+        id: "diagnose-project",
+        label: t("palette.cmdDiagnostics"),
+        description: project?.name,
+        keywords: "diagnostics health check lint audit schema missing env secret 诊断 检查 体检",
+        icon: "shield",
+        disabled: !project,
+        run: () => setDiagnosticsOpen(true),
+      },
+      {
+        id: "snapshots",
+        label: t("palette.cmdSnapshots"),
+        description: schema?.file,
+        keywords: "snapshot history rollback backup restore diff 快照 历史 回滚",
+        icon: "archive",
+        disabled: !(view === "editor" && schema),
+        run: () => setSnapshotsOpen(true),
       },
       {
         id: "add-key",
@@ -1103,6 +1175,17 @@ export function App() {
                 <span>{t("palette.triggerLabel")}</span>
                 <kbd>Ctrl+K</kbd>
               </button>
+              {view === "editor" && project && (
+                <Button
+                  variant="ghost"
+                  icon="shield"
+                  disabled={busy !== null}
+                  onClick={() => setDiagnosticsOpen(true)}
+                  title={t("topbar.diagnosticsTooltip")}
+                >
+                  {t("topbar.diagnosticsAction")}
+                </Button>
+              )}
               {view === "editor" && schema && (
                 <>
                   <div class="view-tabs" role="tablist" aria-orientation="horizontal">
@@ -1245,6 +1328,7 @@ export function App() {
                   onSelectYamlDocument={(documentIndex) => requestAction({ kind: "yaml-doc", documentIndex })}
                   onOpenCompare={() => setCompareOpen(true)}
                   onOpenExportRedacted={() => setExportOpen(true)}
+                  onOpenSnapshots={() => setSnapshotsOpen(true)}
                   onRestoreBackup={() => void beginRestoreBackup()}
                 />
                 {allFields.length ? (
@@ -1403,6 +1487,31 @@ export function App() {
             documentIndex={schema.activeDocumentIndex}
             scopedSecretPaths={scopedSecretPathsForExport}
             onClose={() => setExportOpen(false)}
+            onToast={notify}
+          />
+        )}
+
+        {diagnosticsOpen && project && (
+          <ProjectDiagnosticsModal
+            projectRoot={project.root}
+            projectName={project.name}
+            onClose={() => setDiagnosticsOpen(false)}
+            onSelectIssue={handleSelectDiagnosticIssue}
+          />
+        )}
+
+        {snapshotsOpen && project && schema && (
+          <SnapshotsModal
+            projectRoot={project.root}
+            file={schema.file}
+            format={schema.format}
+            currentVersion={schema.version}
+            fields={allFields}
+            documentSecrets={schema.documentSecrets}
+            activeDocumentIndex={schema.activeDocumentIndex}
+            activeFileDirty={dirty}
+            onClose={() => setSnapshotsOpen(false)}
+            onRestored={(restoredFile, backupPath) => void handleSnapshotRestored(restoredFile, backupPath)}
             onToast={notify}
           />
         )}

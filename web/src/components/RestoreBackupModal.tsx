@@ -52,6 +52,7 @@ export function RestoreBackupModal({
       title={t("restoreModal.title")}
       description={t("restoreModal.desc", { file: preview.file, time: backupTime })}
       width="760px"
+      closeDisabled={restoring}
       onClose={onClose}
       footer={(
         <>

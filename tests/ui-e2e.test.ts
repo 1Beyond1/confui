@@ -437,6 +437,11 @@ describe("UI state, diff, validation & i18n integration", () => {
       "confui:previewRedactedExport",
       "confui:saveRedactedExport",
       "confui:searchProject",
+      "confui:diagnoseProject",
+      "confui:listSnapshots",
+      "confui:saveSnapshot",
+      "confui:previewSnapshotRestore",
+      "confui:deleteSnapshot",
     ]) {
       expect(preloadSource).toContain(channel);
       expect(mainSource).toContain(channel);
@@ -469,5 +474,21 @@ describe("UI state, diff, validation & i18n integration", () => {
     const summarySource = await readFile(resolve(REPO_ROOT, "web/src/components/EditorSummary.tsx"), "utf8");
     expect(summarySource).toContain("yamlDocuments");
     expect(summarySource).toContain("onSelectYamlDocument");
+    expect(summarySource).toContain("onOpenSnapshots");
+
+    // v0.5.0 Diagnostics & Named Snapshots UI wiring contracts
+    const diagModalSource = await readFile(resolve(REPO_ROOT, "web/src/components/ProjectDiagnosticsModal.tsx"), "utf8");
+    expect(diagModalSource).toContain("diagnoseProject");
+    expect(diagModalSource).toContain("onSelectIssue");
+
+    const snapModalSource = await readFile(resolve(REPO_ROOT, "web/src/components/SnapshotsModal.tsx"), "utf8");
+    expect(snapModalSource).toContain("previewSnapshotRestore");
+    expect(snapModalSource).toContain("UnifiedDiffView");
+    expect(snapModalSource).toContain("maskSecrets={!revealSecrets}");
+    expect(snapModalSource).toContain("closeDisabled={busy}");
+
+    expect(appSource).toContain("ProjectDiagnosticsModal");
+    expect(appSource).toContain("SnapshotsModal");
+    expect(appSource).toContain("handleSelectDiagnosticIssue");
   });
 });

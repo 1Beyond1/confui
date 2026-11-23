@@ -3,14 +3,15 @@ import type { ConfigChange, PathSegment } from "../../shared/schema.ts";
 import { isForbiddenKey, isSensitiveKey, setSafeProperty } from "../../shared/validation.ts";
 import { ConfuiError } from "../errors.ts";
 import { getAtPath } from "../paths.ts";
-import { assertAppendable, detectEol, escapeRegExp, isScalarValue, stripBom } from "./common.ts";
+import { assertAppendable, detectEol, escapeRegExp, extractBaseName, isScalarValue, stripBom } from "./common.ts";
 
 /** Share of meaningful lines that must look like `[section]` or `key=value`. */
 const INI_ASSIGNMENT_RATIO = 0.8;
+const INI_INVALID_SEGMENT_CHAR_RE = /[=\u0000-\u001f\u007f]/;
 
 /** True when the filename alone is enough to trust the INI parser. */
 export function isUnambiguousIniName(filename: string): boolean {
-  const lower = filename.toLowerCase();
+  const lower = extractBaseName(filename).toLowerCase();
   return lower.endsWith(".ini") || lower === ".editorconfig" || lower === ".npmrc";
 }
 
@@ -111,6 +112,7 @@ export function patchIni(text: string, changes: readonly ConfigChange[]): string
       || change.segments.some((part) => typeof part !== "string" || isForbiddenKey(part))) {
       throw new ConfuiError("SAVE_ERROR", "INI 只支持字符串类型的节与键");
     }
+    assertValidIniSegments(change.segments as string[]);
     if (change.value !== undefined) assertIniValue(change.value);
     updates.set(JSON.stringify(change.segments), { ...change, wrote: false });
   }
@@ -358,6 +360,18 @@ function formatIniAssignments(key: string, value: unknown): string[] {
     return value.map((item) => `${ini.safe(key)}[]=${formatIniValue(item)}`);
   }
   return [`${ini.safe(key)}=${formatIniValue(value)}`];
+}
+
+function assertValidIniSegments(segments: readonly string[]): void {
+  for (const segment of segments) {
+    if (!segment.trim() || INI_INVALID_SEGMENT_CHAR_RE.test(segment)) {
+      throw new ConfuiError(
+        "SAVE_ERROR",
+        `INI 节或键名无效：${JSON.stringify(segment)}`,
+        "INI 键名和节名不能为空，且不能包含 =、换行符或控制字符。",
+      );
+    }
+  }
 }
 
 function assertIniValue(value: unknown): void {

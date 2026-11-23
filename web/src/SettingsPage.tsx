@@ -39,10 +39,21 @@ export function SettingsPage({
   const [appInfo, setAppInfo] = useState<AppInfo>();
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult>();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const mountedRef = useRef(true);
   const testRun = useRef(0);
+  const updateRun = useRef(0);
   const [apiKeysByProvider, setApiKeysByProvider] = useState<Record<string, string>>(() => ({
     [settings.ai.provider]: settings.ai.apiKey,
   }));
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      testRun.current += 1;
+      updateRun.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     setDraft(structuredClone(settings));
@@ -51,9 +62,11 @@ export function SettingsPage({
   }, [settings]);
   useEffect(() => setApiKeysByProvider({ [settings.ai.provider]: settings.ai.apiKey }), [settings]);
   useEffect(() => {
+    let cancelled = false;
     void window.confui.getAppInfo().then((result) => {
-      if (result.ok) setAppInfo(result.data);
+      if (!cancelled && result.ok) setAppInfo(result.data);
     });
+    return () => { cancelled = true; };
   }, []);
 
   const dirty = useMemo(
@@ -119,11 +132,13 @@ export function SettingsPage({
           : undefined,
       };
       await onSave(payload);
+      if (!mountedRef.current) return;
       onToast(translate(draft.locale, "settings.toastSaved"), "success");
     } catch (error) {
+      if (!mountedRef.current) return;
       onToast(error instanceof Error ? error.message : t("settings.toastSaveFailed"), "error");
     } finally {
-      setSaving(false);
+      if (mountedRef.current) setSaving(false);
     }
   }
 
@@ -155,14 +170,14 @@ export function SettingsPage({
     setTesting(true);
     try {
       const result = await window.confui.testAI(testedAi);
+      if (!mountedRef.current || run !== testRun.current) return;
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
-      if (run !== testRun.current) return;
       onToast(t("settings.testSuccess", { ms: result.data.latencyMs }), "success");
     } catch (error) {
-      if (run !== testRun.current) return;
+      if (!mountedRef.current || run !== testRun.current) return;
       onToast(error instanceof Error ? error.message : t("settings.testFailed"), "error");
     } finally {
-      setTesting(false);
+      if (mountedRef.current && run === testRun.current) setTesting(false);
     }
   }
 
@@ -178,9 +193,12 @@ export function SettingsPage({
   }
 
   async function checkUpdates(): Promise<void> {
+    if (checkingUpdate) return;
+    const run = ++updateRun.current;
     setCheckingUpdate(true);
     try {
       const result = await window.confui.checkForUpdates();
+      if (!mountedRef.current || run !== updateRun.current) return;
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       setUpdateResult(result.data);
       const currentRelease = result.data.currentVersion === result.data.latestVersion;
@@ -191,15 +209,16 @@ export function SettingsPage({
         result.data.updateAvailable ? "info" : "success",
       );
     } catch (error) {
+      if (!mountedRef.current || run !== updateRun.current) return;
       onToast(error instanceof Error ? error.message : t("settings.toastUpdateFailed"), "error");
     } finally {
-      setCheckingUpdate(false);
+      if (mountedRef.current && run === updateRun.current) setCheckingUpdate(false);
     }
   }
 
   async function openReleasePage(): Promise<void> {
     const result = await window.confui.openReleasePage();
-    if (!result.ok) onToast(result.error.detail || result.error.message, "error");
+    if (mountedRef.current && !result.ok) onToast(result.error.detail || result.error.message, "error");
   }
 
   return (

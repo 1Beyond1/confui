@@ -1,8 +1,18 @@
+import { posix as posixPath, win32 as win32Path } from "node:path";
 import type { ConfigFormat, PathSegment } from "../../shared/schema.ts";
 import { ConfuiError } from "../errors.ts";
 import { getAtPath } from "../paths.ts";
 
 export const UTF8_BOM = "\uFEFF";
+
+/**
+ * Extracts the bare filename from either POSIX (`/`) or Windows (`\`) paths.
+ * Returns an empty string for trailing-slash directory paths.
+ */
+export function extractBaseName(filename: string): string {
+  if (!filename || filename.endsWith("/") || filename.endsWith("\\")) return "";
+  return posixPath.basename(win32Path.basename(filename));
+}
 
 export function stripBom(text: string): string {
   return text.startsWith(UTF8_BOM) ? text.slice(1) : text;

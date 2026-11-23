@@ -123,6 +123,7 @@ export function SaveConfirmModal({
       title={t("saveModal.title")}
       description={t("saveModal.desc", { file: savePreview.file })}
       width="760px"
+      closeDisabled={saving}
       onClose={onClose}
       footer={(
         <>

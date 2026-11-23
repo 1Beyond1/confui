@@ -4,17 +4,6 @@ import type { FieldSource } from "../../shared/schema.ts";
 import { sourceLabel, useI18n } from "./i18n/index.tsx";
 import { Icon, type IconName } from "./icons.tsx";
 
-export const SOURCE_LABELS: Record<FieldSource, string> = {
-  "json-schema": "JSON Schema",
-  "known-template": "内置模板",
-  schemastore: "SchemaStore",
-  comment: "文件注释",
-  example: "示例文件",
-  readme: "README",
-  ai: "AI 分析",
-  heuristic: "结构推断",
-};
-
 export function Logo({ compact = false }: { compact?: boolean }) {
   const { t } = useI18n();
   return (
@@ -62,6 +51,7 @@ export function Modal({
   children,
   footer,
   onClose,
+  closeDisabled = false,
   width = "560px",
 }: {
   title: string;
@@ -69,12 +59,15 @@ export function Modal({
   children?: ComponentChildren;
   footer: ComponentChildren;
   onClose: () => void;
+  closeDisabled?: boolean;
   width?: string;
 }) {
   const { t } = useI18n();
   const dialogRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const closeDisabledRef = useRef(closeDisabled);
+  closeDisabledRef.current = closeDisabled;
   const modalId = useId();
   const titleId = `${modalId}-title`;
   const descriptionId = `${modalId}-description`;
@@ -90,7 +83,8 @@ export function Modal({
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        onCloseRef.current();
+        event.stopPropagation();
+        if (!closeDisabledRef.current) onCloseRef.current();
         return;
       }
       if (event.key !== "Tab") return;
@@ -119,7 +113,7 @@ export function Modal({
 
   return (
     <div class="modal-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose();
+      if (event.target === event.currentTarget && !closeDisabled) onClose();
     }}>
       <section ref={dialogRef} class="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined} tabIndex={-1} style={{ maxWidth: width }}>
         <header class="modal__header">
@@ -127,7 +121,14 @@ export function Modal({
             <h2 id={titleId}>{title}</h2>
             {description && <p id={descriptionId}>{description}</p>}
           </div>
-          <button class="icon-button" onClick={onClose} aria-label={t("common.close")}><Icon name="x"/></button>
+          <button
+            class="icon-button"
+            disabled={closeDisabled}
+            onClick={() => { if (!closeDisabled) onClose(); }}
+            aria-label={t("common.close")}
+          >
+            <Icon name="x"/>
+          </button>
         </header>
         {children && <div class="modal__body">{children}</div>}
         <footer class="modal__footer">{footer}</footer>

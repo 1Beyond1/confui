@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type {
   CompareConfigOptions,
   CompareEntryStatus,
@@ -56,6 +56,16 @@ export function CompareSyncModal({
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string>();
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const mountedRef = useRef(true);
+  const syncSeqRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      syncSeqRef.current += 1;
+    };
+  }, []);
 
   const sourceIsYaml = useMemo(
     () => openableFiles.find((file) => file.path === sourceFile)?.format === "yaml",
@@ -172,6 +182,7 @@ export function CompareSyncModal({
       .filter((entry) => selected.has(JSON.stringify(entry.segments)))
       .map((entry) => entry.segments);
     if (!segmentsList.length) return;
+    const seq = ++syncSeqRef.current;
     setSyncing(true);
     setError(undefined);
     try {
@@ -190,12 +201,16 @@ export function CompareSyncModal({
         result.targetVersion,
         syncOptions,
       );
+      if (!mountedRef.current || seq !== syncSeqRef.current) return;
       if (!response.ok) throw new Error(response.error.detail || response.error.message);
       onPreviewReady(response.data);
     } catch (err) {
+      if (!mountedRef.current || seq !== syncSeqRef.current) return;
       setError(errorMessage(err, t("common.actionFailed")));
     } finally {
-      setSyncing(false);
+      if (mountedRef.current && seq === syncSeqRef.current) {
+        setSyncing(false);
+      }
     }
   }
 
@@ -213,10 +228,11 @@ export function CompareSyncModal({
       title={t("compare.title")}
       description={t("compare.desc")}
       width="860px"
-      onClose={onClose}
+      closeDisabled={syncing}
+      onClose={() => { if (!syncing) onClose(); }}
       footer={(
         <>
-          <Button onClick={onClose} disabled={syncing}>{t("common.cancel")}</Button>
+          <Button onClick={() => { if (!syncing) onClose(); }} disabled={syncing}>{t("common.cancel")}</Button>
           <Button
             variant="primary"
             icon="compare"
@@ -237,6 +253,7 @@ export function CompareSyncModal({
               <button
                 key={group.id}
                 type="button"
+                disabled={syncing}
                 class={`compare-group-pill ${group.files.includes(sourceFile) && group.files.includes(targetFile) ? "active" : ""}`}
                 onClick={() => {
                   const first = group.files[0];

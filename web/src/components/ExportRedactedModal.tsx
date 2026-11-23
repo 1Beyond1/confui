@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import type { PathSegment, RedactedExportOptions, RedactedExportPreview, ScopedSecretPath } from "../../../shared/schema.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Icon } from "../icons.tsx";
@@ -28,6 +28,19 @@ export function ExportRedactedModal({
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string>();
+  const mountedRef = useRef(true);
+  const copyTimerRef = useRef<number>();
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (copyTimerRef.current !== undefined) {
+        window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = undefined;
+      }
+    };
+  }, []);
 
   const exportOptions: RedactedExportOptions | undefined =
     documentIndex !== undefined || (scopedSecretPaths && scopedSecretPaths.length > 0)
@@ -54,13 +67,19 @@ export function ExportRedactedModal({
   }, [projectRoot, file, secretPaths, documentIndex, scopedSecretPaths]);
 
   async function handleCopy(): Promise<void> {
-    if (!preview) return;
+    if (!preview || saving) return;
     try {
       await navigator.clipboard.writeText(preview.content);
+      if (!mountedRef.current) return;
       setCopied(true);
       onToast(t("exportModal.copiedToast"), "success");
-      window.setTimeout(() => setCopied(false), 2_000);
+      if (copyTimerRef.current !== undefined) window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => {
+        copyTimerRef.current = undefined;
+        if (mountedRef.current) setCopied(false);
+      }, 2_000);
     } catch {
+      if (!mountedRef.current) return;
       onToast(t("exportModal.copyFailed"), "error");
     }
   }
@@ -70,6 +89,7 @@ export function ExportRedactedModal({
     setSaving(true);
     try {
       const result = await window.confui.saveRedactedExport(projectRoot, file, secretPaths, exportOptions);
+      if (!mountedRef.current) return;
       if (!result.ok) throw new Error(result.error.detail || result.error.message);
       if (result.data.savedPath) {
         const savedName = result.data.savedPath.split(/[\\/]/).at(-1) ?? preview.suggestedFileName;
@@ -77,9 +97,10 @@ export function ExportRedactedModal({
         onClose();
       }
     } catch (err) {
+      if (!mountedRef.current) return;
       onToast(errorMessage(err, t("common.actionFailed")), "error");
     } finally {
-      setSaving(false);
+      if (mountedRef.current) setSaving(false);
     }
   }
 
@@ -88,10 +109,11 @@ export function ExportRedactedModal({
       title={t("exportModal.title")}
       description={t("exportModal.desc", { file })}
       width="760px"
-      onClose={onClose}
+      closeDisabled={saving}
+      onClose={() => { if (!saving) onClose(); }}
       footer={(
         <>
-          <Button onClick={onClose} disabled={saving}>{t("common.close")}</Button>
+          <Button onClick={() => { if (!saving) onClose(); }} disabled={saving}>{t("common.close")}</Button>
           <Button
             icon={copied ? "check" : "copy"}
             disabled={loading || !preview || saving}

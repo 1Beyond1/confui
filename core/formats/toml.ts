@@ -523,16 +523,6 @@ function tomlDeepEqual(left: unknown, right: unknown): boolean {
   return false;
 }
 
-export function applyTomlChange(target: unknown, segments: readonly PathSegment[], value: unknown): void {
-  const current = getAtPath(target, segments);
-  const converted = coerceTomlValue(current, value, segments, true);
-  if (converted === TOML_DELETE) {
-    deleteAtPath(target, segments);
-    return;
-  }
-  setAtPath(target, segments, converted);
-}
-
 export function coerceTomlValue(
   current: unknown,
   value: unknown,

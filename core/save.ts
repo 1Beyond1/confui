@@ -40,7 +40,7 @@ import {
   parseYamlDocuments,
   updateConfigText,
 } from "./formats.ts";
-import { stripBom } from "./formats/common.ts";
+import { extractBaseName, stripBom } from "./formats/common.ts";
 import { isSecretPath, toEditorValue } from "./inference/common.ts";
 import { maskDocumentSecrets } from "./inference/heuristic.ts";
 import { extractSchemaDirective, inferJsonSchemaFields } from "./inference/json-schema.ts";
@@ -107,7 +107,25 @@ export async function previewSave(
   };
 }
 
-export async function commitSave(root: string, preview: SavePreview): Promise<SaveResult> {
+export interface CommitSaveOptions {
+  /**
+   * Main-process verifier invoked when `preview.snapshotRestore` is set.
+   * Re-reads and verifies the snapshot directly from `userData/snapshots/` so
+   * renderer-supplied `preview.output` is never trusted blindly.
+   */
+  resolveSnapshotText?: (
+    projectRoot: string,
+    relativeFile: string,
+    snapshotId: string,
+    expectedSha256: string,
+  ) => Promise<string>;
+}
+
+export async function commitSave(
+  root: string,
+  preview: SavePreview,
+  options: CommitSaveOptions = {},
+): Promise<SaveResult> {
   const resolved = await resolveExistingProjectPath(root, preview.file);
   if (!samePath(resolved.root, preview.projectRoot)) {
     throw new ConfuiError("FILE_CONFLICT", "保存预览属于另一个项目，已拒绝写入");
@@ -120,7 +138,7 @@ export async function commitSave(root: string, preview: SavePreview): Promise<Sa
   }
   activeSavePaths.add(absolutePath);
   try {
-    return await commitSaveExclusive(resolved.root, absolutePath, preview, format);
+    return await commitSaveExclusive(resolved.root, absolutePath, preview, format, options);
   } finally {
     activeSavePaths.delete(absolutePath);
   }
@@ -131,21 +149,51 @@ async function commitSaveExclusive(
   absolutePath: string,
   preview: SavePreview,
   format: ConfigFormat,
+  options: CommitSaveOptions,
 ): Promise<SaveResult> {
   await assertStableTarget(projectRoot, absolutePath);
   const snapshot = await readTextSnapshot(absolutePath);
   assertSameVersion(snapshot.version, preview.expectedVersion);
   assertEditableSyntax(preview.file, snapshot.text);
-  validateChanges(preview.operations);
-  if (preview.documentIndex !== undefined && (!Number.isSafeInteger(preview.documentIndex) || preview.documentIndex < 0)) {
-    throw new ConfuiError("INVALID_INPUT", "保存预览中的文档索引无效");
-  }
-  const generated = updateConfigText(snapshot.text, format, preview.operations, {
-    documentIndex: preview.documentIndex,
-  });
-  assertWritableSize(generated.output);
-  if (generated.output !== preview.output) {
-    throw new ConfuiError("FILE_CONFLICT", "保存预览已经失效，请重新预览后再保存");
+
+  let nextOutput: string;
+  if (preview.snapshotRestore) {
+    if (!options.resolveSnapshotText) {
+      throw new ConfuiError("INVALID_INPUT", "缺少快照校验服务，已拒绝恢复快照");
+    }
+    if (preview.operations.length > 0) {
+      throw new ConfuiError("INVALID_INPUT", "快照恢复请求不能同时携带字段变更操作");
+    }
+    const verifiedSnapshotText = await options.resolveSnapshotText(
+      projectRoot,
+      preview.file,
+      preview.snapshotRestore.snapshotId,
+      preview.snapshotRestore.snapshotSha256,
+    );
+    assertEditableSyntax(preview.file, verifiedSnapshotText);
+    if (format === "yaml") {
+      parseYamlDocuments(verifiedSnapshotText);
+    } else {
+      parseConfig(verifiedSnapshotText, format);
+    }
+    assertWritableSize(verifiedSnapshotText);
+    if (verifiedSnapshotText !== preview.output) {
+      throw new ConfuiError("FILE_CONFLICT", "快照恢复预览已经失效，请重新预览后再恢复");
+    }
+    nextOutput = verifiedSnapshotText;
+  } else {
+    validateChanges(preview.operations);
+    if (preview.documentIndex !== undefined && (!Number.isSafeInteger(preview.documentIndex) || preview.documentIndex < 0)) {
+      throw new ConfuiError("INVALID_INPUT", "保存预览中的文档索引无效");
+    }
+    const generated = updateConfigText(snapshot.text, format, preview.operations, {
+      documentIndex: preview.documentIndex,
+    });
+    assertWritableSize(generated.output);
+    if (generated.output !== preview.output) {
+      throw new ConfuiError("FILE_CONFLICT", "保存预览已经失效，请重新预览后再保存");
+    }
+    nextOutput = generated.output;
   }
 
   const backupPath = `${absolutePath}.bak`;
@@ -161,7 +209,7 @@ async function commitSaveExclusive(
     const mode = (await stat(absolutePath)).mode;
     const handle = await open(temporaryPath, "wx");
     try {
-      await handle.writeFile(generated.output, "utf8");
+      await handle.writeFile(nextOutput, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
@@ -216,8 +264,8 @@ async function commitSaveExclusive(
     file: preview.file,
     version: {
       mtimeMs,
-      size: Buffer.byteLength(generated.output, "utf8"),
-      hash: hashText(generated.output),
+      size: Buffer.byteLength(nextOutput, "utf8"),
+      hash: hashText(nextOutput),
     },
     backupPath: effectiveBackupPath,
   };
@@ -1096,7 +1144,7 @@ export async function generateRedactedExport(
   return {
     sourceFile: normalizedRelative,
     format,
-    suggestedFileName: suggestRedactedFileName(basename(relativeFile)),
+    suggestedFileName: suggestRedactedFileName(extractBaseName(relativeFile)),
     content,
     redactedCount,
   };
@@ -1320,11 +1368,14 @@ function adaptValueForTargetFormat(
     return value === null ? "" : String(value);
   }
   if (targetFormat === "ini") {
-    if (segments.length > 2) {
-      throw new ConfuiError("INVALID_INPUT", `INI 格式不支持超过两层的路径 ${formatPath(segments)}`);
+    if (segments.some((part) => typeof part !== "string")) {
+      throw new ConfuiError("INVALID_INPUT", `INI 格式不支持数组索引路径 ${formatPath(segments)}`);
     }
     if (value !== null && typeof value === "object" && !Array.isArray(value)) {
       throw new ConfuiError("INVALID_INPUT", `INI 格式不支持嵌套对象值 ${formatPath(segments)}`);
+    }
+    if (Array.isArray(value) && (value.length === 0 || value.some((item) => item !== null && typeof item === "object"))) {
+      throw new ConfuiError("INVALID_INPUT", `INI 格式仅支持非空标量数组 ${formatPath(segments)}`);
     }
   }
   return value;

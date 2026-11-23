@@ -323,6 +323,95 @@ export interface ProjectSearchResult {
   truncated: boolean;
 }
 
+export type DiagnosticSeverity = "error" | "warning" | "info";
+
+export type DiagnosticCategory =
+  | "parse-error"
+  | "schema-violation"
+  | "missing-from-example"
+  | "plaintext-secret";
+
+export interface ProjectDiagnosticIssue {
+  id: string;
+  file: string;
+  format: ConfigFormat;
+  severity: DiagnosticSeverity;
+  category: DiagnosticCategory;
+  /** Structured field path when applicable (omitted for file-level parse errors). */
+  path?: string;
+  segments?: PathSegment[];
+  /** 1-based line number when locatable. */
+  line?: number;
+  /** Zero-based YAML document index when matching inside a multi-document YAML file. */
+  documentIndex?: number;
+  /** Human-readable YAML document label when applicable. */
+  documentLabel?: string;
+  /** Companion example file path (populated for `missing-from-example`). */
+  sourceFile?: string;
+  /** Concise localized diagnostic description (never contains plaintext secret values). */
+  message: string;
+  /** Optional sanitized extra context (never contains plaintext secret values). */
+  detail?: string;
+}
+
+export interface ProjectDiagnosticsOptions {
+  locale?: Locale;
+  maxIssues?: number;
+  maxTotalBytes?: number;
+  concurrency?: number;
+}
+
+export interface ProjectDiagnosticsResult {
+  root: string;
+  scannedFiles: number;
+  skippedFiles: number;
+  truncated: boolean;
+  durationMs: number;
+  summary: {
+    errors: number;
+    warnings: number;
+    infos: number;
+    byCategory: {
+      parseError: number;
+      schemaViolation: number;
+      missingFromExample: number;
+      plaintextSecret: number;
+    };
+  };
+  issues: ProjectDiagnosticIssue[];
+}
+
+export interface SnapshotSummary {
+  id: string;
+  file: string;
+  format: ConfigFormat;
+  label: string;
+  createdAt: number;
+  size: number;
+  sha256: string;
+  encrypted: boolean;
+}
+
+export interface SnapshotRestoreRef {
+  snapshotId: string;
+  snapshotSha256: string;
+}
+
+export interface SnapshotRestorePreview {
+  projectRoot: string;
+  file: string;
+  format: ConfigFormat;
+  snapshotId: string;
+  snapshotLabel: string;
+  snapshotCreatedAt: number;
+  snapshotSha256: string;
+  currentText: string;
+  snapshotText: string;
+  expectedVersion: FileVersion;
+  /** Validated SavePreview bound to this snapshotId; verified independently in main process before writing. */
+  savePreview: SavePreview;
+}
+
 export type Locale = "zh-CN" | "en-US";
 
 export interface InferOptions {
@@ -357,6 +446,8 @@ export interface SavePreview {
   documentIndex?: number;
   /** Updated multi-document YAML summaries computed from `output` so UI metadata stays in sync after save. */
   yamlDocuments?: YamlDocumentSummary[];
+  /** Present when this preview restores an out-of-repo named snapshot; verified in main process against SnapshotStore. */
+  snapshotRestore?: SnapshotRestoreRef;
 }
 
 export interface SaveResult {
@@ -542,6 +633,11 @@ export interface ConfuiAPI {
   previewRedactedExport(root: string, file: string, secretPaths?: PathSegment[][], options?: RedactedExportOptions): Promise<Result<RedactedExportPreview>>;
   saveRedactedExport(root: string, file: string, secretPaths?: PathSegment[][], options?: RedactedExportOptions): Promise<Result<RedactedExportSaveResult>>;
   searchProject(root: string, query: string, options?: ProjectSearchOptions): Promise<Result<ProjectSearchResult>>;
+  diagnoseProject(root: string, options?: ProjectDiagnosticsOptions): Promise<Result<ProjectDiagnosticsResult>>;
+  listSnapshots(root: string, file?: string): Promise<Result<SnapshotSummary[]>>;
+  saveSnapshot(root: string, file: string, label: string): Promise<Result<SnapshotSummary>>;
+  previewSnapshotRestore(root: string, file: string, snapshotId: string, expectedVersion: FileVersion): Promise<Result<SnapshotRestorePreview>>;
+  deleteSnapshot(root: string, snapshotId: string): Promise<Result<boolean>>;
   getSettings(): Promise<Result<AppSettings>>;
   setSettings(settings: AppSettings): Promise<Result<AppSettings>>;
   removeRecentProject(projectPath: string): Promise<Result<AppSettings>>;

@@ -15,6 +15,7 @@ import { realpath } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OpenAICompatibleProvider, testAIConnection } from "../core/ai/provider.ts";
+import { diagnoseProject } from "../core/diagnostics.ts";
 import { toAppError, ConfuiError } from "../core/errors.ts";
 import { AI_FILE_LIMIT, currentVersion, HARD_FILE_LIMIT, readTextSnapshot } from "../core/files.ts";
 import { explainField as explainFieldWithAI } from "../core/inference/ai.ts";
@@ -41,6 +42,7 @@ import { isForbiddenKey, normalizeGithubUrl } from "../shared/validation.ts";
 import { scanProject } from "../core/scanner.ts";
 import { searchProjectConfigs } from "../core/search.ts";
 import { resolveTestAIApiKey, SettingsStore, type SecretCodec } from "../core/settings.ts";
+import { isValidSnapshotId, MAX_SNAPSHOT_LABEL_CHARS, SnapshotStore } from "../core/snapshots.ts";
 import { checkForUpdates } from "../core/update.ts";
 import type {
   AppSettings,
@@ -54,6 +56,7 @@ import type {
   InferOptions,
   Locale,
   PathSegment,
+  ProjectDiagnosticsOptions,
   ProjectSearchOptions,
   RedactedExportOptions,
   Result,
@@ -75,8 +78,9 @@ const SUPPORTED_FORMATS = new Set(["json", "jsonc", "yaml", "toml", "env", "ini"
 const PRODUCTION_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'";
 let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore;
+let snapshotStore: SnapshotStore;
 let watchedFile: { watcher: FSWatcher; projectRoot: string; absolutePath: string; relativePath: string } | undefined;
-let suppressChange: { absolutePath: string; until: number; hash?: string } | undefined;
+const suppressedChanges = new Map<string, { until: number; hash?: string }>();
 let watcherTimer: NodeJS.Timeout | undefined;
 let hasUnsavedChanges = false;
 let currentLocale: Locale = "zh-CN";
@@ -85,6 +89,8 @@ let fieldAssistInFlight = 0;
 let lastScannedProject: { root: string; files: ConfigFile[] } | undefined;
 let activeSearchController: AbortController | undefined;
 let activeSearchSeq = 0;
+let activeDiagnoseController: AbortController | undefined;
+let activeDiagnoseSeq = 0;
 let activeInferSeq = 0;
 
 app.setName("Confui");
@@ -96,14 +102,19 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (!mainWindow) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
   });
 
   app.whenReady().then(async () => {
-    settingsStore = new SettingsStore(join(app.getPath("userData"), "settings.json"), createSecretCodec());
+    const secretCodec = createSecretCodec();
+    settingsStore = new SettingsStore(join(app.getPath("userData"), "settings.json"), secretCodec);
+    snapshotStore = new SnapshotStore({
+      baseDir: join(app.getPath("userData"), "snapshots"),
+      codec: secretCodec,
+    });
     const initialSettings = await settingsStore.load().catch(() => undefined);
     const initialTheme = initialSettings?.theme ?? "system";
     currentLocale = initialSettings?.locale ?? "zh-CN";
@@ -127,8 +138,11 @@ if (!app.requestSingleInstanceLock()) {
 app.on("window-all-closed", () => {
   activeInferSeq += 1;
   closeWatcher();
+  suppressedChanges.clear();
   activeSearchController?.abort();
   activeSearchController = undefined;
+  activeDiagnoseController?.abort();
+  activeDiagnoseController = undefined;
   lastScannedProject = undefined;
   if (process.platform !== "darwin") app.quit();
 });
@@ -254,7 +268,7 @@ function registerIpcHandlers(): void {
       properties: ["openDirectory"],
       buttonLabel: isEn ? "Open Project" : "打开项目",
     };
-    const result = mainWindow
+    const result = mainWindow && !mainWindow.isDestroyed()
       ? await dialog.showOpenDialog(mainWindow, options)
       : await dialog.showOpenDialog(options);
     return result.canceled ? null : result.filePaths[0] ?? null;
@@ -412,16 +426,12 @@ function registerIpcHandlers(): void {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     if (!isSavePreview(preview)) throw new ConfuiError("INVALID_INPUT", "保存预览无效");
     const absolutePath = (await resolveExistingProjectPath(root, preview.file)).path;
-    suppressChange = { absolutePath, until: Date.now() + 2_000 };
-    try {
-      const result = await commitSave(root, preview);
-      suppressChange.hash = result.version.hash;
-      suppressChange.until = Date.now() + 1_000;
-      return result;
-    } catch (error) {
-      suppressChange = undefined;
-      throw error;
-    }
+    return runWithSuppressedChange(absolutePath, () =>
+      commitSave(root, preview, {
+        resolveSnapshotText: async (projectRoot, file, snapshotId, expectedSha256) =>
+          (await snapshotStore.readVerifiedSnapshot(projectRoot, file, snapshotId, expectedSha256)).text,
+      }),
+    );
   });
 
   handle("confui:getBackupStatus", async (_event, root: unknown, file: unknown) => {
@@ -441,16 +451,7 @@ function registerIpcHandlers(): void {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     if (!isRestoreBackupPreview(preview)) throw new ConfuiError("INVALID_INPUT", "备份恢复预览无效");
     const absolutePath = (await resolveExistingProjectPath(root, preview.file)).path;
-    suppressChange = { absolutePath, until: Date.now() + 2_000 };
-    try {
-      const result = await commitRestoreBackup(root, preview);
-      suppressChange.hash = result.version.hash;
-      suppressChange.until = Date.now() + 1_000;
-      return result;
-    } catch (error) {
-      suppressChange = undefined;
-      throw error;
-    }
+    return runWithSuppressedChange(absolutePath, () => commitRestoreBackup(root, preview));
   });
 
   handle("confui:createFromExample", async (_event, root: unknown, exampleFile: unknown, targetFile?: unknown) => {
@@ -523,7 +524,7 @@ function registerIpcHandlers(): void {
       defaultPath: join(dirname(resolved.path), preview.suggestedFileName),
       buttonLabel: isEn ? "Export" : "导出",
     };
-    const chosen = mainWindow
+    const chosen = mainWindow && !mainWindow.isDestroyed()
       ? await dialog.showSaveDialog(mainWindow, saveOptions)
       : await dialog.showSaveDialog(saveOptions);
     if (chosen.canceled || !chosen.filePath) {
@@ -589,6 +590,59 @@ function registerIpcHandlers(): void {
         activeSearchController = undefined;
       }
     }
+  });
+
+  handle("confui:diagnoseProject", async (_event, root: unknown, options?: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    const safeOptions = parseOptionalDiagnosticsOptions(options);
+    activeDiagnoseController?.abort();
+    const controller = new AbortController();
+    activeDiagnoseController = controller;
+    const seq = ++activeDiagnoseSeq;
+    const settings = await settingsStore.load();
+    try {
+      return await diagnoseProject(root, {
+        ...safeOptions,
+        locale: safeOptions.locale ?? settings.locale,
+        enableSchemaStore: settings.schemaStore.enabled,
+        schemaStoreCacheDir: join(app.getPath("userData"), "schemastore-cache"),
+        signal: controller.signal,
+      });
+    } finally {
+      if (seq === activeDiagnoseSeq && activeDiagnoseController === controller) {
+        activeDiagnoseController = undefined;
+      }
+    }
+  });
+
+  handle("confui:listSnapshots", async (_event, root: unknown, file?: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertOptionalString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
+    return snapshotStore.listSnapshots(root, file);
+  });
+
+  handle("confui:saveSnapshot", async (_event, root: unknown, file: unknown, label: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
+    assertString(label, "快照备注标签", MAX_SNAPSHOT_LABEL_CHARS);
+    return snapshotStore.saveSnapshot(root, file, label);
+  });
+
+  handle(
+    "confui:previewSnapshotRestore",
+    async (_event, root: unknown, file: unknown, snapshotId: unknown, expectedVersion: unknown) => {
+      assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+      assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
+      if (!isValidSnapshotId(snapshotId)) throw new ConfuiError("INVALID_INPUT", "快照 ID 无效");
+      if (!isFileVersion(expectedVersion)) throw new ConfuiError("INVALID_INPUT", "文件版本参数无效");
+      return snapshotStore.previewSnapshotRestore(root, file, snapshotId, expectedVersion);
+    },
+  );
+
+  handle("confui:deleteSnapshot", async (_event, root: unknown, snapshotId: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    if (!isValidSnapshotId(snapshotId)) throw new ConfuiError("INVALID_INPUT", "快照 ID 无效");
+    return snapshotStore.deleteSnapshot(root, snapshotId);
   });
 
   handle("confui:getSettings", async () => settingsStore.loadForRenderer());
@@ -694,11 +748,37 @@ function watchConfigFile(projectRoot: string, absolutePath: string, relativeFile
       // reload after restoring the directory or file instead of losing the
       // notification silently (or crashing the main process).
       const event: FileChangedEvent = { projectRoot, file: relativeFile.replace(/\\/g, "/") };
-      mainWindow?.webContents.send("confui:fileChanged", event);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("confui:fileChanged", event);
+      }
     });
     watchedFile = { watcher, projectRoot, absolutePath, relativePath: relativeFile };
   } catch {
     // Watching is a convenience; opening the file still works if the platform refuses it.
+  }
+}
+
+function normalizeWatchKey(filePath: string): string {
+  const normalized = resolve(filePath);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+async function runWithSuppressedChange<T extends { version: FileVersion }>(
+  absolutePath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const key = normalizeWatchKey(absolutePath);
+  const entry: { until: number; hash?: string } = { until: Date.now() + 2_000 };
+  suppressedChanges.set(key, entry);
+  try {
+    const result = await operation();
+    suppressedChanges.set(key, { until: Date.now() + 1_000, hash: result.version.hash });
+    return result;
+  } catch (error) {
+    if (suppressedChanges.get(key) === entry) {
+      suppressedChanges.delete(key);
+    }
+    throw error;
   }
 }
 
@@ -711,13 +791,20 @@ async function emitFileChange(projectRoot: string, absolutePath: string, relativ
     // A rename-save from another editor can make the file briefly unavailable.
   }
   if (watchedFile?.absolutePath !== absolutePath || watchedFile.projectRoot !== projectRoot) return;
-  const suppression = suppressChange;
-  if (suppression?.absolutePath === absolutePath && Date.now() <= suppression.until) {
-    if (!suppression.hash || suppression.hash === version?.hash) return;
+  const now = Date.now();
+  for (const [key, item] of suppressedChanges) {
+    if (now > item.until) suppressedChanges.delete(key);
   }
-  suppressChange = undefined;
+  const watchKey = normalizeWatchKey(absolutePath);
+  const suppression = suppressedChanges.get(watchKey);
+  if (suppression && now <= suppression.until) {
+    if (!suppression.hash || suppression.hash === version?.hash) return;
+    suppressedChanges.delete(watchKey);
+  }
   const event: FileChangedEvent = { projectRoot, file: relativeFile.replace(/\\/g, "/"), version };
-  mainWindow?.webContents.send("confui:fileChanged", event);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("confui:fileChanged", event);
+  }
 }
 
 function closeWatcher(): void {
@@ -781,6 +868,17 @@ function isSavePreview(value: unknown): value is SavePreview {
     && (typeof preview.documentIndex !== "number" || !Number.isSafeInteger(preview.documentIndex) || preview.documentIndex < 0)
   ) {
     return false;
+  }
+  if (preview.snapshotRestore !== undefined) {
+    if (
+      preview.snapshotRestore === null
+      || typeof preview.snapshotRestore !== "object"
+      || !isValidSnapshotId(preview.snapshotRestore.snapshotId)
+      || typeof preview.snapshotRestore.snapshotSha256 !== "string"
+      || !/^[0-9a-f]{64}$/i.test(preview.snapshotRestore.snapshotSha256)
+    ) {
+      return false;
+    }
   }
   return boundedString(preview.projectRoot, MAX_PROJECT_PATH_CHARS)
     && boundedString(preview.file, MAX_CONFIG_PATH_CHARS)
@@ -963,6 +1061,40 @@ function parseOptionalRedactedExportOptions(value: unknown): RedactedExportOptio
       });
     }
     result.scopedSecretPaths = scoped;
+  }
+  return result;
+}
+
+function parseOptionalDiagnosticsOptions(value: unknown): ProjectDiagnosticsOptions {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== "object") {
+    throw new ConfuiError("INVALID_INPUT", "诊断选项参数无效");
+  }
+  const candidate = value as ProjectDiagnosticsOptions;
+  const result: ProjectDiagnosticsOptions = {};
+  if (candidate.locale !== undefined) {
+    if (candidate.locale !== "zh-CN" && candidate.locale !== "en-US") {
+      throw new ConfuiError("INVALID_INPUT", "诊断语言参数无效");
+    }
+    result.locale = candidate.locale;
+  }
+  if (candidate.maxIssues !== undefined) {
+    if (typeof candidate.maxIssues !== "number" || !Number.isFinite(candidate.maxIssues)) {
+      throw new ConfuiError("INVALID_INPUT", "诊断结果上限无效");
+    }
+    result.maxIssues = candidate.maxIssues;
+  }
+  if (candidate.maxTotalBytes !== undefined) {
+    if (typeof candidate.maxTotalBytes !== "number" || !Number.isFinite(candidate.maxTotalBytes)) {
+      throw new ConfuiError("INVALID_INPUT", "诊断字节上限无效");
+    }
+    result.maxTotalBytes = candidate.maxTotalBytes;
+  }
+  if (candidate.concurrency !== undefined) {
+    if (typeof candidate.concurrency !== "number" || !Number.isFinite(candidate.concurrency)) {
+      throw new ConfuiError("INVALID_INPUT", "诊断并发数无效");
+    }
+    result.concurrency = candidate.concurrency;
   }
   return result;
 }

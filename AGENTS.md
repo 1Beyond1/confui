@@ -11,10 +11,12 @@ shared/
 core/
   formats/                多格式解析与写回引擎（按格式拆分：json/yaml/toml/env/ini/properties）
   formats.ts              兼容 re-export 入口（指向 core/formats/index.ts）
-  inference/              6 层推断引擎（json-schema > known-template > example > readme > ai > heuristic）
+  inference/              8 层推断引擎（json-schema > known-template > schemastore > comment > example > readme > ai > heuristic）
   ai/                     OpenAI 兼容 AI 客户端与连接测试
   scanner.ts              流式项目扫描、未配对示例模板发现与多环境分组
   search.ts               受控并发的全项目跨文件脱敏配置搜索
+  diagnostics.ts          受控并发的全项目配置健康诊断（语法、Schema、示例缺失、明文密钥位置提示）
+  snapshots.ts            应用数据区 AES-256-GCM / safeStorage 加密命名快照历史与对比回滚
   save.ts                 预览、版本校验、.bak 原子写回与恢复、模板初始化、配置对比补齐与脱敏导出
   paths.ts                项目目录防逃逸路径解析与安全路径读写
   files.ts                受限 UTF-8 读取、文件大小上限与哈希版本计算

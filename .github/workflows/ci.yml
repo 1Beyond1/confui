@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: ["**"]
@@ -12,6 +15,7 @@ jobs:
     # Confui only ships for Windows, so the gate runs on the target platform:
     # path handling and the atomic rename-on-save behave differently elsewhere.
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 

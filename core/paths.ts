@@ -158,7 +158,3 @@ export function deleteAtPath(target: unknown, segments: readonly PathSegment[]):
 function isSafeSegment(segment: PathSegment): boolean {
   return isSafePathSegment(segment);
 }
-
-export function cloneValue<T>(value: T): T {
-  return structuredClone(value);
-}

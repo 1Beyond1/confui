@@ -2,6 +2,8 @@ import type { ConfigChange } from "../../shared/schema.ts";
 import { ConfuiError } from "../errors.ts";
 import { assertAppendable, detectEol, escapeRegExp, isScalarValue } from "./common.ts";
 
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 export function parseEnv(text: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const rawLine of text.split(/\r?\n/)) {
@@ -16,8 +18,21 @@ export function parseEnv(text: string): Record<string, string> {
 
 export function stringifyEnv(value: Record<string, unknown>): string {
   return Object.entries(value)
-    .map(([key, item]) => `${key}=${formatEnvValue(item)}`)
+    .map(([key, item]) => {
+      assertValidEnvKey(key);
+      return `${key}=${formatEnvValue(item)}`;
+    })
     .join("\n");
+}
+
+function assertValidEnvKey(key: string): void {
+  if (!ENV_KEY_RE.test(key)) {
+    throw new ConfuiError(
+      "SAVE_ERROR",
+      `ENV 变量名无效：${JSON.stringify(key)}`,
+      "ENV 键名只允许英文字母、数字和下划线，且必须以字母或下划线开头（不允许包含 =、换行符、-、. 或空格）。",
+    );
+  }
 }
 
 export function patchEnv(text: string, changes: readonly ConfigChange[]): string {
@@ -27,10 +42,12 @@ export function patchEnv(text: string, changes: readonly ConfigChange[]): string
     if (change.segments.length !== 1 || typeof change.segments[0] !== "string") {
       throw new ConfuiError("SAVE_ERROR", "ENV 只支持顶层键值");
     }
+    const key = change.segments[0];
+    assertValidEnvKey(key);
     if (change.value !== undefined && !isScalarValue(change.value)) {
       throw new ConfuiError("SAVE_ERROR", "ENV 只支持标量键值", "复杂对象不能安全地表示为这种格式。");
     }
-    updates.set(change.segments[0], change.value);
+    updates.set(key, change.value);
   }
 
   const parsed = parseEnv(text);

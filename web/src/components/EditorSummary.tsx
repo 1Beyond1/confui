@@ -14,6 +14,7 @@ export function EditorSummary({
   onSelectYamlDocument,
   onOpenCompare,
   onOpenExportRedacted,
+  onOpenSnapshots,
   onRestoreBackup,
 }: {
   schema: ConfigFormSchema;
@@ -25,6 +26,7 @@ export function EditorSummary({
   onSelectYamlDocument?: (documentIndex: number) => void;
   onOpenCompare?: () => void;
   onOpenExportRedacted?: () => void;
+  onOpenSnapshots?: () => void;
   onRestoreBackup?: () => void;
 }) {
   const { locale, t } = useI18n();
@@ -63,6 +65,17 @@ export function EditorSummary({
               title={t("editor.exportRedactedTooltip")}
             >
               {t("editor.exportRedactedAction")}
+            </Button>
+          )}
+          {onOpenSnapshots && (
+            <Button
+              variant="ghost"
+              icon="archive"
+              disabled={busy}
+              onClick={onOpenSnapshots}
+              title={t("editor.snapshotsTooltip")}
+            >
+              {t("editor.snapshotsAction")}
             </Button>
           )}
           {backupStatus?.exists && onRestoreBackup && (
