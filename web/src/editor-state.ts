@@ -877,6 +877,15 @@ export function validateNewKeyPath(
     if (segments.some((part) => !part)) {
       return { segments: [], error: translate(locale, "validation.keyEmptySegment") };
     }
+    const sectionSegments = segments.slice(0, -1);
+    const leafSegment = segments.at(-1) ?? "";
+    if (
+      sectionSegments.some((part) => part.includes("]") || part.includes("["))
+      || /:\s/.test(leafSegment)
+      || leafSegment.endsWith("[]")
+    ) {
+      return { segments: [], error: translate(locale, "validation.keyIniInvalid") };
+    }
   } else {
     segments = trimmed.split(".").map((part) => part.trim());
     if (segments.some((part) => !part)) {

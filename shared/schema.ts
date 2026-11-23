@@ -225,6 +225,8 @@ export interface ProjectScanResult {
   detectedGithubUrl?: string;
   scannedAt: number;
   skippedCount: number;
+  /** True when the project scan hit directory, entry, or config-file safety caps. */
+  capped?: boolean;
   warnings: string[];
 }
 
@@ -647,6 +649,7 @@ export interface ConfuiAPI {
   openReleasePage(): Promise<Result<null>>;
   setDirtyState(dirty: boolean): void;
   stopWatching(): void;
+  cancelDiagnostics(): void;
   getPathForFile(file: File): string;
   onFileChanged(callback: (event: FileChangedEvent) => void): () => void;
 }

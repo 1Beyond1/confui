@@ -74,13 +74,21 @@ const MAX_GITHUB_URL_CHARS = 2_000;
 const MAX_RECENT_PROJECTS = 100;
 const MAX_SAVE_OPERATIONS = 2_000;
 const MAX_FIELD_ASSIST_CONCURRENCY = 3;
+const MAX_SUPPRESSED_CHANGE_ENTRIES = 128;
+const SUPPRESS_POST_WRITE_WINDOW_MS = 1_500;
 const SUPPORTED_FORMATS = new Set(["json", "jsonc", "yaml", "toml", "env", "ini", "properties"]);
 const PRODUCTION_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'";
+interface SuppressedPathState {
+  inFlight: Set<symbol>;
+  until: number;
+  hash?: string;
+}
 let mainWindow: BrowserWindow | undefined;
 let settingsStore: SettingsStore;
 let snapshotStore: SnapshotStore;
 let watchedFile: { watcher: FSWatcher; projectRoot: string; absolutePath: string; relativePath: string } | undefined;
-const suppressedChanges = new Map<string, { until: number; hash?: string }>();
+const suppressedChanges = new Map<string, SuppressedPathState>();
+let suppressPruneTimer: NodeJS.Timeout | undefined;
 let watcherTimer: NodeJS.Timeout | undefined;
 let hasUnsavedChanges = false;
 let currentLocale: Locale = "zh-CN";
@@ -109,11 +117,10 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(async () => {
-    const secretCodec = createSecretCodec();
-    settingsStore = new SettingsStore(join(app.getPath("userData"), "settings.json"), secretCodec);
+    settingsStore = new SettingsStore(join(app.getPath("userData"), "settings.json"), createSecretCodec());
     snapshotStore = new SnapshotStore({
       baseDir: join(app.getPath("userData"), "snapshots"),
-      codec: secretCodec,
+      codec: createSnapshotSecretCodec(),
     });
     const initialSettings = await settingsStore.load().catch(() => undefined);
     const initialTheme = initialSettings?.theme ?? "system";
@@ -138,6 +145,8 @@ if (!app.requestSingleInstanceLock()) {
 app.on("window-all-closed", () => {
   activeInferSeq += 1;
   closeWatcher();
+  if (suppressPruneTimer) clearTimeout(suppressPruneTimer);
+  suppressPruneTimer = undefined;
   suppressedChanges.clear();
   activeSearchController?.abort();
   activeSearchController = undefined;
@@ -261,6 +270,14 @@ function registerIpcHandlers(): void {
     closeWatcher();
   });
 
+  ipcMain.removeAllListeners("confui:cancelDiagnostics");
+  ipcMain.on("confui:cancelDiagnostics", (event) => {
+    if (!isTrustedSender(event)) return;
+    activeDiagnoseSeq += 1;
+    activeDiagnoseController?.abort();
+    activeDiagnoseController = undefined;
+  });
+
   handle("confui:selectFolder", async () => {
     const isEn = currentLocale === "en-US";
     const options: OpenDialogOptions = {
@@ -277,8 +294,11 @@ function registerIpcHandlers(): void {
   handle("confui:scanProject", async (_event, root: unknown, githubUrl?: unknown) => {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertOptionalString(githubUrl, "GitHub 仓库链接", MAX_GITHUB_URL_CHARS);
-    // Stop watching any previously opened project file before switching.
+    // Stop watching any previously opened project file and abort stale background diagnostics before switching.
     activeInferSeq += 1;
+    activeDiagnoseSeq += 1;
+    activeDiagnoseController?.abort();
+    activeDiagnoseController = undefined;
     closeWatcher();
     const result = await scanProject(root);
     lastScannedProject = { root: result.root, files: result.files };
@@ -763,20 +783,62 @@ function normalizeWatchKey(filePath: string): string {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
+function pruneSuppressedChanges(now = Date.now()): void {
+  for (const [key, state] of suppressedChanges) {
+    if (state.inFlight.size === 0 && now > state.until) {
+      suppressedChanges.delete(key);
+    }
+  }
+  while (suppressedChanges.size > MAX_SUPPRESSED_CHANGE_ENTRIES) {
+    let evicted = false;
+    for (const [key, state] of suppressedChanges) {
+      if (state.inFlight.size === 0) {
+        suppressedChanges.delete(key);
+        evicted = true;
+        break;
+      }
+    }
+    if (!evicted) break;
+  }
+}
+
+function scheduleSuppressedPrune(): void {
+  if (suppressPruneTimer) clearTimeout(suppressPruneTimer);
+  suppressPruneTimer = setTimeout(() => {
+    suppressPruneTimer = undefined;
+    pruneSuppressedChanges();
+    if (suppressedChanges.size > 0) scheduleSuppressedPrune();
+  }, SUPPRESS_POST_WRITE_WINDOW_MS + 500);
+  suppressPruneTimer.unref?.();
+}
+
 async function runWithSuppressedChange<T extends { version: FileVersion }>(
   absolutePath: string,
   operation: () => Promise<T>,
 ): Promise<T> {
+  const now = Date.now();
+  pruneSuppressedChanges(now);
   const key = normalizeWatchKey(absolutePath);
-  const entry: { until: number; hash?: string } = { until: Date.now() + 2_000 };
-  suppressedChanges.set(key, entry);
+  const token = Symbol("save-op");
+  const state: SuppressedPathState = suppressedChanges.get(key) ?? {
+    inFlight: new Set<symbol>(),
+    until: 0,
+  };
+  state.inFlight.add(token);
+  suppressedChanges.set(key, state);
   try {
     const result = await operation();
-    suppressedChanges.set(key, { until: Date.now() + 1_000, hash: result.version.hash });
+    state.inFlight.delete(token);
+    state.hash = result.version.hash;
+    state.until = Math.max(state.until, Date.now() + SUPPRESS_POST_WRITE_WINDOW_MS);
+    scheduleSuppressedPrune();
     return result;
   } catch (error) {
-    if (suppressedChanges.get(key) === entry) {
-      suppressedChanges.delete(key);
+    state.inFlight.delete(token);
+    if (state.inFlight.size === 0 && (!state.hash || Date.now() > state.until)) {
+      if (suppressedChanges.get(key) === state) suppressedChanges.delete(key);
+    } else if (state.inFlight.size === 0) {
+      scheduleSuppressedPrune();
     }
     throw error;
   }
@@ -792,14 +854,15 @@ async function emitFileChange(projectRoot: string, absolutePath: string, relativ
   }
   if (watchedFile?.absolutePath !== absolutePath || watchedFile.projectRoot !== projectRoot) return;
   const now = Date.now();
-  for (const [key, item] of suppressedChanges) {
-    if (now > item.until) suppressedChanges.delete(key);
-  }
+  pruneSuppressedChanges(now);
   const watchKey = normalizeWatchKey(absolutePath);
-  const suppression = suppressedChanges.get(watchKey);
-  if (suppression && now <= suppression.until) {
-    if (!suppression.hash || suppression.hash === version?.hash) return;
-    suppressedChanges.delete(watchKey);
+  const state = suppressedChanges.get(watchKey);
+  if (state) {
+    if (state.inFlight.size > 0) return;
+    if (now <= state.until) {
+      if (!state.hash || state.hash === version?.hash) return;
+      suppressedChanges.delete(watchKey);
+    }
   }
   const event: FileChangedEvent = { projectRoot, file: relativeFile.replace(/\\/g, "/"), version };
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -827,6 +890,34 @@ function createSecretCodec(): SecretCodec {
       if (!value) return "";
       if (!value.startsWith("enc:v1:")) return value;
       // `undefined` keeps the stored ciphertext alive — see SecretCodec.decode.
+      if (!safeStorage.isEncryptionAvailable()) return undefined;
+      try {
+        return safeStorage.decryptString(Buffer.from(value.slice(7), "base64"));
+      } catch {
+        return undefined;
+      }
+    },
+  };
+}
+
+/**
+ * Strict safeStorage wrapper for named snapshots: requires `enc:v1:` ciphertext
+ * prefix on decode (never accepts raw/unwrapped DEK strings) and fails closed
+ * with a snapshot-specific message when OS secure storage is unavailable.
+ */
+function createSnapshotSecretCodec(): SecretCodec {
+  return {
+    encode(value) {
+      if (!value) {
+        throw new ConfuiError("SAVE_ERROR", "快照加密密钥无效，已取消保存");
+      }
+      if (!safeStorage.isEncryptionAvailable()) {
+        throw new ConfuiError("SAVE_ERROR", "系统安全存储暂不可用，无法创建加密快照");
+      }
+      return `enc:v1:${safeStorage.encryptString(value).toString("base64")}`;
+    },
+    decode(value) {
+      if (!value || !value.startsWith("enc:v1:")) return undefined;
       if (!safeStorage.isEncryptionAvailable()) return undefined;
       try {
         return safeStorage.decryptString(Buffer.from(value.slice(7), "base64"));

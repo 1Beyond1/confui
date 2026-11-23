@@ -235,4 +235,81 @@ describe("Project Config Diagnostics Dashboard (core/diagnostics.ts)", () => {
     expect(aborted.issues).toEqual([]);
     expect(aborted.scannedFiles).toBe(0);
   });
+
+  it("red-team P1-2 & P2-4: strips TOML/YAML parse-error source excerpts, flags nested dsn.password/url.api_token, and propagates scanner cap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "confui-diag-rt-"));
+    tempDirs.push(root);
+
+    // 1. Broken TOML whose preceding context line holds a secret under a generic key name (`value`)
+    const tomlNeighborSecret = "secret_under_table_88888";
+    await writeFile(
+      join(root, "broken.toml"),
+      `[credentials]\nvalue = "${tomlNeighborSecret}"\nbad = @@@\nnext = 1\n`,
+      "utf8",
+    );
+    const tomlEofSecret = "secret_before_eof_77777";
+    await writeFile(
+      join(root, "broken-eof.toml"),
+      `[credentials]\nvalue = "${tomlEofSecret}"\nbad = [\n`,
+      "utf8",
+    );
+
+    // 2. Broken YAML whose preceding lines hold a multi-line PEM private key body
+    const yamlPemSecret = "MIIEvQIBADANBgkqhkiG9w0BAQEF_SECRET_CCC333";
+    await writeFile(
+      join(root, "broken.yaml"),
+      `private_key: |\n  -----BEGIN PRIVATE KEY-----\n  ${yamlPemSecret}\n invalid_indent: 1\n`,
+      "utf8",
+    );
+
+    // 3. Nested secret fields under URL/DSN parent sections (`dsn.password`, `url.api_token`)
+    const nestedDsnPassword = "super-nested-dsn-password-1111";
+    const nestedUrlToken = "super-nested-url-token-2222";
+    await writeFile(
+      join(root, "nested-secrets.json"),
+      JSON.stringify({
+        dsn: {
+          url: "postgres://localhost:5432/app",
+          password: nestedDsnPassword,
+        },
+        url: {
+          endpoint: "https://api.example.com",
+          api_token: nestedUrlToken,
+        },
+      }, null, 2),
+      "utf8",
+    );
+
+    const res = await diagnoseProject(root, { locale: "zh-CN" });
+
+    // TOML parse-errors (both caret mid-file and EOF) report line 3 without echoing neighbor secrets
+    const tomlIssue = res.issues.find((i) => i.file === "broken.toml" && i.category === "parse-error");
+    expect(tomlIssue).toMatchObject({ severity: "error", category: "parse-error", line: 3 });
+    const tomlEofIssue = res.issues.find((i) => i.file === "broken-eof.toml" && i.category === "parse-error");
+    expect(tomlEofIssue).toMatchObject({ severity: "error", category: "parse-error", line: 3 });
+
+    // YAML parse-error reported without echoing PEM body
+    const yamlIssue = res.issues.find((i) => i.file === "broken.yaml" && i.category === "parse-error");
+    expect(yamlIssue).toMatchObject({ severity: "error", category: "parse-error" });
+
+    // Nested dsn.password & url.api_token ARE flagged; plain dsn.url without credentials is NOT
+    const nestedSecretPaths = res.issues
+      .filter((i) => i.file === "nested-secrets.json" && i.category === "plaintext-secret")
+      .map((i) => i.path);
+    expect(nestedSecretPaths).toEqual(expect.arrayContaining(["dsn.password", "url.api_token"]));
+    expect(nestedSecretPaths).not.toContain("dsn.url");
+    expect(nestedSecretPaths).not.toContain("url.endpoint");
+
+    // ZERO secret value leakage across the entire serialized diagnostic payload
+    const serialized = JSON.stringify(res);
+    for (const secret of [tomlNeighborSecret, tomlEofSecret, yamlPemSecret, nestedDsnPassword, nestedUrlToken]) {
+      expect(serialized, `Leaked secret ${secret}`).not.toContain(secret);
+    }
+
+    // Scanner cap (`capped: true`) propagates to `result.truncated`
+    const cappedRes = await diagnoseProject(root, {
+      preScanned: { root, files: [], capped: true },
+    });
+    expect(cappedRes.truncated).toBe(true);
+  });
 });

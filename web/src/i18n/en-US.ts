@@ -566,7 +566,7 @@ export const enUS: TranslationDict = {
   "validation.keyRequired": "Enter a field key name",
   "validation.keyInvalid": "Key contains invalid characters or exceeds maximum length",
   "validation.keyEnvInvalid": "ENV keys may only use letters, digits, and underscores, and cannot start with a digit",
-  "validation.keyIniInvalid": "INI keys and section names cannot contain =, newlines, or control characters",
+  "validation.keyIniInvalid": "INI keys and sections cannot contain =, newlines, control characters, brackets in sections, ': ' in keys, or a trailing []",
   "validation.keyEmptySegment": "Path cannot contain empty segments (such as consecutive dots)",
   "validation.keyTooDeep": "Path nesting exceeds maximum depth",
   "validation.keyForbidden": "Key cannot be __proto__, prototype, or constructor",

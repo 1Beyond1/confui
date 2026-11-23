@@ -564,7 +564,7 @@ export const zhCN = {
   "validation.keyRequired": "请输入配置项键名",
   "validation.keyInvalid": "键名包含无效字符或长度超限",
   "validation.keyEnvInvalid": "ENV 键名只允许字母、数字和下划线，且不能以数字开头",
-  "validation.keyIniInvalid": "INI 键名和节名不能包含 =、换行符或控制字符",
+  "validation.keyIniInvalid": "INI 键名和节名不能包含 =、换行符、控制字符、节内方括号、键内「: 」或尾部 []",
   "validation.keyEmptySegment": "路径中不能包含空白段，例如连续的点号",
   "validation.keyTooDeep": "嵌套层级过多",
   "validation.keyForbidden": "键名不能使用 __proto__、prototype 或 constructor",

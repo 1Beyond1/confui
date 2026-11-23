@@ -72,6 +72,7 @@ const api: ConfuiAPI = {
   openReleasePage: () => ipcRenderer.invoke("confui:openReleasePage"),
   setDirtyState: (dirty: boolean) => ipcRenderer.send("confui:setDirtyState", dirty),
   stopWatching: () => ipcRenderer.send("confui:stopWatching"),
+  cancelDiagnostics: () => ipcRenderer.send("confui:cancelDiagnostics"),
   getPathForFile: (file: File) => {
     try {
       return webUtils.getPathForFile(file);

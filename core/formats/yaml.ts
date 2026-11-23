@@ -235,8 +235,24 @@ function updateSingleYamlDocument(
     }
     let rawOutput = doc.toString({ indent, lineWidth: 100 });
     if (hasFollowingDocument && !rawOutput.endsWith("\n")) rawOutput += "\n";
-    // Verify the serialized document still parses cleanly without errors or cycles.
-    parseYamlDocuments(rawOutput);
+    // Verify the serialized document parses cleanly and matches the expected
+    // post-change tree semantically (catches both silent mismatches and collateral clobbering).
+    const verifiedDocs = parseYamlDocuments(rawOutput);
+    if (verifiedDocs.length !== 1) {
+      throw new Error("YAML CST update altered document count");
+    }
+    const verifiedTree = verifiedDocs[0]!.value;
+    const expectedTree = cloneWithoutSharedRefs(currentTree);
+    for (const item of prepared) {
+      if (item.value === YAML_DELETE) {
+        deleteAtPath(expectedTree, item.segments);
+      } else {
+        setAtPath(expectedTree, item.segments, cloneWithoutSharedRefs(item.value));
+      }
+    }
+    if (!yamlSemanticEqual(verifiedTree, expectedTree)) {
+      throw new Error("YAML CST semantic verification failed");
+    }
     return { output: rawOutput, warnings: [] };
   } catch (error) {
     if (error instanceof ConfuiError) throw error;
@@ -359,66 +375,68 @@ function cloneWithoutSharedRefs(value: unknown): unknown {
   return result;
 }
 
-function matchYamlMapPair(map: YAMLMap, segment: PathSegment): Pair | undefined {
-  const exact = map.items.find((item) => {
-    if (!isPair(item)) return false;
-    const keyVal = isScalar(item.key) ? item.key.value : item.key;
-    return Object.is(keyVal, segment);
-  });
-  if (exact) return exact;
-  if (typeof segment !== "string") return undefined;
-  return map.items.find((item) => {
-    if (!isPair(item) || !isScalar(item.key)) return false;
-    const keyVal = item.key.value;
-    if (keyVal === null || keyVal === undefined) {
-      return segment === "" || item.key.source === segment;
-    }
-    if (typeof keyVal === "number" || typeof keyVal === "boolean") {
-      return String(keyVal) === segment || item.key.source === segment;
-    }
-    if (typeof keyVal === "bigint") {
-      return keyVal.toString() === segment || item.key.source === segment;
-    }
-    return typeof item.key.source === "string" && item.key.source === segment;
-  });
+/**
+ * Converts a YAML CST map key to the exact JavaScript object key produced by
+ * `doc.toJS()`. Strictly uses decoded scalar values (never `key.source`), so
+ * literal keys like `"0x10"`, `"null"`, or `"~"` never collide with hex/null
+ * keys (`16`, `""`).
+ */
+function yamlKeyToJsString(key: unknown): string | undefined {
+  const raw = isScalar(key) ? key.value : key;
+  if (raw === null || raw === undefined) return "";
+  if (typeof raw === "string") return raw;
+  if (typeof raw === "number" || typeof raw === "boolean" || typeof raw === "bigint") {
+    return String(raw);
+  }
+  if (raw instanceof Date) return String(raw);
+  return undefined;
 }
 
-function resolveYamlCstPath(doc: Document, segments: readonly PathSegment[]): unknown[] {
-  const resolved: unknown[] = [];
-  let current: unknown = doc.contents;
-  for (let i = 0; i < segments.length; i += 1) {
-    const segment = segments[i]!;
-    if (isMap(current)) {
-      const pair = matchYamlMapPair(current, segment);
-      if (pair) {
-        resolved.push(isScalar(pair.key) ? pair.key.value : pair.key);
-        current = pair.value;
-        continue;
-      }
-      resolved.push(...segments.slice(i));
-      break;
+/**
+ * Returns ALL pairs in a `YAMLMap` whose decoded JS key matches `segment`,
+ * in document order. Under YAML/JS `toJS({ uniqueKeys: false })`, the LAST
+ * matching pair is the effective value; deletion must remove ALL matching pairs
+ * so shadowed earlier duplicates cannot resurrect.
+ */
+function findYamlMapMatches(map: YAMLMap, segment: PathSegment): Pair[] {
+  if (typeof segment !== "string") return [];
+  const matches: Pair[] = [];
+  for (const item of map.items) {
+    if (!isPair(item)) continue;
+    if (yamlKeyToJsString(item.key) === segment) {
+      matches.push(item);
     }
-    if (isSeq(current) && typeof segment === "number") {
-      resolved.push(segment);
-      current = current.items[segment];
-      continue;
-    }
-    resolved.push(...segments.slice(i));
-    break;
   }
-  return resolved;
+  return matches;
 }
 
 function deleteCstPath(doc: Document, segments: readonly PathSegment[]): void {
   if (!segments.length) return;
-  const cstPath = resolveYamlCstPath(doc, segments);
-  if (doc.deleteIn(cstPath)) return;
-  const parent = cstPath.length === 1 ? doc.contents : doc.getIn(cstPath.slice(0, -1), true);
-  if (isMap(parent)) {
-    const targetPair = matchYamlMapPair(parent, segments.at(-1)!);
-    if (targetPair) {
-      const idx = parent.items.indexOf(targetPair);
-      if (idx >= 0) parent.items.splice(idx, 1);
+  let current: unknown = doc.contents;
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const segment = segments[i]!;
+    if (isMap(current)) {
+      const effective = findYamlMapMatches(current, segment).at(-1);
+      if (!effective) return;
+      current = effective.value;
+    } else if (isSeq(current) && typeof segment === "number") {
+      current = current.items[segment];
+    } else {
+      return;
+    }
+  }
+
+  const lastSegment = segments.at(-1)!;
+  if (isMap(current)) {
+    const matches = findYamlMapMatches(current, lastSegment);
+    if (!matches.length) return;
+    const toRemove = new Set(matches);
+    current.items = current.items.filter((item) => !isPair(item) || !toRemove.has(item));
+    return;
+  }
+  if (isSeq(current) && typeof lastSegment === "number") {
+    if (lastSegment >= 0 && lastSegment < current.items.length) {
+      current.items.splice(lastSegment, 1);
     }
   }
 }
@@ -435,26 +453,122 @@ function applyCstUpdate(doc: Document, segments: readonly PathSegment[], value: 
     }
     doc.contents = rootNode;
   }
-  const cstPath = resolveYamlCstPath(doc, segments);
-  const existing = doc.getIn(cstPath, true);
-  if (isScalar(existing) && isYamlScalarJsValue(value)) {
-    const prevType = existing.type;
-    existing.value = value instanceof Date ? value.toISOString() : value;
-    // Clear string quoting style when changing a quoted string to a non-string scalar.
-    if (typeof value !== "string" && (prevType === "QUOTE_DOUBLE" || prevType === "QUOTE_SINGLE")) {
-      existing.type = undefined;
+
+  let current: unknown = doc.contents;
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const segment = segments[i]!;
+    const nextSegment = segments[i + 1]!;
+    const wantsSeq = typeof nextSegment === "number";
+
+    if (isMap(current)) {
+      const effective = findYamlMapMatches(current, segment).at(-1);
+      if (effective) {
+        const val = effective.value;
+        if (
+          val === null
+          || val === undefined
+          || (isScalar(val) && val.value === null)
+          || (wantsSeq ? !isSeq(val) : !isMap(val))
+        ) {
+          const replacement = doc.createNode(wantsSeq ? [] : {});
+          effective.value = replacement;
+          current = replacement;
+        } else {
+          current = val;
+        }
+      } else {
+        const created = doc.createNode(wantsSeq ? [] : {});
+        current.items.push(doc.createPair(segment, created));
+        current = created;
+      }
+    } else if (isSeq(current) && typeof segment === "number") {
+      const existingItem = current.items[segment];
+      if (
+        existingItem === undefined
+        || existingItem === null
+        || (isScalar(existingItem) && existingItem.value === null)
+        || (wantsSeq ? !isSeq(existingItem) : !isMap(existingItem))
+      ) {
+        const replacement = doc.createNode(wantsSeq ? [] : {});
+        current.items[segment] = replacement;
+        current = replacement;
+      } else {
+        current = existingItem;
+      }
+    } else {
+      throw new Error("YAML CST intermediate container mismatch");
     }
+  }
+
+  const lastSegment = segments.at(-1)!;
+  const normalizedValue = value instanceof Date ? value.toISOString() : value;
+
+  if (isMap(current)) {
+    const effective = findYamlMapMatches(current, lastSegment).at(-1);
+    if (effective) {
+      const existing = effective.value;
+      if (isScalar(existing) && isYamlScalarJsValue(value)) {
+        const prevType = existing.type;
+        existing.value = normalizedValue;
+        // Clear string quoting style when changing a quoted string to a non-string scalar.
+        if (typeof value !== "string" && (prevType === "QUOTE_DOUBLE" || prevType === "QUOTE_SINGLE")) {
+          existing.type = undefined;
+        }
+        return;
+      }
+      const nextNode = doc.createNode(normalizedValue);
+      if (isNode(existing)) {
+        if (existing.comment) nextNode.comment = existing.comment;
+        if (existing.commentBefore) nextNode.commentBefore = existing.commentBefore;
+        if (existing.spaceBefore) nextNode.spaceBefore = existing.spaceBefore;
+      }
+      effective.value = nextNode;
+      return;
+    }
+    const nextNode = doc.createNode(normalizedValue);
+    current.items.push(doc.createPair(lastSegment, nextNode));
     return;
   }
 
-  const normalizedValue = value instanceof Date ? value.toISOString() : value;
-  const nextNode = doc.createNode(normalizedValue);
-  if (isNode(existing)) {
-    if (existing.comment) nextNode.comment = existing.comment;
-    if (existing.commentBefore) nextNode.commentBefore = existing.commentBefore;
-    if (existing.spaceBefore) nextNode.spaceBefore = existing.spaceBefore;
+  if (isSeq(current) && typeof lastSegment === "number") {
+    const existing = current.items[lastSegment];
+    if (isScalar(existing) && isYamlScalarJsValue(value)) {
+      const prevType = existing.type;
+      existing.value = normalizedValue;
+      if (typeof value !== "string" && (prevType === "QUOTE_DOUBLE" || prevType === "QUOTE_SINGLE")) {
+        existing.type = undefined;
+      }
+      return;
+    }
+    const nextNode = doc.createNode(normalizedValue);
+    if (isNode(existing)) {
+      if (existing.comment) nextNode.comment = existing.comment;
+      if (existing.commentBefore) nextNode.commentBefore = existing.commentBefore;
+      if (existing.spaceBefore) nextNode.spaceBefore = existing.spaceBefore;
+    }
+    current.items[lastSegment] = nextNode;
+    return;
   }
-  doc.setIn(cstPath, nextNode);
+
+  throw new Error("YAML CST leaf target is not a collection");
+}
+
+function yamlSemanticEqual(actual: unknown, expected: unknown): boolean {
+  const left = actual instanceof Date ? actual.toISOString() : actual;
+  const right = expected instanceof Date ? expected.toISOString() : expected;
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length && left.every((item, idx) => yamlSemanticEqual(item, right[idx]));
+  }
+  if (isRecordObject(left) && isRecordObject(right)) {
+    const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined);
+    const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined);
+    if (leftKeys.length !== rightKeys.length) return false;
+    return leftKeys.every(
+      (key) => Object.prototype.hasOwnProperty.call(right, key) && yamlSemanticEqual(left[key], right[key]),
+    );
+  }
+  return false;
 }
 
 function isYamlScalarJsValue(value: unknown): boolean {
@@ -470,7 +584,7 @@ function pathCrossesAlias(doc: Document, segments: readonly PathSegment[]): bool
   for (const segment of segments) {
     if (isAlias(current)) return true;
     if (isMap(current)) {
-      const pair = matchYamlMapPair(current, segment);
+      const pair = findYamlMapMatches(current, segment).at(-1);
       if (!pair) {
         // Also check merge keys (`<<: *alias`) where the edited key might originate from an alias.
         const hasMerge = current.items.some((item) => {

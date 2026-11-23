@@ -372,6 +372,26 @@ function assertValidIniSegments(segments: readonly string[]): void {
       );
     }
   }
+  const leafKey = segments.at(-1)!;
+  if (/:\s/.test(leafKey) || leafKey.endsWith("[]")) {
+    throw new ConfuiError(
+      "SAVE_ERROR",
+      `INI 节或键名无效：${JSON.stringify(leafKey)}`,
+      "INI 键名不能包含冒号加空白（: ）或以 [] 结尾，以免破坏 INI 键值解析。",
+    );
+  }
+  const sectionSegments = segments.slice(0, -1);
+  if (sectionSegments.length > 0) {
+    const joined = sectionSegments.join(".");
+    const reparsedHeader = matchIniSectionHeader(`[${joined}]`);
+    if (!reparsedHeader || reparsedHeader.comment !== "" || reparsedHeader.rawSection !== joined) {
+      throw new ConfuiError(
+        "SAVE_ERROR",
+        `INI 节或键名无效：${JSON.stringify(joined)}`,
+        "INI 节名不能包含未配对的方括号（如 ]）或节头注释注入，以免破坏节头解析。",
+      );
+    }
+  }
 }
 
 function assertIniValue(value: unknown): void {

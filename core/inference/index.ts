@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import type {
   ConfigFormSchema,
   DocumentSecretMeta,
@@ -12,7 +11,7 @@ import { collectSecretStrings, containsSecretValuePattern, isSensitiveKey } from
 import type { AIProvider } from "../ai/provider.ts";
 import { AI_FILE_LIMIT, readTextSnapshot } from "../files.ts";
 import { assertEditableSyntax, detectFormat, parseConfig, parseYamlDocuments, type ParsedYamlDocument } from "../formats.ts";
-import { stripBom } from "../formats/common.ts";
+import { extractBaseName, stripBom } from "../formats/common.ts";
 import { formatPath, getAtPath, resolveExistingProjectPath } from "../paths.ts";
 import { inferAIFields } from "./ai.ts";
 import { inferCommentFields } from "./comments.ts";
@@ -91,7 +90,8 @@ export async function inferConfig(
   const candidates: FieldCandidate[] = [];
 
   const locale: Locale = options.locale === "en-US" ? "en-US" : "zh-CN";
-  const known = inferKnownFields(basename(relativeFile), parsed, format, locale);
+  const baseFileName = extractBaseName(relativeFile) || relativeFile;
+  const known = inferKnownFields(baseFileName, parsed, format, locale);
   const collapsedPrefixes = known
     .filter((candidate) => candidate.type === "json" && candidate.value !== undefined)
     .map((candidate) => candidate.segments);
@@ -236,7 +236,7 @@ export async function inferConfig(
 
   return {
     file: normalizedRelative,
-    kind: basename(relativeFile),
+    kind: baseFileName,
     format,
     fields,
     sources: merged.sources,

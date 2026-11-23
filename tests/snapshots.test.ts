@@ -178,7 +178,10 @@ describe("Out-of-repo Named Snapshots (core/snapshots.ts + commitSave)", () => {
     await expect(store.previewSnapshotRestore(projectDir, ".env", s1.id, envVersion)).rejects.toThrow(/认证解密失败/);
 
     // 6. Oversized (> 5 MB) file rejected
-    const bigStore = new SnapshotStore({ baseDir: join(appDataDir, "snapshots-big") });
+    const bigStore = new SnapshotStore({
+      baseDir: join(appDataDir, "snapshots-big"),
+      codec: createMockCodec(),
+    });
     await writeFile(join(projectDir, "huge.env"), `DATA=${"a".repeat(5 * 1024 * 1024 + 10)}\n`, "utf8");
     await expect(bigStore.saveSnapshot(projectDir, "huge.env", "Too big")).rejects.toThrow(/5 MB/);
 
@@ -193,6 +196,115 @@ describe("Out-of-repo Named Snapshots (core/snapshots.ts + commitSave)", () => {
     }
     if (linked) {
       await expect(bigStore.saveSnapshot(projectDir, "linked.env", "Escape")).rejects.toThrow();
+    }
+  });
+
+  it("red-team P1-3: fails closed without codec, binds GCM AAD against envelope swap, blocks plaintext downgrade and raw unwrapped DEKs", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "confui-snap-rt-"));
+    const appDataDir = await mkdtemp(join(tmpdir(), "confui-snap-rtdata-"));
+    tempDirs.push(projectDir, appDataDir);
+
+    // 1. Fail-closed constructor when codec is omitted without explicit test opt-in
+    expect(() => new SnapshotStore({ baseDir: join(appDataDir, "no-codec") })).toThrow(/缺少安全加密编解码器/);
+
+    await writeFile(join(projectDir, "dev.env"), "ENV=dev\nSECRET=dev_secret_111\n", "utf8");
+    await writeFile(join(projectDir, "prod.env"), "ENV=prod\nSECRET=prod_secret_222\n", "utf8");
+
+    const strictCodec: SecretCodec = {
+      encode(value: string): string {
+        return `enc:v1:${Buffer.from(value, "utf8").toString("base64")}`;
+      },
+      decode(value: string): string | undefined {
+        if (!value.startsWith("enc:v1:")) return undefined;
+        return Buffer.from(value.slice(7), "base64").toString("utf8");
+      },
+    };
+    const store = new SnapshotStore({
+      baseDir: join(appDataDir, "snapshots"),
+      codec: strictCodec,
+    });
+
+    const devSnap = await store.saveSnapshot(projectDir, "dev.env", "Dev baseline");
+    const prodVersion = await currentVersion(join(projectDir, "prod.env"));
+    const devVersion = await currentVersion(join(projectDir, "dev.env"));
+    const projectHash = computeProjectSnapshotHash(projectDir);
+    const bucketDir = join(appDataDir, "snapshots", projectHash);
+    const devPath = join(bucketDir, `${devSnap.id}.snap.json`);
+    const devEnvelope = JSON.parse(await readFile(devPath, "utf8")) as Record<string, unknown>;
+
+    // 2. GCM AAD swap attack: transplanting dev.env ciphertext into a forged prod.env envelope MUST fail auth
+    const forgedProdId = "forged1234-abcdef012345";
+    const forgedProdEnvelope = {
+      ...devEnvelope,
+      id: forgedProdId,
+      file: "prod.env",
+    };
+    await writeFile(join(bucketDir, `${forgedProdId}.snap.json`), JSON.stringify(forgedProdEnvelope), "utf8");
+    await expect(
+      store.previewSnapshotRestore(projectDir, "prod.env", forgedProdId, prodVersion),
+    ).rejects.toThrow(/认证解密失败/);
+
+    // Same-file ID swap also fails AAD auth
+    const forgedIdSwap = "forged5678-abcdef012345";
+    await writeFile(
+      join(bucketDir, `${forgedIdSwap}.snap.json`),
+      JSON.stringify({ ...devEnvelope, id: forgedIdSwap }),
+      "utf8",
+    );
+    await expect(
+      store.previewSnapshotRestore(projectDir, "dev.env", forgedIdSwap, devVersion),
+    ).rejects.toThrow(/认证解密失败/);
+
+    // 3. Plaintext downgrade attack (`encrypted: false`) MUST be rejected when codec is active
+    const downgradeId = "downgrade1-abcdef012345";
+    const downgradeContent = "ENV=pwned\n";
+    await writeFile(
+      join(bucketDir, `${downgradeId}.snap.json`),
+      JSON.stringify({
+        version: 1,
+        id: downgradeId,
+        projectHash,
+        file: "dev.env",
+        format: "env",
+        label: "Downgraded",
+        createdAt: Date.now(),
+        size: Buffer.byteLength(downgradeContent, "utf8"),
+        sha256: devSnap.sha256,
+        encrypted: false,
+        content: downgradeContent,
+      }),
+      "utf8",
+    );
+    await expect(
+      store.previewSnapshotRestore(projectDir, "dev.env", downgradeId, devVersion),
+    ).rejects.toThrow(/拒绝读取未加密的明文快照/);
+
+    // 4. Raw unwrapped base64 DEK (missing `enc:v1:` prefix) MUST be rejected by strict codec
+    const rawDekId = "rawdek0001-abcdef012345";
+    const rawDekEnvelope = {
+      ...devEnvelope,
+      id: rawDekId,
+      wrappedKey: Buffer.alloc(32, 7).toString("base64"),
+    };
+    await writeFile(join(bucketDir, `${rawDekId}.snap.json`), JSON.stringify(rawDekEnvelope), "utf8");
+    await expect(
+      store.previewSnapshotRestore(projectDir, "dev.env", rawDekId, devVersion),
+    ).rejects.toThrow(/无法解密该快照/);
+
+    // 5. P2-3: listSnapshots rejects symlinked/junctioned baseDir or bucketDir
+    const symBase = join(appDataDir, "symlink-base");
+    const decoyDir = await mkdtemp(join(tmpdir(), "confui-snap-decoy-"));
+    tempDirs.push(decoyDir);
+    let baseLinked = false;
+    try {
+      await symlink(decoyDir, symBase, "junction");
+      baseLinked = true;
+    } catch {
+      // Skip if OS refuses junction creation
+    }
+    if (baseLinked) {
+      const linkedStore = new SnapshotStore({ baseDir: symBase, codec: strictCodec });
+      await expect(linkedStore.listSnapshots(projectDir)).rejects.toThrow(/快照根目录异常/);
     }
   });
 });

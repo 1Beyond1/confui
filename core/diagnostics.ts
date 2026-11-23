@@ -56,7 +56,7 @@ export interface DiagnoseProjectRuntimeOptions extends ProjectDiagnosticsOptions
   /** Optional abort signal for single-flight cancellation from main process. */
   signal?: AbortSignal;
   /** Optional already-scanned project snapshot. */
-  preScanned?: Pick<ProjectScanResult, "root" | "files">;
+  preScanned?: Pick<ProjectScanResult, "root" | "files" | "capped">;
   /** Opt-in remote SchemaStore lookup (strictly off by default). */
   enableSchemaStore?: boolean;
   /** Local disk cache directory for SchemaStore schemas. */
@@ -114,7 +114,7 @@ export async function diagnoseProject(
 
   let scannedFiles = 0;
   let bytesBudgetUsed = 0;
-  let truncated = false;
+  let truncated = Boolean(scanned.capped);
   const collected: ProjectDiagnosticIssue[] = [];
   const collectCap = Math.min(maxIssues * 4, MAX_ISSUES_CAP * 2);
 
@@ -312,8 +312,8 @@ async function diagnoseSingleFile(ctx: SingleFileDiagContext): Promise<ProjectDi
       : error instanceof Error
         ? error.message
         : String(error);
-    const safeDetail = sanitizeDiagnosticText(rawDetail, file.format);
     const line = extractErrorLineNumber(rawDetail);
+    const safeDetail = sanitizeParseErrorSummary(rawDetail, file.format);
     issues.push({
       id: nextId("parse-error"),
       file: file.path,
@@ -705,9 +705,10 @@ function detectPlaintextSecret(
 
   if (!isMarkedSecret) return undefined;
 
-  const pathText = formatPath(segments);
   const leafName = String(segments.at(-1) ?? "");
-  const isUrlKey = URL_STYLE_SECRET_KEY_RE.test(leafName) || URL_STYLE_SECRET_KEY_RE.test(pathText);
+  // Match URL/DSN/connection-string ONLY on the leaf key name so nested secret
+  // fields like `dsn.password` or `url.api_token` are never mistakenly skipped.
+  const isUrlKey = URL_STYLE_SECRET_KEY_RE.test(leafName);
   if (isUrlKey) {
     // Plain URLs without embedded credentials (e.g. `postgres://localhost:5432/app`) are not plaintext secrets.
     return undefined;
@@ -853,17 +854,48 @@ function formatSourceDetail(source: FieldSpec["source"], locale: Locale): string
   }
 }
 
-function sanitizeDiagnosticText(text: string, format?: ConfigFormat): string {
-  const lineMasked = maskDocumentLines(text, { format, mask: "***" }).lines.join(" ");
-  const scrubbed = maskDocumentSecrets(lineMasked).replace(/\s+/g, " ").trim();
-  return scrubbed.length > 260 ? `${scrubbed.slice(0, 259)}…` : scrubbed;
+/**
+ * Strips parser-attached multi-line raw source code excerpts (such as `yaml`
+ * and `smol-toml` context snippets) and retains ONLY the sanitized first-line
+ * syntax error summary + location, guaranteeing zero plaintext secret echo.
+ */
+function sanitizeParseErrorSummary(rawDetail: string, format?: ConfigFormat): string {
+  const firstLine = rawDetail
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) ?? "";
+  if (!firstLine) return "";
+  const withoutTrailingColon = firstLine.replace(/:\s*$/, "").trim();
+  const lineMasked = maskDocumentLines(withoutTrailingColon, { format, mask: "***" }).lines.join(" ");
+  const scrubbed = maskDocumentSecrets(lineMasked)
+    // Also redact any quoted literal token echoed inline on line 1.
+    .replace(/(["'])(?:\\.|(?!\1).){6,}\1/g, "$1***$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  return scrubbed.length > 200 ? `${scrubbed.slice(0, 199)}…` : scrubbed;
 }
 
 function extractErrorLineNumber(detail: string): number | undefined {
-  const match = detail.match(/\bline\s+(\d+)\b/i) ?? detail.match(/第\s*(\d+)\s*行/);
-  if (!match?.[1]) return undefined;
-  const line = Number.parseInt(match[1], 10);
-  return Number.isSafeInteger(line) && line >= 1 ? line : undefined;
+  // 1. Standard `line N` / localized `第 N 行` (YAML, JSONC, etc.)
+  const explicit = detail.match(/\bline\s+(\d+)\b/i) ?? detail.match(/第\s*(\d+)\s*行/);
+  if (explicit?.[1]) {
+    const line = Number.parseInt(explicit[1], 10);
+    if (Number.isSafeInteger(line) && line >= 1) return line;
+  }
+  // 2. `smol-toml` caret pointer excerpt (`3:  bad = @@@\n          ^`)
+  const tomlCaret = detail.match(/^[ \t]*(\d+):[^\r\n]*\r?\n[ \t]*\^/m);
+  if (tomlCaret?.[1]) {
+    const line = Number.parseInt(tomlCaret[1], 10);
+    if (Number.isSafeInteger(line) && line >= 1) return line;
+  }
+  // 3. `smol-toml` EOF excerpt without caret (`3:  bad = [\n`)
+  const numberedLines = [...detail.matchAll(/^[ \t]*(\d+):[ \t]/gm)];
+  const lastNumbered = numberedLines.at(-1)?.[1];
+  if (lastNumbered) {
+    const line = Number.parseInt(lastNumbered, 10);
+    if (Number.isSafeInteger(line) && line >= 1) return line;
+  }
+  return undefined;
 }
 
 function emptyDiagnosticsResult(root: string, durationMs: number): ProjectDiagnosticsResult {

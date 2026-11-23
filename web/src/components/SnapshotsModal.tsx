@@ -53,6 +53,7 @@ export function SnapshotsModal({
   const [error, setError] = useState<string>();
 
   const mountedRef = useRef(true);
+  const loadingListRef = useRef(true);
   const listSeqRef = useRef(0);
   const previewSeqRef = useRef(0);
 
@@ -67,8 +68,9 @@ export function SnapshotsModal({
     };
   }, []);
 
-  async function refreshList(): Promise<void> {
+  async function refreshList(preferredId?: string): Promise<void> {
     const seq = ++listSeqRef.current;
+    loadingListRef.current = true;
     setLoadingList(true);
     setError(undefined);
     try {
@@ -80,6 +82,7 @@ export function SnapshotsModal({
       }
       setSnapshots(response.data);
       setSelectedId((prev) => {
+        if (preferredId && response.data.some((item) => item.id === preferredId)) return preferredId;
         if (prev && response.data.some((item) => item.id === prev)) return prev;
         return response.data[0]?.id;
       });
@@ -88,6 +91,7 @@ export function SnapshotsModal({
       setError(errorMessage(err, t("common.actionFailed")));
     } finally {
       if (mountedRef.current && seq === listSeqRef.current) {
+        loadingListRef.current = false;
         setLoadingList(false);
       }
     }
@@ -157,8 +161,14 @@ export function SnapshotsModal({
       if (!response.ok) throw new Error(response.error.detail || response.error.message);
       setLabelInput("");
       onToast(t("snapshots.createdToast", { label: response.data.label }), "success");
-      setSnapshots((prev) => [response.data, ...prev]);
+      // Invalidate any stale initial refreshList() so it cannot clobber the newly saved snapshot.
+      const listWasInFlight = loadingListRef.current;
+      listSeqRef.current += 1;
+      setSnapshots((prev) => [response.data, ...prev.filter((item) => item.id !== response.data.id)]);
       setSelectedId(response.data.id);
+      if (listWasInFlight) {
+        void refreshList(response.data.id);
+      }
     } catch (err) {
       if (!mountedRef.current) return;
       setError(errorMessage(err, t("common.actionFailed")));
@@ -175,11 +185,16 @@ export function SnapshotsModal({
       const response = await window.confui.deleteSnapshot(projectRoot, item.id);
       if (!mountedRef.current) return;
       if (!response.ok) throw new Error(response.error.detail || response.error.message);
+      const listWasInFlight = loadingListRef.current;
+      listSeqRef.current += 1;
       setSnapshots((prev) => {
         const next = prev.filter((snap) => snap.id !== item.id);
         setSelectedId((current) => (current === item.id ? next[0]?.id : current));
         return next;
       });
+      if (listWasInFlight) {
+        void refreshList();
+      }
       onToast(t("snapshots.deletedToast", { label: item.label }), "info");
     } catch (err) {
       if (!mountedRef.current) return;

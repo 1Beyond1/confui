@@ -295,6 +295,7 @@ export async function scanProject(rootInput: string, maxDepth = 6): Promise<Proj
     detectedGithubUrl: await detectGithubRemote(root),
     scannedAt: Date.now(),
     skippedCount,
+    ...(scanCapped ? { capped: true } : {}),
     warnings,
   };
 }

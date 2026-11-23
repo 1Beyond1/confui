@@ -62,6 +62,7 @@ export function ProjectDiagnosticsModal({
     return () => {
       mountedRef.current = false;
       runSeqRef.current += 1;
+      window.confui.cancelDiagnostics();
     };
   }, [projectRoot, locale]);
 

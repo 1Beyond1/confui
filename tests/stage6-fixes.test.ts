@@ -139,14 +139,25 @@ describe("Stage 6 P1 fixes & P2 hardening regressions", () => {
   /* ------------------------------------------------------------------------ */
   /* P1-2: Per-path suppressChanges Map & mainWindow.isDestroyed() guards     */
   /* ------------------------------------------------------------------------ */
-  it("P1-2: replaces global suppressChange with per-path Map and guards mainWindow.isDestroyed()", async () => {
+  it("P1-2: replaces global suppressChange with concurrency-safe per-path Map and guards mainWindow.isDestroyed()", async () => {
     const mainSource = await readFile(resolve(REPO_ROOT, "electron/main.ts"), "utf8");
-    expect(mainSource).toContain("const suppressedChanges = new Map<string, { until: number; hash?: string }>()");
+    expect(mainSource).toContain("const suppressedChanges = new Map<string, SuppressedPathState>()");
+    expect(mainSource).toContain("inFlight: Set<symbol>");
+    expect(mainSource).toContain("MAX_SUPPRESSED_CHANGE_ENTRIES");
+    expect(mainSource).toContain("pruneSuppressedChanges");
+    expect(mainSource).toContain("scheduleSuppressedPrune");
     expect(mainSource).not.toContain("let suppressChange:");
     expect(mainSource).toContain("runWithSuppressedChange");
+    expect(mainSource).toContain("createSnapshotSecretCodec");
+    expect(mainSource).toContain("confui:cancelDiagnostics");
     expect(mainSource).not.toContain("mainWindow?.webContents.send");
     const destroyedGuardCount = mainSource.match(/mainWindow && !mainWindow\.isDestroyed\(\)/g)?.length ?? 0;
     expect(destroyedGuardCount).toBeGreaterThanOrEqual(5);
+
+    // P2-5: cross-platform basename extraction in core/inference/index.ts
+    const inferenceSource = await readFile(resolve(REPO_ROOT, "core/inference/index.ts"), "utf8");
+    expect(inferenceSource).toContain("extractBaseName");
+    expect(inferenceSource).not.toContain("basename(relativeFile)");
   });
 
   /* ------------------------------------------------------------------------ */
@@ -209,6 +220,71 @@ describe("Stage 6 P1 fixes & P2 hardening regressions", () => {
       base: { title: "default" },
       codes: { "100": { title: "custom" } },
     });
+
+    // Red-team P1-1: literal "0x10" / "null" / "~" keys must NEVER collide with hex/null YAML keys
+    const hexKeyRes = updateConfigText("0x10: hexSixteen\n", "yaml", [
+      { segments: ["0x10"], value: "newStrKey" },
+    ]);
+    expect(hexKeyRes.warnings).toEqual([]);
+    expect(parseConfig(hexKeyRes.output, "yaml")).toEqual({
+      "16": "hexSixteen",
+      "0x10": "newStrKey",
+    });
+
+    const nullKeyAdd = updateConfigText("null: alpha\nother: 1\n", "yaml", [
+      { segments: ["null"], value: "litNull" },
+      { segments: ["~"], value: "litTilde" },
+    ]);
+    expect(nullKeyAdd.warnings).toEqual([]);
+    expect(parseConfig(nullKeyAdd.output, "yaml")).toEqual({
+      "": "alpha",
+      other: 1,
+      null: "litNull",
+      "~": "litTilde",
+    });
+
+    const nullKeyDelLit = updateConfigText("null: alpha\nother: 1\n", "yaml", [
+      { segments: ["null"], value: undefined },
+    ]);
+    expect(nullKeyDelLit.warnings).toEqual([]);
+    expect(parseConfig(nullKeyDelLit.output, "yaml")).toEqual({ "": "alpha", other: 1 });
+
+    // Red-team P1-1: colliding duplicate/type-shadowed keys update effective LAST pair & delete ALL matching pairs
+    for (const collidingYaml of [
+      '"100": strFirst\n100: numSecond\n',
+      '100: numFirst\n"100": strSecond\n',
+      "100: first\n100: second\n",
+    ]) {
+      const edited = updateConfigText(collidingYaml, "yaml", [{ segments: ["100"], value: "updated" }]);
+      expect(edited.warnings).toEqual([]);
+      expect(parseConfig(edited.output, "yaml")).toEqual({ "100": "updated" });
+
+      const deleted = updateConfigText(collidingYaml, "yaml", [{ segments: ["100"], value: undefined }]);
+      expect(deleted.warnings).toEqual([]);
+      expect(parseConfig(deleted.output, "yaml")).toEqual({});
+    }
+
+    const hexCollideEdit = updateConfigText("0x10: first\n16: second\n", "yaml", [
+      { segments: ["16"], value: "sixteen-updated" },
+    ]);
+    expect(hexCollideEdit.warnings).toEqual([]);
+    expect(parseConfig(hexCollideEdit.output, "yaml")).toEqual({ "16": "sixteen-updated" });
+    const hexCollideDel = updateConfigText("0x10: first\n16: second\n", "yaml", [
+      { segments: ["16"], value: undefined },
+    ]);
+    expect(hexCollideDel.warnings).toEqual([]);
+    expect(parseConfig(hexCollideDel.output, "yaml")).toEqual({});
+
+    // Alias on effective LAST colliding pair must trigger safe alias fallback
+    const shadowedAliasYaml = 'base: &a\n  x: 1\ncodes:\n  "100":\n    x: 0\n  100: *a\n';
+    const shadowedAliasUpdated = updateConfigText(shadowedAliasYaml, "yaml", [
+      { segments: ["codes", "100", "x"], value: 9 },
+    ]);
+    expect(shadowedAliasUpdated.warnings.length).toBe(1);
+    expect(parseConfig(shadowedAliasUpdated.output, "yaml")).toEqual({
+      base: { x: 1 },
+      codes: { "100": { x: 9 } },
+    });
   });
 
   /* ------------------------------------------------------------------------ */
@@ -254,9 +330,10 @@ describe("Stage 6 P1 fixes & P2 hardening regressions", () => {
   });
 
   /* ------------------------------------------------------------------------ */
-  /* P1-5: INI key validation rejects =, newlines, and control characters     */
+  /* P1-5 & P2-1: INI key/section validation blocks =, newlines, controls,    */
+  /*              unbalanced brackets, `: `, and trailing `[]`                */
   /* ------------------------------------------------------------------------ */
-  it("P1-5: blocks INI keys/sections containing =, newlines, or control characters in both patchIni and validateNewKeyPath", () => {
+  it("P1-5: blocks INI keys/sections containing =, newlines, control characters, unbalanced brackets, ': ', or trailing []", () => {
     const badSegmentsList: string[][] = [
       ["bad=key"],
       ["section", "key=val"],
@@ -267,18 +344,42 @@ describe("Stage 6 P1 fixes & P2 hardening regressions", () => {
       ["section", "key\ttab"],
       ["section", "key\x7fdel"],
       ["   ", "key"],
+      ["foo]bar", "key"],
+      ["foo[bar", "key"],
+      ["foo] # evil", "key"],
+      ["section", "foo: bar"],
+      ["section", "items[]"],
     ];
 
     for (const segments of badSegmentsList) {
       expect(() => patchIni("[section]\nport=80\n", [{ segments, value: "x" }])).toThrow(/INI 节或键名无效/);
     }
 
-    // Frontend validateNewKeyPath blocks invalid INI keys in both zh-CN and en-US
+    // Legitimate .editorconfig balanced globs & .npmrc scoped/registry keys remain valid
+    const editorConfigPatched = patchIni("root = true\n\n[*.[ch]]\nindent_size = 2\n", [
+      { segments: ["*", "[ch]", "indent_size"], value: "4" },
+    ]);
+    expect(parseConfig(editorConfigPatched, "ini")).toEqual({
+      root: true,
+      "*": { "[ch]": { indent_size: "4" } },
+    });
+    const npmrcPatched = patchIni("save-exact=true\n", [
+      { segments: ["@myorg:registry"], value: "https://npm.pkg.github.com/" },
+      { segments: ["//npm.pkg.github.com/:_authToken"], value: "tok_123" },
+    ]);
+    expect(npmrcPatched).toContain("@myorg:registry=https://npm.pkg.github.com/");
+    expect(npmrcPatched).toContain("//npm.pkg.github.com/:_authToken=tok_123");
+
+    // Frontend validateNewKeyPath blocks invalid INI keys/sections in both zh-CN and en-US
     expect(validateNewKeyPath("server.key=bad", "ini", [], "zh-CN").error).toContain("=");
     expect(validateNewKeyPath("server.key=bad", "ini", [], "en-US").error).toContain("=");
     expect(validateNewKeyPath("server.key\nevil", "ini", [], "zh-CN").error).toBeDefined();
     expect(validateNewKeyPath("server.key\x07", "ini", [], "en-US").error).toBeDefined();
     expect(validateNewKeyPath("server.key\n", "ini", [], "en-US").error).toBeDefined();
+    expect(validateNewKeyPath("foo]bar.key", "ini", [], "zh-CN").error).toBeDefined();
+    expect(validateNewKeyPath("foo[bar.key", "ini", [], "en-US").error).toBeDefined();
+    expect(validateNewKeyPath("section.foo: bar", "ini", [], "en-US").error).toBeDefined();
+    expect(validateNewKeyPath("section.items[]", "ini", [], "zh-CN").error).toBeDefined();
 
     // Valid INI multi-level dotted paths still pass cleanly
     expect(validateNewKeyPath("database.primary.host", "ini", [], "en-US")).toEqual({

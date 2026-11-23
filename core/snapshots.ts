@@ -48,7 +48,25 @@ interface SnapshotEnvelope {
 export interface SnapshotStoreOptions {
   baseDir: string;
   codec?: SecretCodec;
+  /**
+   * Explicit opt-in for codec-less unit tests only. Production code MUST supply
+   * a strict `safeStorage`-backed `codec`; omitting `codec` fails closed.
+   */
+  allowPlaintextForTests?: boolean;
   maxSnapshotsPerProject?: number;
+}
+
+function buildSnapshotAad(meta: {
+  version: 1;
+  projectHash: string;
+  id: string;
+  file: string;
+  format: ConfigFormat;
+}): Buffer {
+  return Buffer.from(
+    JSON.stringify([meta.version, meta.projectHash, meta.id, meta.file, meta.format]),
+    "utf8",
+  );
 }
 
 export function isValidSnapshotId(value: unknown): value is string {
@@ -72,6 +90,7 @@ export function computeProjectSnapshotHash(canonicalProjectRoot: string): string
 export class SnapshotStore {
   private readonly baseDir: string;
   private readonly codec?: SecretCodec;
+  private readonly allowPlaintextForTests: boolean;
   private readonly maxSnapshotsPerProject: number;
   private readonly projectLocks = new Map<string, Promise<unknown>>();
 
@@ -79,8 +98,12 @@ export class SnapshotStore {
     if (!options.baseDir || !options.baseDir.trim()) {
       throw new ConfuiError("INVALID_INPUT", "快照存储目录无效");
     }
+    if (!options.codec && options.allowPlaintextForTests !== true) {
+      throw new ConfuiError("SAVE_ERROR", "快照存储缺少安全加密编解码器，已拒绝初始化");
+    }
     this.baseDir = resolve(options.baseDir);
     this.codec = options.codec;
+    this.allowPlaintextForTests = options.allowPlaintextForTests === true;
     this.maxSnapshotsPerProject = Math.max(1, Math.min(200, Math.trunc(options.maxSnapshotsPerProject ?? MAX_SNAPSHOTS_PER_PROJECT)));
   }
 
@@ -92,16 +115,8 @@ export class SnapshotStore {
       ? normalizeRelativeConfigFile(projectRoot, relativeFile)
       : undefined;
 
-    let bucketInfo;
-    try {
-      bucketInfo = await lstat(bucketDir);
-    } catch (error) {
-      if (errorCode(error) === "ENOENT") return [];
-      throw error;
-    }
-    if (bucketInfo.isSymbolicLink() || !bucketInfo.isDirectory()) {
-      throw new ConfuiError("SAVE_ERROR", "快照目录异常，已拒绝读取");
-    }
+    const exists = await this.assertExistingSafeBucketDir(bucketDir, true);
+    if (!exists) return [];
 
     const entries = await readdir(bucketDir, { withFileTypes: true });
     const summaries: SnapshotSummary[] = [];
@@ -167,7 +182,14 @@ export class SnapshotStore {
       const normalizedFile = relative(resolved.root, resolved.path).replace(/\\/g, "/");
       const id = `${Date.now().toString(36)}-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
       const targetPath = this.resolveSnapshotFilePath(bucketDir, id);
-      const payload = this.encodePayload(fileSnapshot.text);
+      const aad = buildSnapshotAad({
+        version: 1,
+        projectHash,
+        id,
+        file: normalizedFile,
+        format,
+      });
+      const payload = this.encodePayload(fileSnapshot.text, aad);
 
       const record: SnapshotEnvelope = {
         version: 1,
@@ -368,6 +390,20 @@ export class SnapshotStore {
   }
 
   private async assertExistingSafeBucketDir(bucketDir: string, allowMissing = false): Promise<boolean> {
+    let baseInfo;
+    try {
+      baseInfo = await lstat(this.baseDir);
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") {
+        if (allowMissing) return false;
+        throw new ConfuiError("NOT_FOUND", "找不到指定的快照");
+      }
+      throw error;
+    }
+    if (baseInfo.isSymbolicLink() || !baseInfo.isDirectory()) {
+      throw new ConfuiError("SAVE_ERROR", "快照根目录异常，已拒绝访问");
+    }
+
     let bucketInfo;
     try {
       bucketInfo = await lstat(bucketDir);
@@ -479,19 +515,29 @@ export class SnapshotStore {
     return parsed;
   }
 
-  private encodePayload(text: string): Pick<
+  private encodePayload(
+    text: string,
+    aad: Buffer,
+  ): Pick<
     SnapshotEnvelope,
     "encrypted" | "wrappedKey" | "iv" | "tag" | "ciphertext" | "content"
   > {
     if (!this.codec) {
+      if (!this.allowPlaintextForTests) {
+        throw new ConfuiError("SAVE_ERROR", "快照加密服务不可用，已拒绝明文写入");
+      }
       return { encrypted: false, content: text };
     }
     const dek = randomBytes(32);
     const iv = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", dek, iv);
+    cipher.setAAD(aad);
     const encrypted = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]);
     const tag = cipher.getAuthTag();
     const wrappedKey = this.codec.encode(dek.toString("base64"));
+    if (!wrappedKey) {
+      throw new ConfuiError("SAVE_ERROR", "系统安全存储未能加密快照密钥，已取消保存");
+    }
     return {
       encrypted: true,
       wrappedKey,
@@ -502,7 +548,13 @@ export class SnapshotStore {
   }
 
   private decodePayload(record: SnapshotEnvelope): string {
+    if (this.codec && !record.encrypted) {
+      throw new ConfuiError("SAVE_ERROR", "已启用加密快照模式，拒绝读取未加密的明文快照");
+    }
     if (!record.encrypted) {
+      if (!this.allowPlaintextForTests) {
+        throw new ConfuiError("SAVE_ERROR", "安全策略禁止读取未加密的明文快照");
+      }
       if (typeof record.content !== "string") {
         throw new ConfuiError("PARSE_ERROR", "快照正文缺失");
       }
@@ -516,7 +568,7 @@ export class SnapshotStore {
     }
     const decodedKeyBase64 = this.codec.decode(record.wrappedKey);
     if (!decodedKeyBase64) {
-      throw new ConfuiError("SAVE_ERROR", "无法解密该快照（系统安全存储不可用或密钥已失效）");
+      throw new ConfuiError("SAVE_ERROR", "无法解密该快照（系统安全存储不可用或密钥格式无效）");
     }
     const dek = Buffer.from(decodedKeyBase64, "base64");
     const iv = Buffer.from(record.iv, "base64");
@@ -525,7 +577,15 @@ export class SnapshotStore {
       throw new ConfuiError("PARSE_ERROR", "加密快照参数损坏，已拒绝恢复");
     }
     try {
+      const aad = buildSnapshotAad({
+        version: record.version,
+        projectHash: record.projectHash,
+        id: record.id,
+        file: record.file,
+        format: record.format,
+      });
       const decipher = createDecipheriv("aes-256-gcm", dek, iv);
+      decipher.setAAD(aad);
       decipher.setAuthTag(tag);
       const plaintext = Buffer.concat([
         decipher.update(Buffer.from(record.ciphertext, "base64")),
@@ -533,7 +593,7 @@ export class SnapshotStore {
       ]);
       return plaintext.toString("utf8");
     } catch {
-      throw new ConfuiError("SAVE_ERROR", "快照认证解密失败（内容可能已被篡改或损坏）");
+      throw new ConfuiError("SAVE_ERROR", "快照认证解密失败（内容或上下文元数据可能已被篡改或损坏）");
     }
   }
 }
