@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -65,7 +65,7 @@ describe("Out-of-repo Named Snapshots (core/snapshots.ts + commitSave)", () => {
     expect((await readdir(projectDir)).sort()).toEqual(repoEntriesBefore);
 
     // 2. Raw file on disk inside appDataDir MUST be AES-256-GCM encrypted (zero plaintext secret!)
-    const projectHash = computeProjectSnapshotHash(projectDir);
+    const projectHash = computeProjectSnapshotHash(await realpath(projectDir));
     const bucketDir = join(appDataDir, "snapshots", projectHash);
     const snapFileRaw = await readFile(join(bucketDir, `${snap.id}.snap.json`), "utf8");
     expect(snapFileRaw).not.toContain(secretVal);
@@ -167,7 +167,7 @@ describe("Out-of-repo Named Snapshots (core/snapshots.ts + commitSave)", () => {
     await expect(store.previewSnapshotRestore(projectDir, "other.env", s1.id, otherVersion)).rejects.toThrow(/不属于当前配置文件/);
 
     // 5. Tampered GCM ciphertext rejected
-    const projectHash = computeProjectSnapshotHash(projectDir);
+    const projectHash = computeProjectSnapshotHash(await realpath(projectDir));
     const s1Path = join(appDataDir, "snapshots", projectHash, `${s1.id}.snap.json`);
     const envelope = JSON.parse(await readFile(s1Path, "utf8")) as Record<string, unknown>;
     const origBuf = Buffer.from(String(envelope.ciphertext), "base64");
@@ -227,7 +227,7 @@ describe("Out-of-repo Named Snapshots (core/snapshots.ts + commitSave)", () => {
     const devSnap = await store.saveSnapshot(projectDir, "dev.env", "Dev baseline");
     const prodVersion = await currentVersion(join(projectDir, "prod.env"));
     const devVersion = await currentVersion(join(projectDir, "dev.env"));
-    const projectHash = computeProjectSnapshotHash(projectDir);
+    const projectHash = computeProjectSnapshotHash(await realpath(projectDir));
     const bucketDir = join(appDataDir, "snapshots", projectHash);
     const devPath = join(bucketDir, `${devSnap.id}.snap.json`);
     const devEnvelope = JSON.parse(await readFile(devPath, "utf8")) as Record<string, unknown>;
