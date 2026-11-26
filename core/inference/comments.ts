@@ -5,7 +5,7 @@ import { maskDocumentLines } from "../../shared/diff.ts";
 import type { ConfigFormat, Locale, PathSegment } from "../../shared/schema.ts";
 import { isForbiddenKey, PEM_BEGIN_RE } from "../../shared/validation.ts";
 import { stripBom } from "../formats/common.ts";
-import { splitEnvValueAndComment } from "../formats/env.ts";
+import { groupEnvLines, splitEnvValueAndComment } from "../formats/env.ts";
 import {
   isSensitiveIniAssignment,
   matchIniAssignment,
@@ -517,18 +517,19 @@ function extractEnvComments(source: string): RawCommentEntry[] {
   const entries: RawCommentEntry[] = [];
   const pending: string[] = [];
 
-  for (const line of lines) {
+  for (const group of groupEnvLines(lines)) {
     if (entries.length >= MAX_COMMENTS) break;
-    const trimmed = line.trim();
+    const logical = group.join("\n");
+    const trimmed = logical.trim();
     if (!trimmed) {
       pending.length = 0;
       continue;
     }
-    if (trimmed.startsWith("#")) {
+    if (group.length === 1 && trimmed.startsWith("#")) {
       pending.push(trimmed.slice(1));
       continue;
     }
-    const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    const match = logical.match(/^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*([\s\S]*)$/);
     if (match?.[1]) {
       const leading = pending.length ? pending.join("\n") : undefined;
       const rawComment = splitEnvValueAndComment(match[2] ?? "").comment;
@@ -615,7 +616,7 @@ function extractPropertiesComments(source: string): RawCommentEntry[] {
       pending.push(trimmed.slice(1));
       continue;
     }
-    const match = logical.match(/^\s*((?:\\.|[^:=\s])+?)\s*(?:[:=]|\s)\s*(.*)$/);
+    const match = logical.match(/^[ \t]*((?:\\.|[^:=\s\\]|\\$)+)(?:[ \t]*(?:[:=][ \t]*|[ \t]+)(.*))?$/);
     if (match?.[1] && pending.length) {
       const key = unescapeProperty(match[1]);
       if (key) {

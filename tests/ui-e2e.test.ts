@@ -427,6 +427,7 @@ describe("UI state, diff, validation & i18n integration", () => {
     const preloadSource = await readFile(resolve(REPO_ROOT, "electron/preload.ts"), "utf8");
     const mainSource = await readFile(resolve(REPO_ROOT, "electron/main.ts"), "utf8");
     for (const channel of [
+      "confui:readRawFile",
       "confui:removeRecentProject",
       "confui:getBackupStatus",
       "confui:previewRestoreBackup",

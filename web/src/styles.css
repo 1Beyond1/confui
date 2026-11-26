@@ -648,6 +648,9 @@ code, pre { font-family: var(--font-mono); }
 .raw-notice { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--text-secondary); background: var(--surface); font-size: 10px; }
 .raw-notice > span { flex: 1; }
 .raw-notice > svg { color: var(--primary); }
+.raw-notice--error { border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); background: color-mix(in srgb, var(--danger) 8%, var(--surface)); color: var(--text); }
+.raw-notice--error > svg { color: var(--danger); }
+.editor-load-error__actions { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
 .raw-card { overflow: hidden; }
 .raw-card > header { min-height: 46px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 14px; border-bottom: 1px solid var(--code-line); color: var(--code-text); background: var(--code-bar); font-family: var(--font-mono); font-size: 10.5px; }
 .raw-card__title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }

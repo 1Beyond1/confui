@@ -186,6 +186,16 @@ export interface ConfigFormSchema {
   documentSecrets?: DocumentSecretMeta[];
   version: FileVersion;
   rawText: string;
+  /** Present when the file failed syntax parsing and fell back to read-only raw source inspection. */
+  parseError?: string;
+}
+
+export interface RawConfigFile {
+  file: string;
+  kind: string;
+  format: ConfigFormat;
+  version: FileVersion;
+  rawText: string;
 }
 
 export type ConfigFileStatus = "ready" | "large" | "too-large" | "unreadable" | "unsupported";
@@ -616,6 +626,7 @@ export interface ConfuiAPI {
   selectFolder(): Promise<Result<string | null>>;
   scanProject(root: string, githubUrl?: string): Promise<Result<ProjectScanResult>>;
   inferSchema(root: string, file: string, options?: InferOptions): Promise<Result<ConfigFormSchema>>;
+  readRawFile(root: string, file: string): Promise<Result<RawConfigFile>>;
   explainField(root: string, file: string, field: FieldAssistField, githubUrl?: string, locale?: Locale, documentIndex?: number): Promise<Result<FieldAssistResult>>;
   previewSave(root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion, documentIndex?: number): Promise<Result<SavePreview>>;
   saveConfig(root: string, preview: SavePreview): Promise<Result<SaveResult>>;

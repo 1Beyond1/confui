@@ -1,22 +1,43 @@
 import type { ConfigChange } from "../../shared/schema.ts";
+import { isForbiddenKey, setSafeProperty } from "../../shared/validation.ts";
 import { ConfuiError } from "../errors.ts";
 import { assertAppendable, detectEol, escapeRegExp, isScalarValue } from "./common.ts";
+
+const PROPERTY_LINE_RE = /^([ \t]*)((?:\\.|[^:=\s\\]|\\$)+)(?:([ \t]*(?:[:=][ \t]*|[ \t]+))(.*))?$/;
 
 export function parseProperties(text: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const rawLine of joinPropertyLines(text.split(/\r?\n/))) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#") || line.startsWith("!")) continue;
-    const match = rawLine.match(/^\s*((?:\\.|[^:=\s])+?)\s*(?:[:=]|\s)\s*(.*)$/);
-    if (match?.[1]) result[unescapeProperty(match[1])] = unescapeProperty(match[2] ?? "");
+    const match = rawLine.match(PROPERTY_LINE_RE);
+    if (match?.[2]) {
+      const key = unescapeProperty(match[2]);
+      if (key && !isForbiddenKey(key)) {
+        setSafeProperty(result, key, unescapeProperty(match[4] ?? ""));
+      }
+    }
   }
   return result;
 }
 
 export function stringifyProperties(value: Record<string, unknown>): string {
   return Object.entries(value)
-    .map(([key, item]) => `${escapeProperty(key, true)}=${escapeProperty(String(item ?? ""))}`)
+    .map(([key, item]) => {
+      assertValidPropertyKey(key);
+      return `${escapeProperty(key, true)}=${escapeProperty(String(item ?? ""))}`;
+    })
     .join("\n");
+}
+
+function assertValidPropertyKey(key: string): void {
+  if (!key.trim() || key.includes("\0") || isForbiddenKey(key)) {
+    throw new ConfuiError(
+      "SAVE_ERROR",
+      `PROPERTIES 键名无效：${JSON.stringify(key)}`,
+      "PROPERTIES 键名不能为空、包含空字符或使用保留键名（__proto__ / prototype / constructor）。",
+    );
+  }
 }
 
 export function patchProperties(text: string, changes: readonly ConfigChange[]): string {
@@ -26,10 +47,12 @@ export function patchProperties(text: string, changes: readonly ConfigChange[]):
     if (change.segments.length !== 1 || typeof change.segments[0] !== "string") {
       throw new ConfuiError("SAVE_ERROR", "PROPERTIES 只支持顶层键值");
     }
+    const key = change.segments[0];
+    assertValidPropertyKey(key);
     if (change.value !== undefined && !isScalarValue(change.value)) {
       throw new ConfuiError("SAVE_ERROR", "PROPERTIES 只支持标量键值", "复杂对象不能安全地表示为这种格式。");
     }
-    updates.set(change.segments[0], change.value);
+    updates.set(key, change.value);
   }
 
   const parsed = parseProperties(text);
@@ -46,7 +69,7 @@ export function patchProperties(text: string, changes: readonly ConfigChange[]):
       nextLines.push(...group);
       continue;
     }
-    const match = logical.match(/^(\s*)((?:\\.|[^:=\s])+?)(\s*(?:[:=]|\s)\s*)(.*)$/);
+    const match = logical.match(PROPERTY_LINE_RE);
     const rawKey = match?.[2];
     const key = rawKey ? unescapeProperty(rawKey) : undefined;
     if (!rawKey || !key || !updates.has(key)) {

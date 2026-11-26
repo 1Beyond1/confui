@@ -158,14 +158,14 @@ export function patchIni(text: string, changes: readonly ConfigChange[]): string
         if (change.value !== undefined) {
           const rawAssignmentKey = keyMatch.rawKey;
           const assignmentKey = isArrayAssignment ? rawAssignmentKey : `${rawAssignmentKey}[]`;
-          const comment = preservedIniComment(keyMatch, key, section);
+          const comment = preservedIniComment(keyMatch, section);
           next.push(...formatIniArrayAssignments(keyMatch, assignmentKey, change.value, comment));
         }
       }
       continue;
     }
     if (change.value === undefined) continue;
-    const comment = preservedIniComment(keyMatch, key, section);
+    const comment = preservedIniComment(keyMatch, section);
     next.push(`${keyMatch.indent}${keyMatch.rawKey}${keyMatch.separator}${formatIniValue(change.value)}${comment}`);
   }
   for (const [id, change] of updates) {
@@ -507,15 +507,15 @@ export function isSensitiveIniAssignment(rawKey: string, section: readonly strin
   return key.startsWith("//") || isSensitiveKey(key) || section.some(isSensitiveKey);
 }
 
-function preservedIniComment(keyMatch: IniAssignment, key: string, section: readonly string[]): string {
+function preservedIniComment(keyMatch: IniAssignment, section: readonly string[]): string {
   const parsedComment = splitIniValueAndComment(keyMatch.rawValue).comment;
   if (!parsedComment) return "";
-  const isSecretLine = isSensitiveKey(key) || section.some(isSensitiveKey);
-  if (!isSecretLine) return parsedComment;
-  // Never carry over unquoted `;` / `#` tails from a secret value (e.g. `.npmrc`
-  // `//host/:_authToken=part1;part2` or passwords containing `;`/`#`).
+  if (!isSensitiveIniAssignment(keyMatch.rawKey, section)) return parsedComment;
+  // Never carry over unquoted `;` / `#` tails from a sensitive INI / `.npmrc`
+  // assignment (e.g. `//host/:_authToken=part1;part2`, `//host/:custom=a#b`,
+  // or passwords containing `;`/`#`).
   if (
-    keyMatch.rawKey.startsWith("//")
+    keyMatch.rawKey.trim().startsWith("//")
     || parsedComment.trimStart().startsWith(";")
     || !/^\s/.test(parsedComment)
   ) {

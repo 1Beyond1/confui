@@ -310,6 +310,7 @@ interface DocumentMaskState {
   yamlBlockIndent: number | undefined;
   yamlSecretSubtreeIndent: number | undefined;
   tomlTripleQuote: '"""' | "'''" | undefined;
+  envMultilineQuote: '"' | "'" | "`" | undefined;
   secretContainerStack: Array<"array" | "object">;
   inBackslashContinuation: boolean;
 }
@@ -320,6 +321,7 @@ function createInitialState(): DocumentMaskState {
     yamlBlockIndent: undefined,
     yamlSecretSubtreeIndent: undefined,
     tomlTripleQuote: undefined,
+    envMultilineQuote: undefined,
     secretContainerStack: [],
     inBackslashContinuation: false,
   };
@@ -744,6 +746,13 @@ function maskLineWithState(
   const hasPemEnd = PEM_END_RE.test(text);
   if (hasPemBegin && !hasPemEnd) {
     state.inPemBlock = true;
+    // Track an unclosed ENV quoted assignment opening on the same line as the PEM header
+    // (e.g. `PRIVATE_KEY="-----BEGIN PRIVATE KEY-----`) so any trailing secret lines after
+    // `-----END ...-----` before the closing quote stay masked.
+    if (!state.envMultilineQuote && (format === "env" || format === undefined)) {
+      const openedQuote = detectUnclosedEnvQuotePrefix(text, format, extraKeys);
+      if (openedQuote) state.envMultilineQuote = openedQuote;
+    }
     const match = text.match(PEM_BEGIN_RE);
     if (match && match.index !== undefined) {
       const endOfHeader = match.index + match[0].length;
@@ -759,9 +768,31 @@ function maskLineWithState(
     if (hasPemEnd) {
       state.inPemBlock = false;
       const match = text.match(PEM_END_RE);
-      if (match && match.index !== undefined && text.slice(0, match.index).trim()) {
-        const maskedText = `${indent}${mask}${text.slice(match.index)}`;
-        return { text: maskedText, masked: maskedText !== text };
+      if (match && match.index !== undefined) {
+        const beforeEnd = text.slice(0, match.index);
+        const endMarker = match[0];
+        let afterEnd = text.slice(match.index + endMarker.length);
+        if (state.envMultilineQuote) {
+          const quote = state.envMultilineQuote;
+          const closeIdx = findClosingQuote(afterEnd, -1, quote, quote === '"');
+          if (closeIdx >= 0) {
+            state.envMultilineQuote = undefined;
+            const beforeClose = afterEnd.slice(0, closeIdx);
+            const afterClose = afterEnd.slice(closeIdx + 1);
+            const maskedBeforeClose = beforeClose.trim() ? `${beforeClose.match(/^\s*/)?.[0] ?? ""}${mask}` : beforeClose;
+            if (isAllowedQuotedScalarTail(afterClose, format ?? "env")) {
+              afterEnd = `${maskedBeforeClose}${quote}${applyFallbackRedactions(afterClose, mask, extraValues)}`;
+            } else {
+              const trailingWs = afterClose.match(/\s*$/)?.[0] ?? "";
+              afterEnd = `${maskedBeforeClose}${quote}${mask}${trailingWs}`;
+            }
+          } else if (afterEnd.trim()) {
+            afterEnd = `${afterEnd.match(/^\s*/)?.[0] ?? ""}${mask}`;
+          }
+        }
+        const maskedBefore = beforeEnd.trim() ? `${indent}${mask}` : beforeEnd;
+        const combined = `${maskedBefore}${endMarker}${afterEnd}`;
+        return { text: combined, masked: combined !== text };
       }
       return { text, masked: false };
     }
@@ -789,6 +820,28 @@ function maskLineWithState(
       maskedAfter = container.text;
     }
     const combined = applyFallbackRedactions(`${maskedBefore}${delim}${maskedAfter}`, mask, extraValues);
+    return { text: combined, masked: combined !== text };
+  }
+
+  // 2b. Active ENV multi-line quoted secret string (`"..."`, `'...'`, `` `...` ``)
+  if (state.envMultilineQuote) {
+    const quote = state.envMultilineQuote;
+    const closeIdx = findClosingQuote(text, -1, quote, quote === '"');
+    if (closeIdx < 0) {
+      const maskedText = text.trim() ? `${indent}${mask}` : text;
+      return { text: maskedText, masked: maskedText !== text };
+    }
+    state.envMultilineQuote = undefined;
+    const before = text.slice(0, closeIdx);
+    const after = text.slice(closeIdx + 1);
+    const maskedBefore = before.trim() ? `${before.match(/^\s*/)?.[0] ?? ""}${mask}` : before;
+    let combined: string;
+    if (isAllowedQuotedScalarTail(after, format ?? "env")) {
+      combined = applyFallbackRedactions(`${maskedBefore}${quote}${after}`, mask, extraValues);
+    } else {
+      const trailingWs = after.match(/\s*$/)?.[0] ?? "";
+      combined = `${maskedBefore}${quote}${mask}${trailingWs}`;
+    }
     return { text: combined, masked: combined !== text };
   }
 
@@ -926,6 +979,23 @@ function maskSecretAssignment(
     state.tomlTripleQuote = delim;
     const maskedOpenTail = afterOpen.trim() ? mask : afterOpen;
     return `${prefix}${rawKey}${separator}${leadingWs}${delim}${maskedOpenTail}`;
+  }
+
+  // ENV multi-line quoted string (`"..."`, `'...'`, `` `...` ``) that does not close on line 1
+  if (
+    (format === "env" || (format === undefined && separator.includes("=")))
+    && (trimmedRest.startsWith('"') || trimmedRest.startsWith("'") || trimmedRest.startsWith("`"))
+  ) {
+    const leadingWs = rest.match(/^\s*/)?.[0] ?? "";
+    const body = rest.slice(leadingWs.length);
+    const quote = body[0] as '"' | "'" | "`";
+    const closeIdx = findClosingQuote(body, 0, quote, quote === '"');
+    if (closeIdx < 0) {
+      state.envMultilineQuote = quote;
+      const afterOpen = body.slice(1);
+      const maskedOpenTail = afterOpen.trim() ? mask : afterOpen;
+      return `${prefix}${rawKey}${separator}${leadingWs}${quote}${maskedOpenTail}`;
+    }
   }
 
   // YAML literal/folded block scalar (`|` / `>`)
@@ -1115,6 +1185,24 @@ function isClosedQuotedScalar(trimmed: string): boolean {
   return end > 0 && end === trimmed.length - 1;
 }
 
+function detectUnclosedEnvQuotePrefix(
+  text: string,
+  format: ConfigFormat | undefined,
+  extraKeys: ReadonlySet<string>,
+): '"' | "'" | "`" | undefined {
+  const kv = matchKeyValueLine(text, format, extraKeys);
+  if (!kv || !kv.separator.includes("=")) return undefined;
+  const trimmedRest = kv.rest.trim();
+  if (!trimmedRest) return undefined;
+  if (format === undefined && (trimmedRest.startsWith('"""') || trimmedRest.startsWith("'''"))) {
+    return undefined;
+  }
+  const quote = trimmedRest[0];
+  if (quote !== '"' && quote !== "'" && quote !== "`") return undefined;
+  const closeIdx = findClosingQuote(trimmedRest, 0, quote, quote === '"');
+  return closeIdx < 0 ? quote : undefined;
+}
+
 function findClosingQuote(text: string, openIdx: number, quote: string, allowEscape: boolean): number {
   for (let index = openIdx + 1; index < text.length; index += 1) {
     const ch = text[index];
@@ -1179,7 +1267,7 @@ function maskAssignedValue(
   // Never treat quotes as delimiters in Java `.properties`, and reject arbitrary non-comment tails
   // (e.g. `password=""real_secret` or `api_key="a"real_tail`) by masking the entire `rest`.
   if (format !== "properties" && (quote === '"' || quote === "'" || quote === "`")) {
-    const allowEscape = quote !== "`" && !(format === "toml" && quote === "'");
+    const allowEscape = quote !== "`" && !((format === "toml" || format === "env") && quote === "'");
     const end = findClosingQuote(body, 0, quote, allowEscape);
     if (end >= 1) {
       const tail = body.slice(end + 1);

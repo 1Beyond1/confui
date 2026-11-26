@@ -1,4 +1,4 @@
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { PathSegment } from "../shared/schema.ts";
 import { isSafePathSegment } from "../shared/validation.ts";
@@ -50,6 +50,74 @@ export async function resolveExistingProjectPath(
       error instanceof Error ? error.message : String(error),
     );
   }
+}
+
+/**
+ * Resolves an existing regular file strictly inside `root`, rejecting both
+ * symlinks/junctions pointing outside the project AND symlinks/junctions
+ * pointing to another file or directory inside the project.
+ *
+ * Checks `lstat(lexicalPath)` BEFORE `realpath(lexicalPath)` so symlink hops
+ * are rejected instead of being silently dereferenced into regular targets.
+ */
+export async function resolveRegularProjectFile(
+  root: string,
+  relativePath: string,
+): Promise<{ root: string; path: string }> {
+  if (typeof root !== "string" || !root.trim() || root.includes("\0")) {
+    throw new ConfuiError("INVALID_INPUT", "文件路径无效");
+  }
+  let resolvedRoot: string;
+  try {
+    resolvedRoot = await realpath(resolve(root.trim()));
+  } catch (error) {
+    throw new ConfuiError(
+      "NOT_FOUND",
+      "项目内文件不存在或无法访问",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
+  const lexicalPath = safeJoin(resolvedRoot, relativePath);
+
+  let info;
+  try {
+    info = await lstat(lexicalPath);
+  } catch (error) {
+    throw new ConfuiError(
+      "NOT_FOUND",
+      "项目内文件不存在或无法访问",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new ConfuiError("INVALID_INPUT", "目标路径包含符号链接或不是普通文件，已拒绝访问");
+  }
+
+  let resolvedPath: string;
+  try {
+    resolvedPath = await realpath(lexicalPath);
+  } catch (error) {
+    throw new ConfuiError(
+      "NOT_FOUND",
+      "项目内文件不存在或无法访问",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (!isPathInside(resolvedRoot, resolvedPath)) {
+    throw new ConfuiError("INVALID_INPUT", "已拒绝访问项目目录之外的路径");
+  }
+  if (!sameFsPath(resolvedPath, lexicalPath)) {
+    throw new ConfuiError("INVALID_INPUT", "目标路径包含符号链接，已拒绝访问");
+  }
+
+  return { root: resolvedRoot, path: resolvedPath };
+}
+
+function sameFsPath(left: string, right: string): boolean {
+  return process.platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
 }
 
 /** Resolves an existing path and rejects symlink/junction escapes. */

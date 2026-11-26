@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { open, stat } from "node:fs/promises";
-import type { FileVersion } from "../shared/schema.ts";
+import { relative } from "node:path";
+import type { FileVersion, RawConfigFile } from "../shared/schema.ts";
 import { ConfuiError } from "./errors.ts";
+import { assertEditableSyntax, detectFormat } from "./formats.ts";
+import { extractBaseName } from "./formats/common.ts";
+import { resolveRegularProjectFile } from "./paths.ts";
 
 export const AI_FILE_LIMIT = 1024 * 1024;
 export const HARD_FILE_LIMIT = 5 * 1024 * 1024;
@@ -106,4 +110,31 @@ export async function readTextSnapshot(
 
 export async function currentVersion(absolutePath: string): Promise<FileVersion> {
   return (await readTextSnapshot(absolutePath)).version;
+}
+
+/**
+ * Controlled read-only loader for displaying raw source of a configuration file
+ * (including syntactically broken files reported by `diagnoseProject`) inside
+ * `RawViewer`. Enforces regular-file containment (rejecting symlinks/junctions),
+ * supported format detection, size/UTF-8/binary guards, and INI syntax sniffing.
+ */
+export async function readRawConfigFile(
+  root: string,
+  relativeFile: string,
+): Promise<RawConfigFile> {
+  const resolved = await resolveRegularProjectFile(root, relativeFile);
+  const normalizedFile = relative(resolved.root, resolved.path).replace(/\\/g, "/");
+  const format = detectFormat(normalizedFile);
+  if (!format) {
+    throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
+  }
+  const snapshot = await readTextSnapshot(resolved.path);
+  assertEditableSyntax(normalizedFile, snapshot.text);
+  return {
+    file: normalizedFile,
+    kind: extractBaseName(normalizedFile) || normalizedFile,
+    format,
+    version: snapshot.version,
+    rawText: snapshot.text,
+  };
 }

@@ -77,8 +77,11 @@ export function mergeCandidates(candidates: readonly FieldCandidate[]): {
       ?? group.find((candidate) => candidate.source === "known-template" && "value" in candidate);
     const strongest = evidence.find((item) => item.property === "description") ?? evidence[0];
     const source = strongest?.source ?? "heuristic";
-    const type = (chosen.type as FieldSpec["type"] | undefined) ?? "string";
+    const baseType = (chosen.type as FieldSpec["type"] | undefined) ?? "string";
     const enumValues = chosen.enum as FieldSpec["enum"];
+    const type = enumValues?.length && (baseType === "string" || baseType === "number" || baseType === "integer")
+      ? "enum"
+      : baseType;
     return {
       path: formatPath(segments),
       segments,

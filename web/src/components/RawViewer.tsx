@@ -89,6 +89,15 @@ export function RawViewer({
   );
 
   const displayLines = revealSecrets ? rawLines : maskedDoc.lines;
+  const displayParseError = useMemo(() => {
+    if (!schema.parseError) return undefined;
+    const firstLine = schema.parseError
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? schema.parseError;
+    if (revealSecrets) return firstLine;
+    return maskDocumentLines(firstLine, { format: schema.format }).lines.join(" ");
+  }, [schema.parseError, schema.format, revealSecrets]);
   const hasSensitiveContent = maskedDoc.maskedLineCount > 0
     || activeSecrets.secretKeys.length > 0
     || Boolean(documentSecrets?.some((sec) => (sec.secretKeys?.length ?? 0) > 0 || (sec.secretValues?.length ?? 0) > 0));
@@ -262,11 +271,18 @@ export function RawViewer({
 
   return (
     <div id="editor-panel-raw" class="raw-page page-wide" role="tabpanel" aria-labelledby="editor-tab-raw">
-      <div class="raw-notice">
-        <Icon name="info"/>
-        <span>{t("raw.notice")}</span>
-        <SourceBadge source="heuristic"/>
-      </div>
+      {displayParseError ? (
+        <div class="raw-notice raw-notice--error" role="alert">
+          <Icon name="warning"/>
+          <span>{t("raw.parseErrorNotice", { error: displayParseError })}</span>
+        </div>
+      ) : (
+        <div class="raw-notice">
+          <Icon name="info"/>
+          <span>{t("raw.notice")}</span>
+          <SourceBadge source="heuristic"/>
+        </div>
+      )}
       <section class="raw-card">
         <header>
           <div class="raw-card__title">

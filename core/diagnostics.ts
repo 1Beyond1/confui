@@ -410,25 +410,27 @@ async function diagnoseSingleFile(ctx: SingleFileDiagContext): Promise<ProjectDi
       const reportedMissing = new Set<string>();
       for (const example of companionExamples) {
         const exampleLeaves = flattenLeafEntries(example.parsed, MAX_EXAMPLE_LEAVES);
-        for (const [leafKey, leaf] of exampleLeaves) {
-          if (reportedMissing.has(leafKey)) continue;
-          const actual = getAtPath(doc.value, leaf.segments);
-          if (actual !== undefined) continue;
-          reportedMissing.add(leafKey);
+        for (const [, leaf] of exampleLeaves) {
+          const missingSegments = resolveMissingExamplePath(doc.value, leaf.segments);
+          if (!missingSegments) continue;
+          const missingKey = pathKey(missingSegments);
+          if (reportedMissing.has(missingKey)) continue;
+          reportedMissing.add(missingKey);
+          const missingPath = formatPath(missingSegments);
           const exampleName = extractBaseName(example.relativePath) || example.relativePath;
           issues.push({
-            id: nextId("missing-from-example", doc.index, leaf.path),
+            id: nextId("missing-from-example", doc.index, missingPath),
             file: file.path,
             format: file.format,
             severity: "warning",
             category: "missing-from-example",
-            path: leaf.path,
-            segments: [...leaf.segments],
+            path: missingPath,
+            segments: [...missingSegments],
             sourceFile: example.relativePath,
             ...docMeta,
             message: isEn
-              ? `Missing key "${leaf.path}" defined in ${exampleName}`
-              : `缺少示例文件 ${exampleName} 中定义的配置项 ${leaf.path}`,
+              ? `Missing key "${missingPath}" defined in ${exampleName}`
+              : `缺少示例文件 ${exampleName} 中定义的配置项 ${missingPath}`,
             detail: isEn
               ? `Defined in companion template ${example.relativePath}`
               : `定义于配套模板 ${example.relativePath}`,
@@ -788,6 +790,35 @@ function flattenLeafEntries(parsed: unknown, maxLeaves: number): Map<string, Lea
   }
   visit(parsed, [], 0);
   return leaves;
+}
+
+/**
+ * Resolves the effective missing key path for a companion example leaf.
+ * Avoids false positives when an example template lists more sample items in
+ * an object array than the user's real config array (or when the user
+ * intentionally configures an empty array), while still reporting a missing
+ * array property itself once or missing keys inside existing array elements.
+ */
+function resolveMissingExamplePath(
+  actualRoot: unknown,
+  exampleSegments: readonly PathSegment[],
+): readonly PathSegment[] | undefined {
+  for (let i = 0; i < exampleSegments.length; i += 1) {
+    const seg = exampleSegments[i];
+    if (typeof seg !== "number") continue;
+    const arrayPath = exampleSegments.slice(0, i);
+    const actualArray = getAtPath(actualRoot, arrayPath);
+    if (actualArray === undefined) {
+      return arrayPath.length > 0 ? arrayPath : undefined;
+    }
+    if (!Array.isArray(actualArray)) {
+      return undefined;
+    }
+    if (seg >= actualArray.length) {
+      return undefined;
+    }
+  }
+  return getAtPath(actualRoot, exampleSegments) === undefined ? exampleSegments : undefined;
 }
 
 function isAncestorSecretMarked(segments: readonly PathSegment[], markedKeys: ReadonlySet<string>): boolean {

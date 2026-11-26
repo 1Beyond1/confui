@@ -49,7 +49,7 @@ import {
   formatPath,
   getAtPath,
   pathKey,
-  resolveExistingProjectPath,
+  resolveRegularProjectFile,
   safeJoin,
 } from "./paths.ts";
 import { deriveTargetFromExample, isExampleFilename } from "./scanner.ts";
@@ -68,7 +68,7 @@ export async function previewSave(
   expectedVersion: FileVersion,
   documentIndex?: number,
 ): Promise<SavePreview> {
-  const { root: projectRoot, path: absolutePath } = await resolveExistingProjectPath(root, relativeFile);
+  const { root: projectRoot, path: absolutePath } = await resolveRegularProjectFile(root, relativeFile);
   const format = detectFormat(relativeFile);
   if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
   if (documentIndex !== undefined && (!Number.isSafeInteger(documentIndex) || documentIndex < 0)) {
@@ -126,7 +126,7 @@ export async function commitSave(
   preview: SavePreview,
   options: CommitSaveOptions = {},
 ): Promise<SaveResult> {
-  const resolved = await resolveExistingProjectPath(root, preview.file);
+  const resolved = await resolveRegularProjectFile(root, preview.file);
   if (!samePath(resolved.root, preview.projectRoot)) {
     throw new ConfuiError("FILE_CONFLICT", "保存预览属于另一个项目，已拒绝写入");
   }
@@ -272,7 +272,7 @@ async function commitSaveExclusive(
 }
 
 export async function getBackupStatus(root: string, relativeFile: string): Promise<BackupStatus> {
-  const { root: projectRoot, path: absolutePath } = await resolveExistingProjectPath(root, relativeFile);
+  const { root: projectRoot, path: absolutePath } = await resolveRegularProjectFile(root, relativeFile);
   const backupPath = `${absolutePath}.bak`;
   try {
     const info = await lstat(backupPath);
@@ -296,7 +296,7 @@ export async function previewRestoreBackup(
   relativeFile: string,
   expectedVersion: FileVersion,
 ): Promise<RestoreBackupPreview> {
-  const { root: projectRoot, path: absolutePath } = await resolveExistingProjectPath(root, relativeFile);
+  const { root: projectRoot, path: absolutePath } = await resolveRegularProjectFile(root, relativeFile);
   const format = detectFormat(relativeFile);
   if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
   const currentSnapshot = await readTextSnapshot(absolutePath);
@@ -324,7 +324,7 @@ export async function commitRestoreBackup(
   root: string,
   preview: RestoreBackupPreview,
 ): Promise<SaveResult> {
-  const resolved = await resolveExistingProjectPath(root, preview.file);
+  const resolved = await resolveRegularProjectFile(root, preview.file);
   if (!samePath(resolved.root, preview.projectRoot)) {
     throw new ConfuiError("FILE_CONFLICT", "恢复预览属于另一个项目，已拒绝写入");
   }
@@ -651,7 +651,7 @@ export async function createConfigFromExample(
   if (exampleInfo.isSymbolicLink() || !exampleInfo.isFile()) {
     throw new ConfuiError("INVALID_INPUT", "示例模板必须是普通文件，已拒绝软链接");
   }
-  const resolvedExample = await resolveExistingProjectPath(projectRoot, exampleRelativeFile);
+  const resolvedExample = await resolveRegularProjectFile(projectRoot, exampleRelativeFile);
   if (!samePath(resolvedExample.path, lexicalExample)) {
     throw new ConfuiError("INVALID_INPUT", "示例模板路径包含符号链接，已拒绝访问");
   }
@@ -739,8 +739,8 @@ export async function compareConfigFiles(
   assertOptionalDocumentIndex(options.sourceDocumentIndex);
   assertOptionalDocumentIndex(options.targetDocumentIndex);
 
-  const sourceResolved = await resolveExistingProjectPath(root, sourceRelativeFile);
-  const targetResolved = await resolveExistingProjectPath(root, targetRelativeFile);
+  const sourceResolved = await resolveRegularProjectFile(root, sourceRelativeFile);
+  const targetResolved = await resolveRegularProjectFile(root, targetRelativeFile);
   await assertStableTarget(sourceResolved.root, sourceResolved.path);
   await assertStableTarget(targetResolved.root, targetResolved.path);
 
@@ -904,7 +904,7 @@ export async function previewSyncFromFile(
   assertOptionalDocumentIndex(options.sourceDocumentIndex);
   assertOptionalDocumentIndex(options.targetDocumentIndex);
 
-  const sourceResolved = await resolveExistingProjectPath(root, sourceRelativeFile);
+  const sourceResolved = await resolveRegularProjectFile(root, sourceRelativeFile);
   await assertStableTarget(sourceResolved.root, sourceResolved.path);
   const sourceFormat = detectFormat(sourceRelativeFile);
   const targetFormat = detectFormat(targetRelativeFile);
@@ -959,7 +959,7 @@ export async function generateRedactedExport(
   options: GenerateRedactedExportOptions = {},
 ): Promise<RedactedExportPreview> {
   assertOptionalDocumentIndex(options.documentIndex);
-  const resolved = await resolveExistingProjectPath(root, relativeFile);
+  const resolved = await resolveRegularProjectFile(root, relativeFile);
   await assertStableTarget(resolved.root, resolved.path);
   const format = detectFormat(relativeFile);
   if (!format) throw new ConfuiError("INVALID_INPUT", "不支持这个配置文件格式");
@@ -1167,7 +1167,7 @@ export async function writeRedactedExport(
   extraSecretPaths: readonly (readonly PathSegment[])[] = [],
   options: GenerateRedactedExportOptions = {},
 ): Promise<CreateFromExampleResult> {
-  const resolvedSource = await resolveExistingProjectPath(root, sourceRelativeFile);
+  const resolvedSource = await resolveRegularProjectFile(root, sourceRelativeFile);
   const preview = await generateRedactedExport(root, sourceRelativeFile, extraSecretPaths, options);
   const lexicalTarget = safeJoin(resolvedSource.root, targetRelativeFile);
   if (samePath(lexicalTarget, resolvedSource.path)) {

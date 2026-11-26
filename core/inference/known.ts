@@ -14,6 +14,8 @@ interface KnownItemFieldDef {
   type: FieldCandidate["type"];
   required?: boolean;
   enum?: Array<string | number>;
+  minimum?: number;
+  maximum?: number;
 }
 
 interface KnownDefinition {
@@ -170,6 +172,125 @@ const NPMRC: KnownDefinition[] = [
   { segments: ["fund"], label: { zh: "显示赞助提示", en: "Funding Messages" }, description: { zh: "在安装完成后显示依赖包的开源赞助信息。", en: "Display funding messages after installs." }, type: "boolean", group: { zh: "界面输出", en: "Output" } },
 ];
 
+const LAUNCH_JSON: KnownDefinition[] = [
+  { segments: ["version"], label: { zh: "配置版本", en: "Schema Version" }, description: { zh: "VS Code launch.json 格式版本号（通常为 0.2.0）。", en: "VS Code launch.json schema version (typically 0.2.0)." }, type: "string", group: { zh: "常规", en: "General" } },
+  {
+    segments: ["configurations"],
+    label: { zh: "调试配置列表", en: "Debug Configurations" },
+    description: { zh: "可在 VS Code 调试面板中启动或附加的运行配置列表。", en: "List of launch or attach debug configurations shown in VS Code." },
+    type: "array",
+    group: { zh: "调试配置", en: "Configurations" },
+    itemFields: [
+      { key: "name", label: { zh: "配置名称", en: "Name" }, description: { zh: "展示在调试下拉菜单中的可读名称。", en: "Friendly name displayed in the VS Code launch configuration dropdown." }, type: "string", required: true },
+      { key: "type", label: { zh: "调试器类型", en: "Debugger Type" }, description: { zh: "调试器适配器类型（如 node、pwa-node、python、chrome、go、lldb）。", en: "Debugger adapter type (e.g. node, pwa-node, python, chrome, go, lldb)." }, type: "string", required: true },
+      { key: "request", label: { zh: "调试模式", en: "Request Type" }, description: { zh: "启动新进程（launch）或附加到已运行进程（attach）。", en: "Launch a new debugged process or attach to an already running one." }, type: "enum", enum: ["launch", "attach"], required: true },
+      { key: "program", label: { zh: "入口程序", en: "Program" }, description: { zh: "要调试的入口脚本或可执行文件路径。", en: "Path to the entry script or executable to debug." }, type: "string" },
+      { key: "cwd", label: { zh: "工作目录", en: "Working Directory" }, description: { zh: "调试目标启动时使用的当前工作目录。", en: "Current working directory for the debugged process." }, type: "string" },
+      { key: "args", label: { zh: "命令行参数", en: "Arguments" }, description: { zh: "传递给被调试程序的命令行参数数组。", en: "Command-line arguments passed to the program." }, type: "array" },
+      { key: "env", label: { zh: "环境变量", en: "Environment Variables" }, description: { zh: "注入调试进程环境的键值对。", en: "Environment variables injected into the debugged process." }, type: "json" },
+      { key: "envFile", label: { zh: "环境变量文件", en: "Env File" }, description: { zh: "启动调试前自动加载的 .env 文件路径。", en: "Path to a .env file loaded before launching the debugger." }, type: "string" },
+      { key: "port", label: { zh: "调试端口", en: "Debug Port" }, description: { zh: "调试协议监听或附加使用的 TCP 端口号。", en: "TCP port used to attach or communicate with the debugger." }, type: "integer", minimum: 1, maximum: 65535 },
+      { key: "console", label: { zh: "控制台类型", en: "Console" }, description: { zh: "指定调试输出的承载终端。", en: "Console used for launching the debug target." }, type: "enum", enum: ["internalConsole", "integratedTerminal", "externalTerminal"] },
+      { key: "runtimeExecutable", label: { zh: "运行时可执行文件", en: "Runtime Executable" }, description: { zh: "自定义运行时路径（如 npm、pnpm、tsx 或 python 路径）。", en: "Custom runtime binary to execute (e.g. npm, pnpm, tsx, or python)." }, type: "string" },
+      { key: "preLaunchTask", label: { zh: "启动前任务", en: "Pre-Launch Task" }, description: { zh: "开始调试前在 tasks.json 中自动执行的任务名。", en: "Task from tasks.json to run before starting the debug session." }, type: "string" },
+      { key: "postDebugTask", label: { zh: "调试后任务", en: "Post-Debug Task" }, description: { zh: "调试会话结束后自动执行的清理任务名。", en: "Task from tasks.json to run after the debug session ends." }, type: "string" },
+      { key: "sourceMaps", label: { zh: "启用 Source Map", en: "Source Maps" }, description: { zh: "使用 Source Map 将编译后代码映射回原始源码断点。", en: "Use source maps to map compiled output back to original source files." }, type: "boolean" },
+      { key: "stopOnEntry", label: { zh: "入口处暂停", en: "Stop on Entry" }, description: { zh: "程序启动后立即在第一行断点暂停。", en: "Automatically pause execution at program entry." }, type: "boolean" },
+      { key: "skipFiles", label: { zh: "跳过文件", en: "Skip Files" }, description: { zh: "单步调试时自动忽略的文件 glob 列表（如 <node_internals>/**）。", en: "Glob patterns of files to skip while stepping through code." }, type: "array" },
+    ],
+  },
+  {
+    segments: ["compounds"],
+    label: { zh: "复合启动配置", en: "Compound Configurations" },
+    description: { zh: "同时启动多个关联调试配置的组合定义。", en: "Composite definitions that launch multiple debug configurations together." },
+    type: "array",
+    group: { zh: "复合配置", en: "Compounds" },
+    itemFields: [
+      { key: "name", label: { zh: "复合名称", en: "Name" }, description: { zh: "复合启动项在调试列表中的名称。", en: "Display name of the compound configuration." }, type: "string", required: true },
+      { key: "configurations", label: { zh: "包含的配置名", en: "Configurations" }, description: { zh: "要同时启动的子配置名称列表。", en: "Names of individual configurations to start together." }, type: "array", required: true },
+      { key: "preLaunchTask", label: { zh: "启动前任务", en: "Pre-Launch Task" }, description: { zh: "启动全部子配置前执行的准备任务。", en: "Task executed before starting all member configurations." }, type: "string" },
+      { key: "stopAll", label: { zh: "联动停止", en: "Stop All" }, description: { zh: "任意一个子会话终止时自动停止其余所有会话。", en: "Stop all compound sessions when any single session terminates." }, type: "boolean" },
+    ],
+  },
+  {
+    segments: ["inputs"],
+    label: { zh: "交互式输入变量", en: "Input Variables" },
+    description: { zh: "供 ${input:id} 引用的交互式参数提示定义。", en: "Interactive prompt definitions referenced via ${input:id}." },
+    type: "array",
+    group: { zh: "变量与输入", en: "Inputs" },
+    itemFields: [
+      { key: "id", label: { zh: "变量 ID", en: "Input ID" }, description: { zh: "在配置中通过 ${input:<id>} 引用的唯一标识。", en: "Unique identifier referenced as ${input:<id>}." }, type: "string", required: true },
+      { key: "type", label: { zh: "输入类型", en: "Input Type" }, description: { zh: "文本输入（promptString）、下拉选择（pickString）或命令输出（command）。", en: "Prompt input style: free text, option picker, or command output." }, type: "enum", enum: ["promptString", "pickString", "command"], required: true },
+      { key: "description", label: { zh: "提示说明", en: "Description" }, description: { zh: "向用户展示的输入提示文案。", en: "Prompt message shown to the user." }, type: "string" },
+      { key: "default", label: { zh: "默认值", en: "Default Value" }, description: { zh: "用户直接回车确认时使用的默认值。", en: "Fallback value used if the user submits without typing." }, type: "string" },
+      { key: "password", label: { zh: "密码模式", en: "Password Input" }, description: { zh: "启用后在输入框中以掩码隐藏用户输入内容。", en: "Masks user input in the prompt box for sensitive values." }, type: "boolean" },
+    ],
+  },
+];
+
+const VERCEL_JSON: KnownDefinition[] = [
+  { segments: ["framework"], label: { zh: "前端框架", en: "Framework" }, description: { zh: "Vercel 用于自动配置构建与路由预设的框架标识（如 nextjs、vite、astro）。", en: "Framework preset used by Vercel for build and routing defaults (e.g. nextjs, vite, astro)." }, type: "string", group: { zh: "构建与部署", en: "Build & Deployment" } },
+  { segments: ["buildCommand"], label: { zh: "构建命令", en: "Build Command" }, description: { zh: "覆盖框架默认构建流程的自定义 Shell 命令。", en: "Custom shell command overriding the default framework build step." }, type: "string", group: { zh: "构建与部署", en: "Build & Deployment" } },
+  { segments: ["devCommand"], label: { zh: "本地开发命令", en: "Dev Command" }, description: { zh: "vercel dev 启动本地开发服务器时执行的命令。", en: "Command executed by vercel dev to start the local development server." }, type: "string", group: { zh: "构建与部署", en: "Build & Deployment" } },
+  { segments: ["installCommand"], label: { zh: "依赖安装命令", en: "Install Command" }, description: { zh: "覆盖默认包管理器安装阶段的自定义命令。", en: "Custom command overriding the default dependency installation step." }, type: "string", group: { zh: "构建与部署", en: "Build & Deployment" } },
+  { segments: ["outputDirectory"], label: { zh: "构建输出目录", en: "Output Directory" }, description: { zh: "存放编译后静态资源与产物的相对目录（如 dist、build）。", en: "Relative directory containing compiled static build artifacts (e.g. dist, build)." }, type: "string", group: { zh: "构建与部署", en: "Build & Deployment" } },
+  { segments: ["ignoreCommand"], label: { zh: "忽略构建检查命令", en: "Ignore Build Step" }, description: { zh: "返回退出码 0 时跳过本次部署构建的自定义脚本。", en: "Shell command that skips the build when it exits with code 0." }, type: "string", group: { zh: "构建与部署", en: "Build & Deployment" } },
+  { segments: ["public"], label: { zh: "公开源码与日志", en: "Public Source & Logs" }, description: { zh: "允许公开访问部署源码与构建日志（默认关闭）。", en: "Makes deployment source code and build logs publicly accessible." }, type: "boolean", group: { zh: "基本信息", en: "General" } },
+  { segments: ["cleanUrls"], label: { zh: "简洁 URL", en: "Clean URLs" }, description: { zh: "自动隐藏静态页面路径末尾的 .html 扩展名。", en: "Automatically drops the .html extension from static page URLs." }, type: "boolean", group: { zh: "路由与重写", en: "Routing" } },
+  { segments: ["trailingSlash"], label: { zh: "保留尾部斜杠", en: "Trailing Slash" }, description: { zh: "控制路由是否统一规范化为带尾部斜杠（/）的 URL。", en: "Controls whether URLs are normalized with or without a trailing slash." }, type: "boolean", group: { zh: "路由与重写", en: "Routing" } },
+  {
+    segments: ["rewrites"],
+    label: { zh: "URL 重写规则", en: "Rewrites" },
+    description: { zh: "在不改变浏览器地址栏的前提下将请求代理或映射到目标路径。", en: "Maps incoming request paths to destination paths or URLs without changing the browser URL." },
+    type: "array",
+    group: { zh: "路由与重写", en: "Routing" },
+    itemFields: [
+      { key: "source", label: { zh: "匹配路径", en: "Source Pattern" }, description: { zh: "需要匹配的入站请求路径模式（如 /api/:path*）。", en: "Incoming path pattern to match (e.g. /api/:path*)." }, type: "string", required: true },
+      { key: "destination", label: { zh: "目标地址", en: "Destination" }, description: { zh: "重写后的内部路径或外部代理目标 URL。", en: "Target internal path or external URL to proxy to." }, type: "string", required: true },
+    ],
+  },
+  {
+    segments: ["redirects"],
+    label: { zh: "URL 重定向规则", en: "Redirects" },
+    description: { zh: "将匹配的请求通过 HTTP 3xx 跳转到新的目标路径。", en: "Redirects matching incoming paths via HTTP 3xx responses." },
+    type: "array",
+    group: { zh: "路由与重写", en: "Routing" },
+    itemFields: [
+      { key: "source", label: { zh: "匹配路径", en: "Source Pattern" }, description: { zh: "触发重定向的原始路径模式。", en: "Incoming path pattern that triggers the redirect." }, type: "string", required: true },
+      { key: "destination", label: { zh: "目标地址", en: "Destination" }, description: { zh: "重定向跳转的新路径或完整 URL。", en: "Target path or full URL to redirect to." }, type: "string", required: true },
+      { key: "permanent", label: { zh: "永久重定向", en: "Permanent" }, description: { zh: "设为 true 返回 308 永久跳转，false 返回 307 临时跳转。", en: "Use HTTP 308 permanent redirect when true, or 307 temporary redirect when false." }, type: "boolean" },
+      { key: "statusCode", label: { zh: "HTTP 状态码", en: "Status Code" }, description: { zh: "显式指定重定向状态码（301–308）。", en: "Explicit HTTP redirect status code (301–308)." }, type: "integer", minimum: 301, maximum: 308 },
+    ],
+  },
+  {
+    segments: ["headers"],
+    label: { zh: "自定义响应头", en: "Custom Headers" },
+    description: { zh: "按路径规则附加自定义 HTTP 响应头（如 CORS、CSP 与缓存策略）。", en: "Attaches custom HTTP response headers (e.g. CORS, CSP, caching) by path pattern." },
+    type: "array",
+    group: { zh: "路由与重写", en: "Routing" },
+    itemFields: [
+      { key: "source", label: { zh: "匹配路径", en: "Source Pattern" }, description: { zh: "应用响应头的路径模式（如 /(.*)）。", en: "Path pattern where these headers apply (e.g. /(.*))." }, type: "string", required: true },
+      { key: "headers", label: { zh: "响应头列表", en: "Headers" }, description: { zh: "由 key 与 value 组成的响应头条目列表。", en: "List of { key, value } HTTP response header objects." }, type: "array", required: true },
+    ],
+  },
+  { segments: ["regions"], label: { zh: "部署区域", en: "Regions" }, description: { zh: "无服务器函数部署的目标 Vercel 区域代码列表（如 iad1、hnd1、sin1）。", en: "Target Vercel deployment region codes for serverless functions (e.g. iad1, hnd1, sin1)." }, type: "array", group: { zh: "运行时与函数", en: "Runtime & Functions" } },
+  { segments: ["functions"], label: { zh: "无服务器函数配置", en: "Functions" }, description: { zh: "按函数文件路径配置内存、超时时间（maxDuration）与运行时。", en: "Per-function memory, maxDuration, and runtime overrides keyed by file pattern." }, type: "json", group: { zh: "运行时与函数", en: "Runtime & Functions" } },
+  {
+    segments: ["crons"],
+    label: { zh: "定时任务 (Cron Jobs)", en: "Cron Jobs" },
+    description: { zh: "按 Cron 表达式定时触发项目 API 路由的计划任务列表。", en: "Scheduled Vercel Cron Jobs invoking project endpoints on a cron schedule." },
+    type: "array",
+    group: { zh: "运行时与函数", en: "Runtime & Functions" },
+    itemFields: [
+      { key: "path", label: { zh: "触发接口路径", en: "Endpoint Path" }, description: { zh: "定时调用的站内相对 API 路径（必须以 / 开头）。", en: "Relative API route path invoked on schedule (must start with /)." }, type: "string", required: true },
+      { key: "schedule", label: { zh: "Cron 表达式", en: "Schedule" }, description: { zh: "标准 5 段 UTC Cron 表达式（如 0 5 * * *）。", en: "Standard 5-field UTC cron expression (e.g. 0 5 * * *)." }, type: "string", required: true },
+    ],
+  },
+  { segments: ["env"], label: { zh: "环境变量", en: "Environment Variables" }, description: { zh: "运行时注入部署环境的键值映射。", en: "Runtime environment variable key-value mappings for deployments." }, type: "json", group: { zh: "环境变量", en: "Environment" } },
+  { segments: ["git"], label: { zh: "Git 部署设置", en: "Git Settings" }, description: { zh: "控制不同 Git 分支是否自动触发部署（deploymentEnabled）。", en: "Controls per-branch automatic deployment behavior (e.g. deploymentEnabled)." }, type: "json", group: { zh: "Git 集成", en: "Git Integration" } },
+  { segments: ["github"], label: { zh: "GitHub 集成", en: "GitHub Integration" }, description: { zh: "控制 GitHub PR 评论、提交状态与自动部署行为。", en: "Configures GitHub PR comments, commit checks, and automatic deployments." }, type: "json", group: { zh: "Git 集成", en: "Git Integration" } },
+];
+
 const ENV_COMMON: KnownDefinition[] = [
   { segments: ["PORT"], label: { zh: "监听端口", en: "Server Port" }, description: { zh: "服务监听的 TCP 端口号（1–65535）。", en: "TCP port number the service listens on (1–65535)." }, type: "integer", minimum: 1, maximum: 65535, group: { zh: "服务与网络", en: "Server & Network" } },
   { segments: ["HOST"], label: { zh: "监听主机", en: "Bind Host" }, description: { zh: "服务绑定的网络地址（本地开发常用 127.0.0.1，容器常用 0.0.0.0）。", en: "Network interface address to bind (e.g. 127.0.0.1 or 0.0.0.0)." }, type: "string", group: { zh: "服务与网络", en: "Server & Network" } },
@@ -221,6 +342,8 @@ export function inferKnownFields(
   else if (isCompose) definitions = [...DOCKER_COMPOSE_TOP, ...expandDockerComposeServices(value)];
   else if (lower === "pyproject.toml") definitions = PYPROJECT;
   else if (lower === "cargo.toml") definitions = CARGO;
+  else if (lower === "launch.json") definitions = LAUNCH_JSON;
+  else if (lower === "vercel.json") definitions = VERCEL_JSON;
   else if (lower === ".editorconfig") definitions = EDITORCONFIG;
   else if (lower === ".npmrc") definitions = NPMRC;
   else if (isEnv) definitions = ENV_COMMON;
@@ -251,6 +374,8 @@ export function inferKnownFields(
         type: item.type ?? "string",
         required: item.required,
         enum: item.enum,
+        minimum: item.minimum,
+        maximum: item.maximum,
       })),
       value: getAtPath(value, definition.segments),
       source: "known-template" as const,

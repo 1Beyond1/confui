@@ -3,7 +3,7 @@ import { mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { AppSettings, Locale, RecentProject, TestAIRequest } from "../shared/schema.ts";
 import { DEFAULT_SETTINGS } from "../shared/schema.ts";
-import { canReuseStoredAiApiKey } from "../shared/validation.ts";
+import { canReuseStoredAiApiKey, isAiEndpointUnchanged } from "../shared/validation.ts";
 import { ConfuiError } from "./errors.ts";
 import { renameWithRetry } from "./save.ts";
 import { normalizeGithubUrl } from "./scanner.ts";
@@ -91,11 +91,12 @@ export class SettingsStore {
       const clearApiKey = isRecord(input) && isRecord(input.clearSecrets) && input.clearSecrets.apiKey === true;
       const clearGithubToken = isRecord(input) && isRecord(input.clearSecrets) && input.clearSecrets.githubToken === true;
       const stored = await this.readPersistedForWrite();
-      const canReuseApiKey = canReuseStoredAiApiKey(stored.ai, settings.ai);
+      const canPreserveApiKey = canReuseStoredAiApiKey(stored.ai, settings.ai)
+        || isAiEndpointUnchanged(stored.ai, settings.ai);
 
       const nextApiKey = settings.ai.apiKey
         ? this.codec.encode(settings.ai.apiKey)
-        : clearApiKey || !canReuseApiKey
+        : clearApiKey || !canPreserveApiKey
           ? ""
           : stored.ai.apiKey;
       const nextGithubToken = settings.github.token

@@ -8,6 +8,7 @@ import type { UpdateConfigResult } from "./types.ts";
 
 const TOML_DELETE = Symbol("toml-delete");
 const BARE_KEY_RE = /^[A-Za-z0-9_-]+$/;
+const TOML_FINITE_NUMBER_RE = /^[+-]?(?:\d+(?:_\d+)*(?:\.\d+(?:_\d+)*)?|\.\d+(?:_\d+)*)(?:e[+-]?\d+(?:_\d+)*)?$/i;
 
 export function parseToml(source: string): unknown {
   // Keep ordinary integers as numbers but retain valid TOML integers
@@ -370,8 +371,13 @@ function scanTomlValueSpan(
           continue;
         }
         if (line.startsWith('"""', col)) {
+          // TOML 1.0 allows 1 or 2 literal quotes immediately before the closing `"""` (4 or 5 quotes in a row).
+          let runEnd = col + 3;
+          while (runEnd < line.length && line[runEnd] === '"' && runEnd - col < 5) {
+            runEnd += 1;
+          }
           stringMode = null;
-          col += 3;
+          col = runEnd;
           continue;
         }
         col += 1;
@@ -379,8 +385,13 @@ function scanTomlValueSpan(
       }
       if (stringMode === "'''") {
         if (line.startsWith("'''", col)) {
+          // TOML 1.0 allows 1 or 2 literal apostrophes immediately before the closing `'''` (4 or 5 in a row).
+          let runEnd = col + 3;
+          while (runEnd < line.length && line[runEnd] === "'" && runEnd - col < 5) {
+            runEnd += 1;
+          }
           stringMode = null;
-          col += 3;
+          col = runEnd;
           continue;
         }
         col += 1;
@@ -508,6 +519,12 @@ function isStrictPrefix(prefix: readonly string[], full: readonly string[]): boo
 
 function tomlDeepEqual(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
+  if (typeof left === "bigint" && typeof right === "number") {
+    return Number.isSafeInteger(right) && !Object.is(right, -0) && BigInt(right) === left;
+  }
+  if (typeof left === "number" && typeof right === "bigint") {
+    return Number.isSafeInteger(left) && !Object.is(left, -0) && BigInt(left) === right;
+  }
   if (left instanceof Date && right instanceof Date) {
     return left.toISOString() === right.toISOString();
   }
@@ -560,7 +577,14 @@ export function coerceTomlValue(
       const literal = match[2] ?? match[3] ?? match[4] ?? match[5];
       if (!literal) throw new Error("missing integer literal");
       const integer = BigInt(literal.replace(/_/g, ""));
-      return match[1] === "-" ? -integer : integer;
+      const signed = match[1] === "-" ? -integer : integer;
+      const asNumber = Number(signed);
+      // Match `smol-toml`'s `{ integersAsBigInt: "asNeeded" }`: values within
+      // JavaScript's safe integer range re-parse as `number`.
+      if (Number.isSafeInteger(asNumber) && BigInt(asNumber) === signed) {
+        return asNumber;
+      }
+      return signed;
     } catch {
       throw new ConfuiError("SAVE_ERROR", "TOML 大整数格式无效", `${segments.join(".")}：请填写整数。`);
     }
@@ -569,7 +593,7 @@ export function coerceTomlValue(
     const text = value.trim().toLowerCase();
     if (!text) {
       if (allowUnset) return TOML_DELETE;
-      throw new ConfuiError("SAVE_ERROR", "TOML 特殊浮点值不能为空", `${segments.join(".")}：请填写 inf、-inf 或 nan。`);
+      throw new ConfuiError("SAVE_ERROR", "TOML 特殊浮点值不能为空", `${segments.join(".")}：请填写 inf、-inf、nan 或有限数字。`);
     }
     const special = text === "inf" || text === "+inf"
       ? Infinity
@@ -578,10 +602,12 @@ export function coerceTomlValue(
         : text === "nan" || text === "+nan" || text === "-nan"
           ? Number.NaN
           : undefined;
-    if (special === undefined) {
-      throw new ConfuiError("SAVE_ERROR", "TOML 特殊浮点格式无效", `${segments.join(".")}：请填写 inf、-inf 或 nan。`);
+    if (special !== undefined) return special;
+    if (TOML_FINITE_NUMBER_RE.test(text)) {
+      const numeric = Number(text.replace(/_/g, ""));
+      if (Number.isFinite(numeric)) return numeric;
     }
-    return special;
+    throw new ConfuiError("SAVE_ERROR", "TOML 特殊浮点格式无效", `${segments.join(".")}：请填写 inf、-inf、nan 或有限数字。`);
   }
   if (Array.isArray(current) && Array.isArray(value)) {
     const homogeneousWitness = current.length > 0 && (

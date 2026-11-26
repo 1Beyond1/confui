@@ -6,10 +6,11 @@ const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export function parseEnv(text: string): Record<string, string> {
   const result: Record<string, string> = {};
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+  for (const group of groupEnvLines(text.split(/\r?\n/))) {
+    const logical = group.join("\n");
+    const trimmed = logical.trim();
+    if (!trimmed || (group.length === 1 && trimmed.startsWith("#"))) continue;
+    const match = logical.match(/^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*([\s\S]*)$/);
     if (!match?.[1]) continue;
     result[match[1]] = unquote(splitEnvValueAndComment(match[2] ?? "").value);
   }
@@ -54,16 +55,20 @@ export function patchEnv(text: string, changes: readonly ConfigChange[]): string
   const seen = new Set<string>();
   const nextLines: string[] = [];
 
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      nextLines.push(line);
+  // ENV quoted values (`"..."`, `'...'`, `` `...` ``) may span multiple physical
+  // lines. Group physical lines into logical assignments first so updates and
+  // deletions replace or remove the entire block without leaving orphan lines.
+  for (const group of groupEnvLines(text.split(/\r?\n/))) {
+    const logical = group.join("\n");
+    const trimmed = logical.trim();
+    if (!trimmed || (group.length === 1 && trimmed.startsWith("#"))) {
+      nextLines.push(...group);
       continue;
     }
-    const match = line.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/);
+    const match = logical.match(/^([ \t]*(?:export[ \t]+)?)([A-Za-z_][A-Za-z0-9_]*)([ \t]*=[ \t]*)([\s\S]*)$/);
     const key = match?.[2];
     if (!key || !updates.has(key)) {
-      nextLines.push(line);
+      nextLines.push(...group);
       continue;
     }
     seen.add(key);
@@ -90,6 +95,75 @@ export function patchEnv(text: string, changes: readonly ConfigChange[]): string
   return nextLines.join(eol).replace(new RegExp(`${escapeRegExp(eol)}+$`), "") + eol;
 }
 
+/**
+ * Groups physical `.env` lines into logical entries while tracking open
+ * single-quoted (`'`), double-quoted (`"`), and backtick-quoted (`` ` ``)
+ * multi-line values.
+ */
+export function groupEnvLines(lines: readonly string[]): string[][] {
+  const groups: string[][] = [];
+  let current: string[] = [];
+  let openQuote: '"' | "'" | "`" | undefined;
+
+  for (const line of lines) {
+    if (openQuote !== undefined) {
+      current.push(line);
+      if (findClosingEnvQuote(line, 0, openQuote) >= 0) {
+        groups.push(current);
+        current = [];
+        openQuote = undefined;
+      }
+      continue;
+    }
+
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      groups.push([line]);
+      continue;
+    }
+
+    const match = line.match(/^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(.*)$/);
+    if (!match) {
+      groups.push([line]);
+      continue;
+    }
+
+    const rawValue = match[2] ?? "";
+    const firstChar = rawValue[0];
+    if (firstChar === '"' || firstChar === "'" || firstChar === "`") {
+      if (findClosingEnvQuote(rawValue, 1, firstChar) < 0) {
+        current = [line];
+        openQuote = firstChar;
+        continue;
+      }
+    }
+
+    groups.push([line]);
+  }
+
+  if (current.length) groups.push(current);
+  return groups;
+}
+
+function findClosingEnvQuote(line: string, startIndex: number, quote: '"' | "'" | "`"): number {
+  let escaped = false;
+  for (let index = startIndex; index < line.length; index += 1) {
+    const character = line[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote === '"' && character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === quote) {
+      return index;
+    }
+  }
+  return -1;
+}
+
 export function formatEnvValue(value: unknown, previous = ""): string {
   const stringValue = String(value ?? "");
   const previousValue = previous.trim();
@@ -97,14 +171,17 @@ export function formatEnvValue(value: unknown, previous = ""): string {
     ? "\""
     : previousValue.startsWith("'") && previousValue.endsWith("'")
       ? "'"
-      : /[\s#=\\"']/.test(stringValue)
-        ? "\""
-        : "";
+      : previousValue.startsWith("`") && previousValue.endsWith("`")
+        ? "`"
+        : /[\s#=\\"'`]/.test(stringValue)
+          ? "\""
+          : "";
   if (quote === "'" && stringValue.includes("'")) quote = "\"";
-  // A single-quoted ENV value cannot span physical lines. Switch to a
-  // double-quoted escaped representation before a multiline value turns the
-  // remainder of the assignment into unrelated lines.
-  if (quote === "'" && /[\r\n\t]/.test(stringValue)) quote = "\"";
+  if (quote === "`" && stringValue.includes("`")) quote = "\"";
+  // Single-quoted and backtick-quoted ENV values are normalized to an escaped
+  // double-quoted line whenever a value contains line breaks or tabs so edits
+  // round-trip cleanly on one assignment line.
+  if ((quote === "'" || quote === "`") && /[\r\n\t]/.test(stringValue)) quote = "\"";
   if (!quote) return stringValue;
   const escaped = quote === "\""
     ? stringValue
@@ -120,7 +197,7 @@ export function formatEnvValue(value: unknown, previous = ""): string {
 export function splitEnvValueAndComment(raw: string): { value: string; comment: string } {
   const leadingWhitespace = raw.match(/^\s*/)?.[0].length ?? 0;
   const firstChar = raw[leadingWhitespace];
-  if (firstChar === "'" || firstChar === '"') {
+  if (firstChar === "'" || firstChar === '"' || firstChar === "`") {
     const quote = firstChar;
     let escaped = false;
     let closed = false;
@@ -162,6 +239,7 @@ function unquote(value: string): string {
     return decodeEnvEscapes(trimmed.slice(1, -1));
   }
   if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1);
+  if (trimmed.length >= 2 && trimmed.startsWith("`") && trimmed.endsWith("`")) return trimmed.slice(1, -1);
   return trimmed.replace(/\s+#.*$/, "");
 }
 

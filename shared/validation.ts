@@ -283,19 +283,53 @@ export function normalizeTrustedAiOrigin(baseUrl: string): string | undefined {
 }
 
 /**
+ * Extracts a canonical origin (`scheme://host[:port]`) for any valid HTTP/HTTPS
+ * AI Base URL without embedded credentials, query parameters, or fragments.
+ */
+export function normalizeAiOrigin(baseUrl: string): string | undefined {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) return undefined;
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (url.username || url.password || url.search || url.hash) return undefined;
+  if (url.protocol === "https:" || url.protocol === "http:") {
+    return url.origin;
+  }
+  return undefined;
+}
+
+/**
  * Determines whether a stored AI API key may be reused for a target AI config.
- * Both the provider identifier and the canonical trusted origin of `baseUrl`
- * must match so changing `baseUrl` to another domain can never exfiltrate a
- * previously saved `safeStorage` key.
+ * Both the provider identifier and the exact canonical HTTP/HTTPS origin of
+ * `baseUrl` must match (preventing domain changes, port changes, credential
+ * smuggling, query/hash injection, or `https:` -> `http:` protocol downgrades),
+ * while allowing same-origin LAN HTTP endpoints (e.g. intranet Ollama/vLLM).
  */
 export function canReuseStoredAiApiKey(
   stored: { provider: string; baseUrl: string },
   candidate: { provider: string; baseUrl: string },
 ): boolean {
   if (stored.provider !== candidate.provider) return false;
-  const storedOrigin = normalizeTrustedAiOrigin(stored.baseUrl);
-  const candidateOrigin = normalizeTrustedAiOrigin(candidate.baseUrl);
+  const storedOrigin = normalizeAiOrigin(stored.baseUrl);
+  const candidateOrigin = normalizeAiOrigin(candidate.baseUrl);
   return Boolean(storedOrigin && candidateOrigin && storedOrigin === candidateOrigin);
+}
+
+/**
+ * Returns true when neither `provider` nor `baseUrl` changed at all (for
+ * example, saving theme, language, or SchemaStore preferences). Used so
+ * unrelated settings saves never silently clear existing or locked ciphertexts.
+ */
+export function isAiEndpointUnchanged(
+  stored: { provider: string; baseUrl: string },
+  candidate: { provider: string; baseUrl: string },
+): boolean {
+  return stored.provider === candidate.provider
+    && stored.baseUrl.trim() === candidate.baseUrl.trim();
 }
 
 const MAX_REGEX_PATTERN_LENGTH = 512;

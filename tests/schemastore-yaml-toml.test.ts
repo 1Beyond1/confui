@@ -185,6 +185,7 @@ port = 8080
 
     await writeFile(join(root, "vercel.json"), JSON.stringify({
       framework: "nextjs",
+      fluid: true,
       rewrites: [{ source: "/api/:path*", destination: "https://backend.local/:path*" }],
     }, null, 2), "utf8");
 
@@ -195,6 +196,10 @@ port = 8080
           type: "string",
           enum: ["nextjs", "vite", "astro"],
           description: "Detected frontend framework preset.",
+        },
+        fluid: {
+          type: "boolean",
+          description: "Enable Fluid Compute concurrency for serverless functions.",
         },
         rewrites: {
           type: "array",
@@ -239,10 +244,17 @@ port = 8080
       url: "https://json.schemastore.org/vercel.json",
       fromCache: false,
     });
-    expect(onlineSchema.fields.find((f) => f.path === "framework")).toMatchObject({
+    const frameworkField = onlineSchema.fields.find((f) => f.path === "framework");
+    expect(frameworkField).toMatchObject({
       type: "enum",
       enum: ["nextjs", "vite", "astro"],
+      source: "known-template",
+    });
+    expect(frameworkField?.evidence.find((e) => e.property === "enum")?.source).toBe("schemastore");
+    expect(onlineSchema.fields.find((f) => f.path === "fluid")).toMatchObject({
+      type: "boolean",
       source: "schemastore",
+      description: "Enable Fluid Compute concurrency for serverless functions.",
     });
     expect(onlineSchema.fields.find((f) => f.path === "rewrites")?.itemFields?.map((i) => i.key)).toEqual([
       "source",

@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { OpenAICompatibleProvider, testAIConnection } from "../core/ai/provider.ts";
 import { diagnoseProject } from "../core/diagnostics.ts";
 import { toAppError, ConfuiError } from "../core/errors.ts";
-import { AI_FILE_LIMIT, currentVersion, HARD_FILE_LIMIT, readTextSnapshot } from "../core/files.ts";
+import { AI_FILE_LIMIT, currentVersion, HARD_FILE_LIMIT, readRawConfigFile, readTextSnapshot } from "../core/files.ts";
 import { explainField as explainFieldWithAI } from "../core/inference/ai.ts";
 import { inferExampleFields } from "../core/inference/examples.ts";
 import { inferConfig } from "../core/inference/index.ts";
@@ -25,7 +25,7 @@ import { inferReadmeFields } from "../core/inference/readme.ts";
 import { maskDocumentSecrets, maskSecrets } from "../core/inference/heuristic.ts";
 import { isSecretPath } from "../core/inference/common.ts";
 import { assertEditableSyntax, detectFormat, parseConfig } from "../core/formats.ts";
-import { getAtPath, resolveExistingProjectPath } from "../core/paths.ts";
+import { getAtPath, resolveExistingProjectPath, resolveRegularProjectFile } from "../core/paths.ts";
 import {
   commitRestoreBackup,
   commitSave,
@@ -346,6 +346,18 @@ function registerIpcHandlers(): void {
     return schema;
   });
 
+  handle("confui:readRawFile", async (_event, root: unknown, file: unknown) => {
+    assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
+    assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
+    const inferSeq = ++activeInferSeq;
+    const raw = await readRawConfigFile(root, file);
+    const resolved = await resolveRegularProjectFile(root, file);
+    if (inferSeq === activeInferSeq) {
+      watchConfigFile(resolved.root, resolved.path, file);
+    }
+    return raw;
+  });
+
   handle("confui:explainField", async (_event, root: unknown, file: unknown, field: unknown, githubUrl?: unknown, locale?: unknown, documentIndex?: unknown) => {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     assertString(file, "配置文件路径", MAX_CONFIG_PATH_CHARS);
@@ -445,7 +457,7 @@ function registerIpcHandlers(): void {
   handle("confui:saveConfig", async (_event, root: unknown, preview: unknown) => {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     if (!isSavePreview(preview)) throw new ConfuiError("INVALID_INPUT", "保存预览无效");
-    const absolutePath = (await resolveExistingProjectPath(root, preview.file)).path;
+    const absolutePath = (await resolveRegularProjectFile(root, preview.file)).path;
     return runWithSuppressedChange(absolutePath, () =>
       commitSave(root, preview, {
         resolveSnapshotText: async (projectRoot, file, snapshotId, expectedSha256) =>
@@ -470,7 +482,7 @@ function registerIpcHandlers(): void {
   handle("confui:restoreBackup", async (_event, root: unknown, preview: unknown) => {
     assertString(root, "项目路径", MAX_PROJECT_PATH_CHARS);
     if (!isRestoreBackupPreview(preview)) throw new ConfuiError("INVALID_INPUT", "备份恢复预览无效");
-    const absolutePath = (await resolveExistingProjectPath(root, preview.file)).path;
+    const absolutePath = (await resolveRegularProjectFile(root, preview.file)).path;
     return runWithSuppressedChange(absolutePath, () => commitRestoreBackup(root, preview));
   });
 
@@ -532,7 +544,7 @@ function registerIpcHandlers(): void {
     const paths = secretPaths === undefined ? [] : parseOptionalSecretPaths(secretPaths);
     const exportOptions = parseOptionalRedactedExportOptions(options);
     const settings = await settingsStore.load();
-    const resolved = await resolveExistingProjectPath(root, file);
+    const resolved = await resolveRegularProjectFile(root, file);
     const preview = await generateRedactedExport(root, file, paths, {
       ...exportOptions,
       enableSchemaStore: settings.schemaStore.enabled,

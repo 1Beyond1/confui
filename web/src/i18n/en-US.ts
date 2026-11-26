@@ -103,6 +103,7 @@ export const enUS: TranslationDict = {
 
   // Editor empty & load errors
   "editor.loadErrorTitle": "Unable to open this config file",
+  "editor.viewRawSource": "View Raw Source",
   "editor.emptySelectTitle": "Select a configuration file",
   "editor.emptyNoneTitle": "No configuration files found",
   "editor.emptySelectDesc": "Confui combines Schema, examples, README, and structure heuristics to generate an editable form.",
@@ -255,6 +256,7 @@ export const enUS: TranslationDict = {
 
   // Raw viewer
   "raw.notice": "Raw view is for checking formatting and comments. Switch back to Form for safe edits.",
+  "raw.parseErrorNotice": "Syntax parse failed — opened in read-only Raw view (secrets masked by default): {error}",
   "raw.meta": "{format} · {lines} lines · Read-only",
   "raw.searchPlaceholder": "Find in file",
   "raw.clearSearch": "Clear search",

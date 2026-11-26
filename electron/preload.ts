@@ -23,6 +23,8 @@ const api: ConfuiAPI = {
   scanProject: (root: string, githubUrl?: string) => ipcRenderer.invoke("confui:scanProject", root, githubUrl),
   inferSchema: (root: string, file: string, options?: InferOptions) =>
     ipcRenderer.invoke("confui:inferSchema", root, file, options),
+  readRawFile: (root: string, file: string) =>
+    ipcRenderer.invoke("confui:readRawFile", root, file),
   explainField: (root: string, file: string, field: FieldAssistField, githubUrl?: string, locale?: Locale, documentIndex?: number) =>
     ipcRenderer.invoke("confui:explainField", root, file, field, githubUrl, locale, documentIndex),
   previewSave: (root: string, file: string, changes: ConfigChange[], expectedVersion: FileVersion, documentIndex?: number) =>

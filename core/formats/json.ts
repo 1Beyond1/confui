@@ -15,10 +15,24 @@ export function parseJsonc(source: string): unknown {
   const value = parse(source, errors, { allowTrailingComma: true, disallowComments: false });
   if (errors.length) {
     const first = errors[0]!;
-    throw new Error(`${printParseErrorCode(first.error)} @ ${first.offset}`);
+    const { line, column } = offsetToLineColumn(source, first.offset);
+    throw new Error(`${printParseErrorCode(first.error)} at line ${line}, column ${column} (offset ${first.offset})`);
   }
   assertNoDuplicateJsonKeys(source);
   return value;
+}
+
+function offsetToLineColumn(source: string, offset: number): { line: number; column: number } {
+  const bound = Math.min(Math.max(0, offset), source.length);
+  let line = 1;
+  let lineStart = 0;
+  for (let i = 0; i < bound; i += 1) {
+    if (source.charCodeAt(i) === 10) {
+      line += 1;
+      lineStart = i + 1;
+    }
+  }
+  return { line, column: bound - lineStart + 1 };
 }
 
 export function stringifyJsonc(value: unknown, originalText = ""): string {
@@ -37,16 +51,16 @@ export function updateJsonc(originalText: string, changes: readonly ConfigChange
 
 function assertNoDuplicateJsonKeys(text: string): void {
   const seen = new Set<string>();
-  let duplicate: PathSegment[] | undefined;
+  let duplicate: { path: PathSegment[]; line: number } | undefined;
   visit(text, {
-    onObjectProperty(property, _offset, _length, _line, _character, pathSupplier) {
+    onObjectProperty(property, _offset, _length, startLine, _character, pathSupplier) {
       const path = [...pathSupplier(), property] as PathSegment[];
       const id = JSON.stringify(path);
-      if (seen.has(id)) duplicate ??= path;
+      if (seen.has(id)) duplicate ??= { path, line: startLine + 1 };
       else seen.add(id);
     },
   }, { allowTrailingComma: true, disallowComments: false });
-  if (duplicate) throw new Error(`存在重复的 JSON 键：${formatPath(duplicate)}`);
+  if (duplicate) throw new Error(`存在重复的 JSON 键：${formatPath(duplicate.path)}（第 ${duplicate.line} 行）`);
 }
 
 function detectFormattingOptions(text: string): FormattingOptions {

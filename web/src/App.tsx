@@ -21,6 +21,7 @@ import type {
   ScopedSecretPath,
   ThemePreference,
 } from "../../shared/schema.ts";
+import { maskDocumentLines } from "../../shared/diff.ts";
 import { normalizeGithubUrl } from "../../shared/validation.ts";
 import { AddKeyModal } from "./components/AddKeyModal.tsx";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette.tsx";
@@ -70,7 +71,7 @@ type EditorTab = "form" | "raw";
 type BusyState = "scan" | "infer" | "preview" | "save" | "restore" | null;
 type ToastType = "success" | "error" | "info";
 type PendingAction =
-  | { kind: "file"; file: ConfigFile; focusFieldPath?: string; focusFieldSegments?: PathSegment[]; focusLine?: number; openRaw?: boolean; documentIndex?: number }
+  | { kind: "file"; file: ConfigFile; rootOverride?: string; focusFieldPath?: string; focusFieldSegments?: PathSegment[]; focusLine?: number; openRaw?: boolean; documentIndex?: number }
   | { kind: "yaml-doc"; documentIndex: number }
   | { kind: "home" }
   | { kind: "settings" }
@@ -449,7 +450,40 @@ export function App() {
         locale: targetLocale,
         documentIndex: focusTarget?.documentIndex,
       });
-      if (!result.ok) throw new Error(result.error.detail || result.error.message);
+      if (!result.ok) {
+        if (result.error.code === "PARSE_ERROR") {
+          const rawResult = await window.confui.readRawFile(root, file.path);
+          if (sequence !== openSequence.current) return;
+          if (rawResult.ok) {
+            const parseErrorText = result.error.detail || result.error.message;
+            const degradedSchema: ConfigFormSchema = {
+              file: rawResult.data.file,
+              kind: rawResult.data.kind,
+              format: rawResult.data.format,
+              fields: [],
+              sources: [],
+              writable: false,
+              warnings: [parseErrorText],
+              exampleFiles: [],
+              version: rawResult.data.version,
+              rawText: rawResult.data.rawText,
+              parseError: parseErrorText,
+            };
+            setActiveFile(file);
+            setSchema(degradedSchema);
+            setEditorTab("raw");
+            history.reset({ values: {}, customFields: [] });
+            setExternalChange(false);
+            void refreshBackupStatus(root, file.path, sequence);
+            const targetLine = focusTarget?.focusLine ?? extractLineFromParseError(parseErrorText);
+            if (targetLine) {
+              setFocusLineRequest({ file: degradedSchema.file, line: targetLine, token: nextFocusToken() });
+            }
+            return;
+          }
+        }
+        throw new Error(result.error.detail || result.error.message);
+      }
       if (sequence !== openSequence.current) return;
       setActiveFile(file);
       setSchema(result.data);
@@ -560,7 +594,7 @@ export function App() {
     }
     switch (action.kind) {
       case "file":
-        await loadFile(action.file, project?.root, githubInput, locale, {
+        await loadFile(action.file, action.rootOverride ?? project?.root, githubInput, locale, {
           focusFieldPath: action.focusFieldPath,
           focusFieldSegments: action.focusFieldSegments,
           focusLine: action.focusLine,
@@ -916,10 +950,23 @@ export function App() {
     });
   }
 
-  function handleSelectDiagnosticIssue(issue: ProjectDiagnosticIssue): void {
+  async function handleSelectDiagnosticIssue(issue: ProjectDiagnosticIssue): Promise<void> {
     setDiagnosticsOpen(false);
-    if (!project) return;
-    const targetFile = project.files.find((file) => file.path === issue.file);
+    if (!project || busy !== null) return;
+    const currentRoot = project.root;
+    let targetFile = project.files.find((file) => file.path === issue.file);
+    let resolvedRoot = currentRoot;
+    if (!targetFile) {
+      // Refresh project file index once when a newly added file reported by
+      // `diagnoseProject` is missing from the cached `project.files` list.
+      const scanned = await window.confui.scanProject(currentRoot, githubInput || undefined);
+      if (projectRef.current?.root !== currentRoot) return;
+      if (scanned.ok) {
+        setProject(scanned.data);
+        resolvedRoot = scanned.data.root;
+        targetFile = scanned.data.files.find((file) => file.path === issue.file);
+      }
+    }
     if (!targetFile) {
       notify(t("toast.fileUnopenable"), "error");
       return;
@@ -929,6 +976,7 @@ export function App() {
       {
         kind: "file",
         file: targetFile,
+        rootOverride: resolvedRoot,
         focusFieldPath: openRaw ? undefined : issue.path,
         focusFieldSegments: openRaw ? undefined : issue.segments,
         focusLine: issue.line,
@@ -965,14 +1013,14 @@ export function App() {
 
   function quickSwitchTheme(theme: ThemePreference): void {
     if (!settings) return;
-    void saveSettings({ ...settings, theme }).catch((err) => {
+    void saveSettings({ ...settings, theme, clearSecrets: undefined }).catch((err) => {
       notify(errorMessage(err, t("settings.toastSaveFailed")), "error");
     });
   }
 
   function quickSwitchLocale(nextLocale: Locale): void {
     if (!settings) return;
-    void saveSettings({ ...settings, locale: nextLocale }).catch((err) => {
+    void saveSettings({ ...settings, locale: nextLocale, clearSecrets: undefined }).catch((err) => {
       notify(errorMessage(err, t("settings.toastSaveFailed")), "error");
     });
   }
@@ -1013,7 +1061,7 @@ export function App() {
         description: schema?.file,
         keywords: "export redact mask share template 导出 脱敏",
         icon: "download",
-        disabled: !(view === "editor" && schema),
+        disabled: !(view === "editor" && schema && !schema.parseError),
         run: () => setExportOpen(true),
       },
       {
@@ -1031,7 +1079,7 @@ export function App() {
         description: schema?.file,
         keywords: "snapshot history rollback backup restore diff 快照 历史 回滚",
         icon: "archive",
-        disabled: !(view === "editor" && schema),
+        disabled: !(view === "editor" && schema && !schema.parseError),
         run: () => setSnapshotsOpen(true),
       },
       {
@@ -1040,7 +1088,7 @@ export function App() {
         description: schema?.file,
         keywords: "add key field new 新增 字段",
         icon: "plus",
-        disabled: !(view === "editor" && schema),
+        disabled: !(view === "editor" && schema && !schema.parseError),
         run: () => setAddKeyOpen(true),
       },
       {
@@ -1317,7 +1365,22 @@ export function App() {
             )}
 
             {view === "editor" && schema && editorTab === "form" && (
-              <div id="editor-panel-form" class="editor-page page-wide" role="tabpanel" aria-labelledby="editor-tab-form">
+              schema.parseError ? (
+                <div id="editor-panel-form" class="editor-load-error" role="alert">
+                  <span class="editor-load-error__icon"><Icon name="warning"/></span>
+                  <h1>{t("editor.loadErrorTitle")}</h1>
+                  <p>{sanitizeUiParseError(schema.parseError, schema.format)}</p>
+                  <div class="editor-load-error__actions">
+                    <Button variant="primary" icon="code" onClick={() => selectEditorTab("raw")}>
+                      {t("editor.viewRawSource")}
+                    </Button>
+                    <Button icon="refresh" onClick={() => activeFile && void loadFile(activeFile)}>
+                      {t("common.retry")}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div id="editor-panel-form" class="editor-page page-wide" role="tabpanel" aria-labelledby="editor-tab-form">
                 <EditorSummary
                   schema={schema}
                   fieldCount={allFields.length}
@@ -1371,7 +1434,8 @@ export function App() {
                   </div>
                 )}
                 <div class="editor-bottom-space"/>
-              </div>
+                </div>
+              )
             )}
 
             {view === "editor" && schema && editorTab === "raw" && (
@@ -1496,7 +1560,7 @@ export function App() {
             projectRoot={project.root}
             projectName={project.name}
             onClose={() => setDiagnosticsOpen(false)}
-            onSelectIssue={handleSelectDiagnosticIssue}
+            onSelectIssue={(issue) => void handleSelectDiagnosticIssue(issue)}
           />
         )}
 
@@ -1550,4 +1614,26 @@ export function App() {
       </div>
     </I18nProvider>
   );
+}
+
+function extractLineFromParseError(detail: string): number | undefined {
+  const explicit = detail.match(/\bline\s+(\d+)\b/i) ?? detail.match(/第\s*(\d+)\s*行/);
+  if (explicit?.[1]) {
+    const line = Number.parseInt(explicit[1], 10);
+    if (Number.isSafeInteger(line) && line >= 1) return line;
+  }
+  const tomlCaret = detail.match(/^[ \t]*(\d+):[^\r\n]*\r?\n[ \t]*\^/m);
+  if (tomlCaret?.[1]) {
+    const line = Number.parseInt(tomlCaret[1], 10);
+    if (Number.isSafeInteger(line) && line >= 1) return line;
+  }
+  return undefined;
+}
+
+function sanitizeUiParseError(detail: string, format: ConfigFormat): string {
+  const firstLine = detail
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) ?? detail;
+  return maskDocumentLines(firstLine, { format }).lines.join(" ");
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { AppInfo, AppSettings, Locale, ThemePreference, UpdateCheckResult } from "../../shared/schema.ts";
-import { canReuseStoredAiApiKey } from "../../shared/validation.ts";
+import { canReuseStoredAiApiKey, isAiEndpointUnchanged } from "../../shared/validation.ts";
 import { translate, useI18n } from "./i18n/index.tsx";
 import { Icon } from "./icons.tsx";
 import { Button } from "./ui.tsx";
@@ -76,18 +76,24 @@ export function SettingsPage({
   const aiErrors = useMemo(() => validateAiDraft(draft.ai, locale), [draft.ai, locale]);
   const locked = settings.lockedSecrets;
   const apiKeyOriginMatches = canReuseStoredAiApiKey(settings.ai, draft.ai);
+  const apiKeyPreservedOnSave = apiKeyOriginMatches || isAiEndpointUnchanged(settings.ai, draft.ai);
   const apiKeyOriginChanged = Boolean(
     (settings.secrets?.hasApiKey || locked?.apiKey)
-    && !apiKeyOriginMatches,
+    && !apiKeyPreservedOnSave,
   );
   const hasStoredApiKey = Boolean(
     settings.secrets?.hasApiKey
     && apiKeyOriginMatches
     && !clearApiKey,
   );
+  const hasPreservedStoredApiKey = Boolean(
+    settings.secrets?.hasApiKey
+    && apiKeyPreservedOnSave
+    && !clearApiKey,
+  );
   const canClearStoredApiKey = Boolean(
     (settings.secrets?.hasApiKey || locked?.apiKey)
-    && apiKeyOriginMatches
+    && apiKeyPreservedOnSave
     && !draft.ai.apiKey,
   );
   const hasStoredGithubToken = Boolean(settings.secrets?.hasGithubToken && !clearGithubToken);
@@ -106,7 +112,10 @@ export function SettingsPage({
     if (patch.apiKey) setClearApiKey(false);
     setDraft((current) => {
       const nextAi = { ...current.ai, ...patch };
-      if ((patch.baseUrl !== undefined || patch.provider !== undefined) && !canReuseStoredAiApiKey(settings.ai, nextAi)) {
+      if (
+        (patch.baseUrl !== undefined || patch.provider !== undefined)
+        && !(canReuseStoredAiApiKey(settings.ai, nextAi) || isAiEndpointUnchanged(settings.ai, nextAi))
+      ) {
         setClearApiKey(false);
       }
       return { ...current, ai: nextAi };
@@ -286,7 +295,7 @@ export function SettingsPage({
                     ? t("settings.apiKeyClearPlaceholder")
                     : apiKeyOriginChanged
                       ? t("settings.apiKeyReenterPlaceholder")
-                      : hasStoredApiKey
+                      : hasPreservedStoredApiKey
                         ? t("settings.apiKeyStoredPlaceholder", { hint: settings.secrets?.apiKeyHint ?? "••••" })
                         : t("settings.apiKeyLocalPlaceholder")}
                   onInput={(event) => setAi({ apiKey: event.currentTarget.value })}
@@ -314,7 +323,7 @@ export function SettingsPage({
                   ? <small class="secure-note secure-note--locked"><Icon name="warning" size={14}/>{t("settings.apiKeyOriginChanged")}</small>
                   : locked?.apiKey
                     ? <small class="secure-note secure-note--locked"><Icon name="shield" size={14}/>{t("settings.apiKeyLocked")}</small>
-                    : hasStoredApiKey
+                    : hasPreservedStoredApiKey
                       ? <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyStored", { hint: settings.secrets?.apiKeyHint ?? "••••" })}</small>
                       : <small class="secure-note"><Icon name="shield" size={14}/>{t("settings.apiKeyDefaultNote")}</small>}
             </div>

@@ -101,6 +101,7 @@ export const zhCN = {
 
   // Editor empty & load errors
   "editor.loadErrorTitle": "这个配置文件暂时打不开",
+  "editor.viewRawSource": "查看原始内容",
   "editor.emptySelectTitle": "选择一个配置文件",
   "editor.emptyNoneTitle": "没有发现配置文件",
   "editor.emptySelectDesc": "Confui 会组合 Schema、示例、README 与结构推断，生成可编辑表单。",
@@ -253,6 +254,7 @@ export const zhCN = {
 
   // Raw viewer
   "raw.notice": "原始内容用于核对格式和注释；请回到表单进行安全修改。",
+  "raw.parseErrorNotice": "语法解析失败，已切换为只读原始内容视图（敏感值默认遮罩）：{error}",
   "raw.meta": "{format} · {lines} 行 · 只读",
   "raw.searchPlaceholder": "页内搜索关键词",
   "raw.clearSearch": "清空搜索",
