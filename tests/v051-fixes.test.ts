@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -452,7 +452,7 @@ describe("v0.5.1 P1 fixes & P2 closure regressions", () => {
 
     // Regular file inside project still resolves & operates normally, and was never mutated
     const resolvedReal = await resolveRegularProjectFile(root, "real-dir/config.json");
-    expect(resolvedReal.path.toLowerCase()).toBe(realFile.toLowerCase());
+    expect(resolvedReal.path.toLowerCase()).toBe((await realpath(realFile)).toLowerCase());
     expect(await readFile(realFile, "utf8")).toBe(realContent);
   });
 
